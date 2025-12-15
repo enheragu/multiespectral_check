@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
 )
 
 from services.progress_tracker import ProgressSnapshot
+from widgets import style
 
 
 class ProgressPanel(QWidget):
@@ -30,18 +31,21 @@ class ProgressPanel(QWidget):
 
     def _build_ui(self) -> None:
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(12, 0, 0, 0)
         layout.setSpacing(8)
         self.progress_bar = QProgressBar(self)
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setMinimumWidth(260)
-        self.progress_bar.setMaximumHeight(18)
+        self.progress_bar.setFixedHeight(style.BUTTON_HEIGHT)
         self.progress_bar.setSizePolicy(
             QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         )
         layout.addWidget(self.progress_bar)
         self.cancel_button = QPushButton("Cancel", self)
         self.cancel_button.setVisible(False)
+        self.cancel_button.setFixedHeight(style.BUTTON_HEIGHT)
+        self.cancel_button.setObjectName("progress_cancel_button")
+        self.cancel_button.setStyleSheet(style.scoped_button_style(self.cancel_button.objectName()))
         self.cancel_button.setSizePolicy(
             QSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         )

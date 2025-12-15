@@ -133,13 +133,13 @@ class Ui_MainWindow(object):
         self.btn_layout.addItem(spacer)
         
         self.btn_prev = QtWidgets.QPushButton(self.centralwidget)
-        self.btn_prev.setText("◀ Previous")
+        self.btn_prev.setText("◀  Previous")
         self.btn_prev.setEnabled(False)
         self.btn_prev.setObjectName("btn_prev")
         self.btn_layout.addWidget(self.btn_prev)
         
         self.btn_next = QtWidgets.QPushButton(self.centralwidget)
-        self.btn_next.setText("Next ▶")
+        self.btn_next.setText("Next  ▶")
         self.btn_next.setEnabled(False)
         self.btn_next.setObjectName("btn_next")
         self.btn_layout.addWidget(self.btn_next)

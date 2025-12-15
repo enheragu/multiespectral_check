@@ -96,9 +96,11 @@ class CalibrationOutliersDialog(QDialog):
         buttons_layout = QHBoxLayout()
         if self._refresh_callback is not None:
             self.refresh_btn = QPushButton("Refresh calibration")
+            self.refresh_btn.setFixedHeight(style.BUTTON_HEIGHT)
             self.refresh_btn.clicked.connect(self._handle_refresh)
             buttons_layout.addWidget(self.refresh_btn)
         self.auto_btn = QPushButton("Auto-outliers")
+        self.auto_btn.setFixedHeight(style.BUTTON_HEIGHT)
         self.auto_btn.clicked.connect(self.apply_auto_outliers)
         buttons_layout.addWidget(self.auto_btn)
         buttons_layout.addStretch(1)

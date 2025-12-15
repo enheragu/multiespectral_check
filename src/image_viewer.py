@@ -105,6 +105,14 @@ class ImageViewer(FilterWorkflowMixin, CalibrationWorkflowMixin, QMainWindow):
         self.ui.setupUi(self)
         if hasattr(self.ui, "centralwidget"):
             self.ui.centralwidget.setStyleSheet(f"background: {style.APP_BG};")
+        # Apply scoped styles so main navigation buttons render the same gradient as dialogs
+        for btn in (
+            getattr(self.ui, "btn_prev", None),
+            getattr(self.ui, "btn_next", None),
+            getattr(self.ui, "btn_delete_marked", None),
+        ):
+            if btn:
+                btn.setStyleSheet(style.scoped_button_style(btn.objectName()))
         self.progress_panel: Optional[ProgressPanel] = None
         self._setup_progress_panel()
 

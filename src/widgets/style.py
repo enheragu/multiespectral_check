@@ -20,7 +20,9 @@ BUTTON_BG = "#f9fafc"
 BUTTON_BG_HOVER = "#edf1f7"
 BUTTON_BORDER = GROUP_BORDER
 BUTTON_BORDER_STRONG = "#c5ced9"
-BUTTON_BG_GRADIENT = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #fdfefe, stop:1 #edf2f8)"
+BUTTON_BG_GRADIENT = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #fefefe, stop:1 #e1e6ef)"
+BUTTON_BG_DISABLED = BUTTON_BG_GRADIENT
+BUTTON_HEIGHT = 18
 SECTION_TITLE_STYLE = (
     f"font-size: 12.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.55px;"
     f" color: {TEXT_TITLE};"
@@ -64,6 +66,26 @@ def heading_style(size: float = HEADING_FONT_SIZE) -> str:
     """Shared heading style for panel titles."""
     return f"font-size: {size}px; {TITLE_STYLE_BASE}"
 
+def button_style() -> str:
+    """Inline style for QPushButton to guarantee consistent color/height."""
+    return (
+        f"color: {TEXT_PRIMARY}; background: {BUTTON_BG_GRADIENT};"
+        f" border: 1px solid {BUTTON_BORDER_STRONG}; border-radius: 6px; padding: 5px 10px;"
+        f" min-height: {BUTTON_HEIGHT}px; max-height: {BUTTON_HEIGHT}px; font-size: {BODY_FONT_SIZE};"
+    )
+
+
+def scoped_button_style(object_name: str) -> str:
+    """Per-button stylesheet including hover/pressed/disabled states."""
+    return (
+        f"#{object_name} {{ color: {TEXT_PRIMARY}; background: {BUTTON_BG_GRADIENT};"
+        f" border: 1px solid {BUTTON_BORDER_STRONG}; border-radius: 6px; padding: 5px 10px;"
+        f" min-height: {BUTTON_HEIGHT}px; max-height: {BUTTON_HEIGHT}px; font-size: {BODY_FONT_SIZE}; }}"
+        f"#{object_name}:hover {{ background: {BUTTON_BG_HOVER}; border-color: {TEXT_TITLE}; }}"
+        f"#{object_name}:pressed {{ background: #dfe6f1; border-color: {TEXT_PRIMARY}; }}"
+        f"#{object_name}:focus {{ outline: none; border-color: {TEXT_TITLE}; }}"
+        f"#{object_name}:disabled {{ color: {TEXT_PRIMARY}; background: {BUTTON_BG_DISABLED}; border-color: {BUTTON_BORDER_STRONG}; }}"
+    )
 
 def table_widget_style() -> str:
     return (
@@ -89,17 +111,17 @@ def app_stylesheet() -> str:
         f"QToolTip {{ color: {TEXT_PRIMARY}; background-color: {GROUP_BG}; border: 1px solid {GROUP_BORDER}; }}"
         f"QPushButton {{ color: {TEXT_PRIMARY}; background: {BUTTON_BG_GRADIENT};"
         f" border: 1px solid {BUTTON_BORDER_STRONG}; border-radius: 6px; padding: 5px 10px;"
-        f" min-height: 24px; font-size: {BODY_FONT_SIZE}; }}"
+        f" min-height: {BUTTON_HEIGHT}px; max-height: {BUTTON_HEIGHT}px; font-size: {BODY_FONT_SIZE}; }}"
         f"QPushButton:hover {{ background: {BUTTON_BG_HOVER}; border-color: {TEXT_TITLE}; }}"
         f"QPushButton:pressed {{ background: #dfe6f1; border-color: {TEXT_PRIMARY}; }}"
         f"QPushButton:focus {{ outline: none; border-color: {TEXT_TITLE}; }}"
-        f"QPushButton:disabled {{ color: #8d95a3; background: #f3f4f6; border-color: {BUTTON_BORDER}; }}"
+        f"QPushButton:disabled {{ color: #8d95a3; background: {BUTTON_BG_DISABLED}; border-color: {BUTTON_BORDER_STRONG}; }}"
         f"QDialogButtonBox QPushButton {{ color: {TEXT_PRIMARY}; background: {BUTTON_BG_GRADIENT};"
-        f" border: 1px solid {BUTTON_BORDER_STRONG}; border-radius: 6px; padding: 5px 10px; min-height: 24px;"
-        f" font-size: {BODY_FONT_SIZE}; }}"
+        f" border: 1px solid {BUTTON_BORDER_STRONG}; border-radius: 6px; padding: 5px 10px;"
+        f" min-height: {BUTTON_HEIGHT}px; max-height: {BUTTON_HEIGHT}px; font-size: {BODY_FONT_SIZE}; }}"
         f"QDialogButtonBox QPushButton:hover {{ background: {BUTTON_BG_HOVER}; border-color: {BUTTON_BORDER_STRONG}; }}"
         f"QDialogButtonBox QPushButton:pressed {{ background: #dfe6f1; border-color: {TEXT_PRIMARY}; }}"
-        f"QDialogButtonBox QPushButton:disabled {{ color: #8d95a3; background: #f3f4f6; border-color: {BUTTON_BORDER}; }}"
+        f"QDialogButtonBox QPushButton:disabled {{ color: #8d95a3; background: {BUTTON_BG_DISABLED}; border-color: {BUTTON_BORDER_STRONG}; }}"
         f"QLineEdit, QTextEdit, QPlainTextEdit {{ background: {CARD_BG}; color: {TEXT_PRIMARY};"
         f" border: 1px solid {GROUP_BORDER}; border-radius: 6px; padding: 6px; font-size: {BODY_FONT_SIZE};"
         f" selection-background-color: {TABLE_SELECT_BG}; selection-color: {TEXT_PRIMARY}; }}"

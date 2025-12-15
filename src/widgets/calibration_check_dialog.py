@@ -70,6 +70,7 @@ class CalibrationCheckDialog(QDialog):
 
         if self.results_path and self.results_path.exists():
             open_button = QPushButton("Open calibration file")
+            open_button.setFixedHeight(style.BUTTON_HEIGHT)
             open_button.clicked.connect(self._open_results_file)
             card_layout.addWidget(open_button, alignment=Qt.AlignmentFlag.AlignRight)
 
