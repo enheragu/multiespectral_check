@@ -1,3 +1,5 @@
+"""Background cache persistence helpers for dataset state and overlay cache."""
+
 from __future__ import annotations
 
 from PyQt6.QtCore import QObject, QRunnable, pyqtSignal

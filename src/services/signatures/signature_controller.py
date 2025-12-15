@@ -1,3 +1,5 @@
+"""Runs duplicate-signature jobs in the thread pool and emits progress signals."""
+
 from __future__ import annotations
 
 from threading import Event

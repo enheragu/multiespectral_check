@@ -28,7 +28,25 @@ HELP_MENU_SECTIONS: Sequence[Tuple[str, Sequence[Tuple[str, str]]]] = [
         [
             ("Toggle rectified view", "Render images using the calibrated undistortion matrices."),
             ("Toggle grid/overlays", "Show framing guides, duplicate reasons, and calibration highlights."),
+            ("Show labels", "Draw YOLO label boxes on visible/LWIR views when label files exist."),
             ("Calibration filters", "Focus on tagged images that match a calibration status."),
+        ],
+    ),
+    (
+        "Labelling",
+        [
+            ("Configure model…", "Select the YOLO model file to use for automatic labelling."),
+            (
+                "Configure labels YAML…",
+                "Load a labels YAML (e.g., COCO); it is copied to labels/labels.yaml so the dataset remembers class ids/names.",
+            ),
+            ("Run labelling on current", "Run the model on the displayed pair for the active channel."),
+            ("Run labelling on dataset…", "Batch-run the model across all images for the active channel."),
+            ("Clear labels for current", "Delete saved label TXT files for the current pair."),
+            (
+                "Manual labelling mode",
+                "Click two corners (rubber band) to draw a box; pick a class via id:name autocomplete; right-click a box to delete it; Esc cancels the selection.",
+            ),
         ],
     ),
     (
@@ -52,6 +70,7 @@ HELP_SHORTCUTS: Sequence[Tuple[str, str]] = [
     ("Ctrl+Shift+C", "Toggle calibration candidate for the current pair"),
     ("Ctrl+H", "Open the help dialog"),
     ("Delete", "Toggle the manual delete mark"),
+    ("Esc", "Cancel a manual label selection in progress"),
     ("Ctrl+Shift+D / B / M / S", "Assign duplicate, blurry, motion, or sync reasons"),
     ("Ctrl+Shift+R", "Re-run calibration detection for the current tagged pair"),
     ("Dataset → Run duplicate sweep", "Queue the background duplicate scanner"),

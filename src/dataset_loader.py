@@ -1,3 +1,8 @@
+"""Filesystem loader for dataset images, metadata, and trash operations.
+
+Discovers LWIR/visible pairs, caches metadata, and handles moving or restoring files.
+"""
+
 import logging
 from datetime import datetime
 from pathlib import Path

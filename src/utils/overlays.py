@@ -1,7 +1,7 @@
 """Helpers to paint grids, overlays, and labels on rendered pixmaps."""
 from __future__ import annotations
 
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Sequence
 
 from PyQt6.QtCore import Qt, QRectF, QPointF
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
@@ -40,6 +40,49 @@ def draw_overlay_labels(
         x = width - margin - text_width
         y = margin + line_height * (idx + 1)
         painter.drawText(x, y, text)
+
+
+def draw_label_boxes(
+    painter: QPainter,
+    width: int,
+    height: int,
+    boxes: Sequence[Tuple[str, float, float, float, float, QColor]],
+) -> None:
+    """Draw YOLO-format boxes (normalized) with class text on top."""
+    if not boxes:
+        return
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    for cls_name, x_c, y_c, w_norm, h_norm, color in boxes:
+        pen_width = max(2, int(max(width, height) / 200))
+        inset = pen_width / 2.0
+        pen = QPen(color)
+        pen.setWidth(pen_width)
+        painter.setPen(pen)
+        abs_w = max(1.0, w_norm * width)
+        abs_h = max(1.0, h_norm * height)
+        abs_x = x_c * width - abs_w / 2.0
+        abs_y = y_c * height - abs_h / 2.0
+        rect = QRectF(abs_x + inset, abs_y + inset, abs_w - pen_width, abs_h - pen_width)
+        painter.drawRect(rect)
+
+        # Draw class label above the box
+        font = QFont(painter.font())
+        font.setPointSize(max(12, int(max(width, height) / 50)))
+        painter.setFont(font)
+        painter.setPen(QColor(color))
+        metrics = painter.fontMetrics()
+        text = cls_name or "?"
+        text_w = metrics.horizontalAdvance(text)
+        text_h = metrics.height()
+        text_x = abs_x + inset
+        text_y = max(inset + text_h, abs_y + inset + text_h)
+        bg_x = int(round(text_x - 2))
+        bg_y = int(round(text_y - text_h))
+        bg_w = int(round(text_w + 4))
+        bg_h = int(round(text_h))
+        painter.fillRect(bg_x, bg_y, bg_w, bg_h, QColor(0, 0, 0, 160))
+        painter.setPen(QColor("white"))
+        painter.drawText(int(round(text_x)), int(round(text_y - metrics.descent() // 2)), text)
 
 
 def draw_reason_overlay(

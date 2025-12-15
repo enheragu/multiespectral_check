@@ -1,3 +1,5 @@
+"""Schedules and manages calibration detection jobs across the dataset."""
+
 from __future__ import annotations
 
 from collections import deque

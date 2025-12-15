@@ -1,3 +1,5 @@
+"""Builds calibration debug artifacts and readable status summaries."""
+
 from __future__ import annotations
 
 from pathlib import Path

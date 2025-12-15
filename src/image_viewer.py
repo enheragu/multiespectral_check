@@ -1,30 +1,45 @@
-from collections import OrderedDict, deque
-from pathlib import Path
-from dataclasses import dataclass
-from typing import Any, Callable, Deque, Dict, List, Optional, Set, Tuple
+"""Main Qt window for browsing multispectral datasets while orchestrating overlays, calibration,
+label workflows, duplicate scans, and cache management.
 
-from PyQt6.QtWidgets import QFileDialog, QMainWindow, QMessageBox, QMenu, QDialog
+Routes user actions into background services and keeps UI state, progress, and dataset sessions in sync.
+"""
+
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from PyQt6.QtWidgets import QFileDialog, QMainWindow, QMessageBox, QDialog, QInputDialog, QComboBox, QMenu
 from PyQt6.QtGui import (
     QAction,
     QActionGroup,
     QColor,
     QKeySequence,
-    QPainter,
     QPixmap,
     QShortcut,
 )
 from PyQt6.QtCore import Qt, QTimer, QPoint, QThreadPool, QEventLoop
 
 from ui_mainwindow import Ui_MainWindow
-from services.calibration_debugger import CalibrationDebugger
-from services.calibration_controller import CalibrationController
-from services.calibration_mixin import CalibrationWorkflowMixin
-from services.calibration_extrinsic_solver import CalibrationExtrinsicSolver
-from services.calibration_refiner import CalibrationRefiner
-from services.calibration_solver import CALIBRATION_RESULTS_FILENAME, CalibrationSolver
+from services import (
+    CALIBRATION_RESULTS_FILENAME,
+    CalibrationController,
+    CalibrationDebugger,
+    CalibrationExtrinsicSolver,
+    CalibrationRefiner,
+    CalibrationSolver,
+    CalibrationWorkflowMixin,
+    CancelController,
+    DeferredCalibrationQueue,
+    LabelWorkflow,
+    OverlayPrefetcher,
+    OverlayWorkflow,
+    ProgressQueueManager,
+    SignatureController,
+    SignatureScanManager,
+    UiStateHelper,
+    build_controller,
+)
 from services.cache_writer import CacheFlushNotifier, CacheFlushRunnable, write_cache_payload
 from services.dataset_actions import DatasetActions
-from services.signature_controller import SignatureController
 from services.dataset_session import DatasetSession
 from services.cache_service import CachePersistPayload
 from services.progress_tracker import ProgressTracker
@@ -40,33 +55,19 @@ from services.filter_modes import (
     FILTER_STATUS_TITLES,
 )
 from services.filter_workflow_mixin import FilterWorkflowMixin
-from services.lru_index import LRUIndex
-from utils.reasons import (
-    REASON_CHOICES,
-    REASON_KEY_MAP,
-    REASON_SHORTCUTS,
-    REASON_STYLES,
-    REASON_USER,
-)
-from utils.ui_messages import DELETE_BUTTON_TEXT, RESTORE_ACTION_TEXT, STATUS_NO_IMAGES
+from utils.reasons import REASON_KEY_MAP, REASON_SHORTCUTS
+from utils.ui_messages import STATUS_NO_IMAGES
 from widgets.zoom_pan import ZoomPanView
 from widgets.calibration_check_dialog import CalibrationCheckDialog
 from widgets.calibration_outliers_dialog import CalibrationOutliersDialog
 from widgets.help_dialog import HelpDialog
 from widgets.progress_panel import ProgressPanel
-from utils.overlays import (
-    draw_calibration_overlay,
-    draw_overlay_labels,
-    draw_reason_overlay,
-    paint_rule_of_thirds,
-)
 from widgets.stats_panel import StatsPanel
 from widgets import style
+from services.marking_controller import MarkingController
 
 
 DEFAULT_DATASET_DIR = str(Path.home() / "umh/ros2_ws" / "images_eeha")
-CALIBRATION_BORDER_COLOR = QColor("#00ffea")
-WARNING_LABEL_COLOR = QColor("#ffb347")
 CHESSBOARD_SIZE = (7, 7)
 CALIBRATION_PREFETCH_LIMIT = 6
 OVERLAY_PREFETCH_RADIUS = 2
@@ -92,12 +93,6 @@ CANCEL_ACTION_LABELS = {
 }
 
 
-@dataclass
-class OverlayCacheEntry:
-    signature: Tuple[Any, ...]
-    pixmap: QPixmap
-
-
 class ImageViewer(FilterWorkflowMixin, CalibrationWorkflowMixin, QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -121,8 +116,15 @@ class ImageViewer(FilterWorkflowMixin, CalibrationWorkflowMixin, QMainWindow):
         self.dataset_actions = DatasetActions(self, DEFAULT_DATASET_DIR)
 
         preferences = self.session.cache_service.get_preferences()
+        self._default_label_yaml_path = Path(__file__).resolve().parent.parent / "config" / "labels_coco.yaml"
         self.show_grid = bool(preferences.get("show_grid", True))
         self.view_rectified = bool(preferences.get("view_rectified", False))
+        self.show_labels = bool(preferences.get("show_labels", False))
+        self.label_model_path = preferences.get("label_model")
+        self.label_yaml_path = preferences.get("label_yaml") or (
+            str(self._default_label_yaml_path) if self._default_label_yaml_path.exists() else None
+        )
+        self.label_input_mode = preferences.get("label_input_mode", "visible")
         pref_mode = preferences.get("filter_mode")
         legacy_filter = preferences.get("filter_calibration_only", False)
         if isinstance(pref_mode, str) and pref_mode in FILTER_ACTION_NAMES:
@@ -137,16 +139,27 @@ class ImageViewer(FilterWorkflowMixin, CalibrationWorkflowMixin, QMainWindow):
         self._filter_actions: Dict[str, Any] = {}
         self._filter_group: Optional[QActionGroup] = None
         self.progress_tracker = ProgressTracker(self._handle_progress_snapshot)
-        self._cancel_handlers: "OrderedDict[str, Callable[[], None]]" = OrderedDict()
-        self._cancel_inflight: Set[str] = set()
+        self.cancel_controller = CancelController()
+        self.queue_manager = ProgressQueueManager(self.progress_tracker, self.cancel_controller)
         self._refine_total = 0
         self._refine_progress = 0
-        self._reset_queue_progress_state()
 
         self.thread_pool = QThreadPool.globalInstance()
         self.calibration_thread_pool = QThreadPool(self)
         self.calibration_thread_pool.setMaxThreadCount(max(1, CALIBRATION_DETECT_MAX_WORKERS))
         self.signature_controller = SignatureController(self.thread_pool)
+        self.signature_manager = SignatureScanManager(
+            parent=self,
+            session=self.session,
+            controller=self.signature_controller,
+            progress_tracker=self.progress_tracker,
+            cancel_controller=self.cancel_controller,
+            task_id=PROGRESS_TASK_SIGNATURES,
+            max_inflight=SIGNATURE_SCAN_MAX_INFLIGHT,
+            timer_interval_ms=SIGNATURE_SCAN_TIMER_INTERVAL_MS,
+            cancel_state_callback=self._update_cancel_button,
+        )
+        self._reset_queue_progress_state()
         self.cache_timer = QTimer(self)
         self.cache_timer.setInterval(2000)
         self.cache_timer.setSingleShot(True)
@@ -155,31 +168,54 @@ class ImageViewer(FilterWorkflowMixin, CalibrationWorkflowMixin, QMainWindow):
         self._cache_flush_notifier.finished.connect(self._handle_cache_flush_finished)
         self._cache_flush_inflight = False
         self._cache_flush_pending: Optional[CachePersistPayload] = None
-        self.overlay_prefetch_timer = QTimer(self)
-        self.overlay_prefetch_timer.setSingleShot(True)
-        self.overlay_prefetch_timer.timeout.connect(self._prefetch_neighbor_overlays)
-        self._calibration_mark_timer = QTimer(self)
-        self._calibration_mark_timer.setSingleShot(True)
-        self._calibration_mark_timer.timeout.connect(self._flush_pending_calibration_marks)
+        self.overlay_prefetcher = OverlayPrefetcher(
+            self,
+            OVERLAY_PREFETCH_RADIUS,
+            OVERLAY_PREFETCH_DELAY_MS,
+            self._ensure_overlay_cached,
+            lambda base: self.overlay_workflow.is_cached(base),
+        )
+        self.calibration_queue = DeferredCalibrationQueue(
+            parent=self,
+            interval_ms=200,
+            validator=lambda base: bool(self.session.loader and base in self.state.calibration_marked),
+            scheduler=lambda base, force: self._schedule_calibration_job(base, force=force, priority=True),
+        )
+
+        self.overlay_workflow = OverlayWorkflow(OVERLAY_CACHE_LIMIT)
 
         self.lwir_view = ZoomPanView(self)
         self.vis_view = ZoomPanView(self)
         self.stats_panel = StatsPanel()
+        self.ui_helper = UiStateHelper(self.ui, self.stats_panel, self.session, self.state)
+        self.marking_controller = MarkingController(
+            parent=self,
+            state=self.state,
+            dataset_actions=self.dataset_actions,
+            get_current_base=self._current_base,
+            has_images=self.session.has_images,
+            prev_image=self.prev_image,
+            next_image=self.next_image,
+            invalidate_overlay_cache=self.invalidate_overlay_cache,
+            load_image_pair=self.load_image_pair,
+            update_stats=self._update_stats_panel,
+            update_delete_button=self._update_delete_button,
+            mark_cache_dirty=self._mark_cache_dirty,
+            status_message=lambda msg, dur=4000: self.statusBar().showMessage(msg, dur),
+            schedule_calibration_job=lambda base, force=False: self._schedule_calibration_job(
+                base,
+                force=force,
+                priority=True,
+            ),
+            reconcile_filter_state=lambda: self._reconcile_filter_state(show_warning=True),
+            calibration_shortcut=CALIBRATION_TOGGLE_SHORTCUT,
+        )
 
         self._setup_calibration_outlier_action()
 
-        self._overlay_cache: Dict[str, Dict[str, OverlayCacheEntry]] = {}
-        self._overlay_cache_order = LRUIndex(OVERLAY_CACHE_LIMIT)
-        self._overlay_prefetch_queue: Deque[str] = deque()
-        self._signature_pending: Set[str] = set()
-        self._signature_completed: Set[str] = set()
-        self._signature_scan_queue: Deque[int] = deque()
-        self._signature_scan_force = False
-        self._signature_scan_timer = QTimer(self)
-        self._signature_scan_timer.setSingleShot(True)
-        self._signature_scan_timer.timeout.connect(self._drain_signature_scan_queue)
-        self._pending_calibration_marks: Set[str] = set()
-        self._pending_calibration_forces: Set[str] = set()
+        self.labeling_controller = None
+        self.label_workflow: Optional[LabelWorkflow] = None
+        self._manual_label_mode = False
 
         self.calibration_debugger = CalibrationDebugger(self.session, CHESSBOARD_SIZE)
         self.calibration_controller = CalibrationController(
@@ -213,9 +249,8 @@ class ImageViewer(FilterWorkflowMixin, CalibrationWorkflowMixin, QMainWindow):
         )
         self.calibration_extrinsic_solver.extrinsicSolved.connect(self._handle_extrinsic_solved)
         self.calibration_extrinsic_solver.extrinsicFailed.connect(self._handle_extrinsic_failed)
-        self.signature_controller.signatureReady.connect(self._handle_signature_ready)
-        self.signature_controller.signatureFailed.connect(self._handle_signature_failed)
-        self.signature_controller.activityChanged.connect(self._handle_signature_activity_changed)
+        self.signature_manager.signatureReady.connect(self._handle_signature_ready)
+        self.signature_manager.signatureFailed.connect(self._handle_signature_failed)
 
         self._setup_image_views()
         self._setup_stats_panel()
@@ -232,6 +267,8 @@ class ImageViewer(FilterWorkflowMixin, CalibrationWorkflowMixin, QMainWindow):
         toggles = [
             (getattr(self.ui, "action_toggle_grid", None), self.show_grid),
             (getattr(self.ui, "action_toggle_rectified", None), self.view_rectified),
+            (getattr(self.ui, "action_show_labels", None), self.show_labels),
+            (getattr(self.ui, "action_label_manual_mode", None), self._manual_label_mode),
         ]
         for action, state in toggles:
             if not action:
@@ -264,7 +301,7 @@ class ImageViewer(FilterWorkflowMixin, CalibrationWorkflowMixin, QMainWindow):
                 continue
             reason_shortcut = QShortcut(QKeySequence(sequence), self)
             reason_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
-            reason_shortcut.activated.connect(lambda r=reason: self._handle_reason_shortcut(r))
+            reason_shortcut.activated.connect(lambda r=reason: self.marking_controller.handle_reason_shortcut(r))
             self._shortcuts.append(reason_shortcut)
 
     def connect_signals(self) -> None:
@@ -292,6 +329,8 @@ class ImageViewer(FilterWorkflowMixin, CalibrationWorkflowMixin, QMainWindow):
             self.ui.action_toggle_rectified.toggled.connect(self._handle_rectified_toggle)
         if hasattr(self.ui, "action_toggle_grid"):
             self.ui.action_toggle_grid.toggled.connect(self._handle_grid_toggle)
+        if hasattr(self.ui, "action_show_labels"):
+            self.ui.action_show_labels.toggled.connect(self._handle_show_labels_toggle)
         if hasattr(self.ui, "action_calibration_debug"):
             self.ui.action_calibration_debug.triggered.connect(self.export_calibration_debug)
         if hasattr(self.ui, "action_run_calibration"):
@@ -306,6 +345,18 @@ class ImageViewer(FilterWorkflowMixin, CalibrationWorkflowMixin, QMainWindow):
             self.ui.action_calibration_check.triggered.connect(self._handle_show_calibration_dialog)
         if hasattr(self.ui, "action_calibration_outliers"):
             self.ui.action_calibration_outliers.triggered.connect(self._open_calibration_outlier_dialog)
+        if hasattr(self.ui, "action_label_config_model"):
+            self.ui.action_label_config_model.triggered.connect(self._handle_configure_label_model)
+        if hasattr(self.ui, "action_label_config_labels"):
+            self.ui.action_label_config_labels.triggered.connect(self._handle_configure_label_yaml)
+        if hasattr(self.ui, "action_label_current"):
+            self.ui.action_label_current.triggered.connect(self._handle_label_current)
+        if hasattr(self.ui, "action_label_dataset"):
+            self.ui.action_label_dataset.triggered.connect(self._handle_label_dataset)
+        if hasattr(self.ui, "action_label_clear_current"):
+            self.ui.action_label_clear_current.triggered.connect(self._handle_clear_labels_current)
+        if hasattr(self.ui, "action_label_manual_mode"):
+            self.ui.action_label_manual_mode.toggled.connect(self._handle_manual_label_mode_toggle)
         if hasattr(self.ui, "action_show_help"):
             self.ui.action_show_help.triggered.connect(self.show_help_dialog)
         if hasattr(self.ui, "action_exit"):
@@ -329,8 +380,22 @@ class ImageViewer(FilterWorkflowMixin, CalibrationWorkflowMixin, QMainWindow):
         old_vis.deleteLater()
         self.lwir_view.transformChanged.connect(self.vis_view.apply_external_transform)
         self.vis_view.transformChanged.connect(self.lwir_view.apply_external_transform)
-        self.lwir_view.contextRequested.connect(self._show_image_context_menu)
-        self.vis_view.contextRequested.connect(self._show_image_context_menu)
+        self.lwir_view.contextRequested.connect(self.marking_controller.show_context_menu)
+        self.vis_view.contextRequested.connect(self.marking_controller.show_context_menu)
+        self.lwir_view.labelBoxDefined.connect(
+            lambda l, t, r, b: self._handle_manual_box_defined("lwir", l, t, r, b)
+        )
+        self.vis_view.labelBoxDefined.connect(
+            lambda l, t, r, b: self._handle_manual_box_defined("visible", l, t, r, b)
+        )
+        self.lwir_view.labelSelectionCanceled.connect(lambda: self._handle_manual_selection_canceled("lwir"))
+        self.vis_view.labelSelectionCanceled.connect(lambda: self._handle_manual_selection_canceled("visible"))
+        self.lwir_view.labelDeleteRequested.connect(
+            lambda x, y, g: self._handle_manual_delete_request("lwir", x, y, g)
+        )
+        self.vis_view.labelDeleteRequested.connect(
+            lambda x, y, g: self._handle_manual_delete_request("visible", x, y, g)
+        )
 
     def _setup_progress_panel(self) -> None:
         placeholder = getattr(self.ui, "progress_placeholder", None)
@@ -411,14 +476,16 @@ class ImageViewer(FilterWorkflowMixin, CalibrationWorkflowMixin, QMainWindow):
             self.next_image()
             handled = True
         elif event.key() == Qt.Key.Key_Delete:
-            self.toggle_mark_current()
+            self.marking_controller.toggle_mark_current()
             handled = True
         elif event.key() == Qt.Key.Key_C and event.modifiers() == Qt.KeyboardModifier.NoModifier:
             self.toggle_calibration_current()
             handled = True
         elif event.key() in REASON_KEY_MAP and event.modifiers() == Qt.KeyboardModifier.NoModifier:
-            self._handle_reason_shortcut(REASON_KEY_MAP[event.key()])
+            self.marking_controller.handle_reason_shortcut(REASON_KEY_MAP[event.key()])
             handled = True
+        elif event.key() == Qt.Key.Key_Escape:
+            handled = self._cancel_manual_selection()
 
         if handled:
             event.accept()
@@ -435,74 +502,45 @@ class ImageViewer(FilterWorkflowMixin, CalibrationWorkflowMixin, QMainWindow):
         self.current_index = 0
         self.session.reset_state()
         self.calibration_controller.cancel_all()
-        self.signature_controller.cancel_all()
+        self.signature_manager.cancel_all()
         self.calibration_refiner.cancel()
         self.calibration_solver.cancel()
         self.calibration_extrinsic_solver.cancel()
-        self._bump_signature_epoch()
+        self.signature_manager.reset_epoch()
         self._reset_calibration_jobs()
-        self._cancel_signature_scan_jobs()
+        self.signature_manager.reset_progress()
         self._clear_pending_calibration_marks()
-        if self.overlay_prefetch_timer.isActive():
-            self.overlay_prefetch_timer.stop()
+        if self.label_workflow:
+            self.label_workflow.clear_cache()
+        self._manual_label_mode = False
+        self._update_labeling_views()
+        self._sync_action_states()
+        self.overlay_prefetcher.clear()
         self.invalidate_overlay_cache()
         self.progress_tracker.clear()
         self._reset_queue_progress_state()
-        self._cancel_handlers.clear()
-        self._cancel_inflight.clear()
+        self.cancel_controller.clear()
         self._update_cancel_button()
 
     def _prime_signature_scan(self, *, force: bool = False) -> None:
-        if not self.session.loader:
+        result = self.signature_manager.prime(force=force)
+        if result.status == "no-dataset":
             QMessageBox.information(self, "Duplicates", "Load a dataset before scanning for duplicates.")
             return
-        total = self.session.total_pairs()
-        if total <= 0:
+        if result.status == "no-images":
             self.statusBar().showMessage("No images available for duplicate scanning.", 4000)
             return
-        if force:
-            self._bump_signature_epoch()
-            self._cancel_signature_scan_jobs()
-        if force:
-            targets = list(range(total))
-        else:
-            targets = [
-                idx
-                for idx, base in enumerate(self.session.loader.image_bases)
-                if base and not self._has_cached_signatures(base)
-            ]
-        self._signature_scan_target = len(targets)
-        self._signature_progress_started = False
-        if not targets:
-            self._update_signature_progress()
+        if result.status == "cached":
             if force:
                 self.statusBar().showMessage("Duplicate signatures already cached.", 4000)
             return
-        self._signature_scan_queue.extend(targets)
-        self._signature_scan_force = force
-        self._update_signature_progress()
-        self._signature_scan_timer.start(0)
-        label = "Re-running duplicate sweep" if force else "Buscando duplicados"
-        self.statusBar().showMessage(
-            f"{label} en {total} imagen(es)…",
-            4000,
-        )
-
-    def _drain_signature_scan_queue(self) -> None:
-        if not self._signature_scan_queue:
-            self._update_signature_progress()
-            return
-        inflight = len(self._signature_pending)
-        available = max(0, SIGNATURE_SCAN_MAX_INFLIGHT - inflight)
-        scheduled = 0
-        while available > 0 and self._signature_scan_queue:
-            index = self._signature_scan_queue.popleft()
-            if self._schedule_signature_job(index, force=self._signature_scan_force):
-                available -= 1
-                scheduled += 1
-        self._update_signature_progress()
-        if self._signature_scan_queue and scheduled == 0:
-            self._signature_scan_timer.start(SIGNATURE_SCAN_TIMER_INTERVAL_MS)
+        if result.status == "queued":
+            label = "Re-running duplicate sweep" if force else "Buscando duplicados"
+            self.statusBar().showMessage(
+                f"{label} en {result.total} imagen(es)…",
+                4000,
+            )
+        self._update_cancel_button()
 
     def _handle_run_duplicate_scan_action(self) -> None:
         self._prime_signature_scan(force=True)
@@ -515,7 +553,14 @@ class ImageViewer(FilterWorkflowMixin, CalibrationWorkflowMixin, QMainWindow):
             self.lwir_view.set_placeholder("No images found in lwir/ or visible/")
             self.vis_view.set_placeholder("No images found in lwir/ or visible/")
             return
-        self._bump_signature_epoch()
+        prefs = self.session.cache_service.get_preferences()
+        self.label_workflow = LabelWorkflow(dir_path, self._default_label_yaml_path, prefs)
+        self.label_yaml_path = str(self.label_workflow.yaml_path) if self.label_workflow and self.label_workflow.yaml_path else None
+        if self.label_workflow:
+            self.label_workflow.ensure_controller()
+            self.labeling_controller = self.label_workflow.controller
+            self._on_class_map_updated()
+        self.signature_manager.reset_epoch()
         self._reset_calibration_jobs()
         self.progress_tracker.clear()
         self._reset_queue_progress_state()
@@ -544,7 +589,7 @@ class ImageViewer(FilterWorkflowMixin, CalibrationWorkflowMixin, QMainWindow):
         self._ensure_calibration_analysis(base)
         self.load_image_pair(base)
         self._update_stats_panel()
-        self._schedule_signature_job(self.current_index)
+        self.signature_manager.schedule_index(self.current_index)
 
     def update_status(self, base: str):
         total = self.session.total_pairs()
@@ -570,11 +615,14 @@ class ImageViewer(FilterWorkflowMixin, CalibrationWorkflowMixin, QMainWindow):
             self.vis_view.set_placeholder("Missing visible image")
         self._update_metadata_panel(base, "lwir", self.ui.text_metadata_lwir)
         self._update_metadata_panel(base, "visible", self.ui.text_metadata_vis)
-        if self.overlay_prefetch_timer.isActive():
-            self.overlay_prefetch_timer.stop()
-        self._prepare_overlay_prefetch_queue(base)
-        if self._overlay_prefetch_queue:
-            self.overlay_prefetch_timer.start(OVERLAY_PREFETCH_DELAY_MS)
+        total = self.session.total_pairs()
+        self.overlay_prefetcher.prepare(
+            current_index=self.current_index,
+            total_pairs=total,
+            current_base=base,
+            calibration_marked=self.state.calibration_marked,
+            get_base=self.session.get_base,
+        )
 
     def _render_overlayed_pair(self, base: str) -> Tuple[Optional[QPixmap], Optional[QPixmap]]:
         reason = self.state.marked_for_delete.get(base)
@@ -584,51 +632,45 @@ class ImageViewer(FilterWorkflowMixin, CalibrationWorkflowMixin, QMainWindow):
         warning_bucket = self.state.calibration_warnings.get(base, {})
         lwir_warning = warning_bucket.get("lwir") if isinstance(warning_bucket, dict) else None
         vis_warning = warning_bucket.get("visible") if isinstance(warning_bucket, dict) else None
-        lwir_signature = self._build_overlay_signature(
-            reason,
-            calibration_flag,
-            calib_results.get("lwir"),
-            calib_corners.get("lwir"),
-            lwir_warning,
-        )
-        vis_signature = self._build_overlay_signature(
-            reason,
-            calibration_flag,
-            calib_results.get("visible"),
-            calib_corners.get("visible"),
-            vis_warning,
-        )
-        cached_lwir = self._get_cached_overlay(base, "lwir", lwir_signature)
-        cached_vis = self._get_cached_overlay(base, "visible", vis_signature)
-        if cached_lwir is not None and cached_vis is not None:
-            return cached_lwir, cached_vis
+        label_boxes_lwir: List[Tuple[str, float, float, float, float, QColor]] = []
+        label_boxes_vis: List[Tuple[str, float, float, float, float, QColor]] = []
+        label_sig_lwir: Optional[Tuple[Any, ...]] = None
+        label_sig_vis: Optional[Tuple[Any, ...]] = None
+        if self.show_labels:
+            label_boxes_lwir = self._read_label_boxes(base, "lwir")
+            label_boxes_vis = self._read_label_boxes(base, "visible")
+            label_sig_lwir = self._label_signature(base, "lwir", label_boxes_lwir)
+            label_sig_vis = self._label_signature(base, "visible", label_boxes_vis)
+
         display_lwir, display_vis = self.session.prepare_display_pair(base, self.view_rectified)
-        if cached_lwir is None:
-            display_lwir = self._draw_overlays(
-                base,
-                "lwir",
-                display_lwir,
-                reason,
-                calibration_flag,
-                calib_results.get("lwir"),
-                calib_corners.get("lwir"),
-                signature=lwir_signature,
-            )
-        else:
-            display_lwir = cached_lwir
-        if cached_vis is None:
-            display_vis = self._draw_overlays(
-                base,
-                "visible",
-                display_vis,
-                reason,
-                calibration_flag,
-                calib_results.get("visible"),
-                calib_corners.get("visible"),
-                signature=vis_signature,
-            )
-        else:
-            display_vis = cached_vis
+        display_lwir = self.overlay_workflow.render(
+            base,
+            "lwir",
+            display_lwir,
+            view_rectified=self.view_rectified,
+            show_grid=self.show_grid,
+            reason=reason,
+            calibration=calibration_flag,
+            calibration_detected=calib_results.get("lwir"),
+            corner_points=calib_corners.get("lwir"),
+            warning_text=lwir_warning,
+            label_boxes=label_boxes_lwir,
+            label_sig=label_sig_lwir,
+        )
+        display_vis = self.overlay_workflow.render(
+            base,
+            "visible",
+            display_vis,
+            view_rectified=self.view_rectified,
+            show_grid=self.show_grid,
+            reason=reason,
+            calibration=calibration_flag,
+            calibration_detected=calib_results.get("visible"),
+            corner_points=calib_corners.get("visible"),
+            warning_text=vis_warning,
+            label_boxes=label_boxes_vis,
+            label_sig=label_sig_vis,
+        )
         return display_lwir, display_vis
 
     def _navigate(self, direction: int) -> bool:
@@ -663,227 +705,13 @@ class ImageViewer(FilterWorkflowMixin, CalibrationWorkflowMixin, QMainWindow):
             noun = FILTER_MESSAGE_LABELS.get(self.filter_mode, "filtered images")
             self.statusBar().showMessage(f"No more {noun}.", 3000)
 
-    def _draw_overlays(
-        self,
-        base: str,
-        channel: str,
-        pixmap: Optional[QPixmap],
-        reason: Optional[str],
-        calibration: bool,
-        calibration_detected: Optional[bool],
-        corner_points: Optional[List[Tuple[float, float]]] = None,
-        signature: Optional[Tuple[Any, ...]] = None,
-    ) -> Optional[QPixmap]:
-        if not pixmap or pixmap.isNull():
-            return None
-        warning_bucket = self.state.calibration_warnings.get(base, {})
-        warning_text = warning_bucket.get(channel) if isinstance(warning_bucket, dict) else None
-        if signature is None:
-            signature = self._build_overlay_signature(
-                reason,
-                calibration,
-                calibration_detected,
-                corner_points,
-                warning_text,
-            )
-        bucket = self._overlay_cache.setdefault(base, {})
-        entry = bucket.get(channel)
-        if entry and entry.signature == signature and entry.pixmap and not entry.pixmap.isNull():
-            return entry.pixmap
-        base_pix = pixmap.copy()
-        base_w, base_h = base_pix.width(), base_pix.height()
-        overlay_pen_width = max(2, int(max(base_w, base_h) / 200))
-        canvas = base_pix
-        painter = QPainter(canvas)
-        if self.show_grid:
-            paint_rule_of_thirds(painter, base_w, base_h)
-        label_entries = []
-        if reason:
-            style = REASON_STYLES.get(reason, {"color": QColor("red"), "text": reason})
-            draw_reason_overlay(painter, base_pix, style["color"], style["text"], overlay_pen_width)
-            label_entries.append((style["text"], style["color"]))
-        if calibration:
-            draw_calibration_overlay(painter, base_pix, CALIBRATION_BORDER_COLOR, max(3, overlay_pen_width + 1))
-            if warning_text:
-                status = "Chessboard discarded"
-            elif calibration_detected is not None:
-                status = "Chessboard detected" if calibration_detected else "Chessboard missing"
-            else:
-                status = "Calibration candidate"
-            label_entries.append((status, CALIBRATION_BORDER_COLOR))
-        if warning_text:
-            trimmed = warning_text if len(warning_text) <= 60 else f"{warning_text[:57]}…"
-            label_entries.append((f"Suspect corners: {trimmed}", WARNING_LABEL_COLOR))
-        if label_entries:
-            draw_overlay_labels(painter, canvas.width(), canvas.height(), label_entries)
-        if corner_points:
-            dot_color = WARNING_LABEL_COLOR if warning_text else CALIBRATION_BORDER_COLOR
-            painter.setPen(dot_color)
-            painter.setBrush(dot_color)
-            radius = max(3, overlay_pen_width)
-            for u, v in corner_points:
-                x = int(u * base_w)
-                y = int(v * base_h)
-                painter.drawEllipse(QPoint(x, y), radius, radius)
-        painter.end()
-        bucket[channel] = OverlayCacheEntry(signature, canvas)
-        self._track_overlay_cache_use(base)
-        return canvas
-
-    def _prefetch_neighbor_overlays(self) -> None:
-        if not self._overlay_prefetch_queue:
-            return
-        base = self._overlay_prefetch_queue.popleft()
-        self._ensure_overlay_cached(base)
-        if self._overlay_prefetch_queue:
-            self.overlay_prefetch_timer.start(OVERLAY_PREFETCH_DELAY_MS)
-
     def _ensure_overlay_cached(self, base: str) -> None:
         if not self.session.loader:
             return
         self._render_overlayed_pair(base)
 
-    def _prepare_overlay_prefetch_queue(self, current_base: Optional[str]) -> None:
-        self._overlay_prefetch_queue.clear()
-        if not current_base or not self.session.loader or not self.state.calibration_marked:
-            return
-        total = self.session.total_pairs()
-        if total <= 1:
-            return
-        seen = {current_base}
-        for delta in range(1, OVERLAY_PREFETCH_RADIUS + 1):
-            for offset in (-delta, delta):
-                idx = self.current_index + offset
-                if idx < 0 or idx >= total:
-                    continue
-                base = self.session.get_base(idx)
-                if (
-                    not base
-                    or base in seen
-                    or base not in self.state.calibration_marked
-                    or self._overlay_is_cached(base)
-                ):
-                    continue
-                self._overlay_prefetch_queue.append(base)
-                seen.add(base)
-
-    def _overlay_is_cached(self, base: str) -> bool:
-        bucket = self._overlay_cache.get(base)
-        if not bucket:
-            return False
-        for channel in ("lwir", "visible"):
-            entry = bucket.get(channel)
-            if not entry or not entry.pixmap or entry.pixmap.isNull():
-                return False
-        return True
-
-    def _track_overlay_cache_use(self, base: Optional[str]) -> None:
-        if not base:
-            return
-        evicted = self._overlay_cache_order.touch(base)
-        for key in evicted:
-            self._overlay_cache.pop(key, None)
-        self._enforce_overlay_cache_limit()
-
-    def _remove_overlay_cache_order(self, base: Optional[str]) -> None:
-        if not base:
-            return
-        self._overlay_cache_order.remove(base)
-
-    def _enforce_overlay_cache_limit(self) -> None:
-        while len(self._overlay_cache) > OVERLAY_CACHE_LIMIT:
-            evicted = self._overlay_cache_order.pop_oldest()
-            if evicted is None:
-                break
-            self._overlay_cache.pop(evicted, None)
-
     def _update_metadata_panel(self, base: str, type_dir: str, widget):
-        widget.clear()
-        widget.setPlainText(self.session.get_metadata_text(base, type_dir))
-
-    def _show_image_context_menu(self, global_pos: QPoint) -> None:
-        if not self.session.has_images():
-            return
-        base = self._current_base()
-        if not base:
-            return
-        menu = QMenu(self)
-        nav_prev = menu.addAction("Previous image")
-        nav_prev.setShortcut(QKeySequence("Left Arrow"))
-        nav_prev.setShortcutVisibleInContextMenu(True)
-        nav_next = menu.addAction("Next image")
-        nav_next.setShortcut(QKeySequence("Right Arrow"))
-        nav_next.setShortcutVisibleInContextMenu(True)
-        menu.addSeparator()
-        current_reason = self.state.marked_for_delete.get(base)
-        reason_actions = []
-        for reason, label in REASON_CHOICES:
-            action = menu.addAction(label)
-            action.setCheckable(True)
-            action.setChecked(current_reason == reason)
-            shortcut = REASON_SHORTCUTS.get(reason)
-            if shortcut:
-                action.setShortcut(QKeySequence(shortcut))
-                action.setShortcutVisibleInContextMenu(True)
-            reason_actions.append((action, reason))
-        menu.addSeparator()
-        calibration_action = menu.addAction("Mark as calibration candidate")
-        calibration_action.setShortcut(QKeySequence(CALIBRATION_TOGGLE_SHORTCUT))
-        calibration_action.setShortcutVisibleInContextMenu(True)
-        calibration_action.setCheckable(True)
-        calibration_action.setChecked(base in self.state.calibration_marked)
-        reanalyze_action = None
-        if base in self.state.calibration_marked:
-            reanalyze_action = menu.addAction("Re-run calibration detection")
-            reanalyze_action.setShortcut(QKeySequence("Ctrl+Shift+R"))
-            reanalyze_action.setShortcutVisibleInContextMenu(True)
-        chosen = menu.exec(global_pos)
-        if chosen is None:
-            return
-        if chosen is nav_prev:
-            self.prev_image()
-            return
-        if chosen is nav_next:
-            self.next_image()
-            return
-        for action, reason in reason_actions:
-            if chosen is action:
-                if action.isChecked():
-                    self._apply_mark_reason(base, reason)
-                else:
-                    self._apply_mark_reason(base, None)
-                return
-        if chosen is calibration_action:
-            if self.dataset_actions.set_calibration_mark(base, calibration_action.isChecked()):
-                self.invalidate_overlay_cache(base)
-                self.load_image_pair(base)
-                self._update_stats_panel()
-                self._mark_cache_dirty()
-                self._reconcile_filter_state(show_warning=True)
-            return
-        if reanalyze_action and chosen is reanalyze_action:
-            if self._schedule_calibration_job(base, force=True, priority=True):
-                self.statusBar().showMessage(f"Re-running calibration analysis for {base}", 4000)
-            return
-
-    def _apply_mark_reason(self, base: str, reason: Optional[str]) -> None:
-        if not self.state.set_mark_reason(base, reason, REASON_USER):
-            return
-        self.invalidate_overlay_cache(base)
-        self._update_delete_button()
-        self.load_image_pair(base)
-        self._update_stats_panel()
-        self._mark_cache_dirty()
-
-    def _handle_reason_shortcut(self, reason: str) -> None:
-        base = self._current_base()
-        if not base:
-            return
-        current = self.state.marked_for_delete.get(base)
-        if current == reason:
-            self._apply_mark_reason(base, None)
-        else:
-            self._apply_mark_reason(base, reason)
+        self.ui_helper.update_metadata_panel(base, type_dir, widget)
 
     def _has_calibration_data(self) -> bool:
         return any(data for data in self.state.calibration_matrices.values())
@@ -898,6 +726,225 @@ class ImageViewer(FilterWorkflowMixin, CalibrationWorkflowMixin, QMainWindow):
             self.statusBar().showMessage("Dataset status saved.", 3000)
         finally:
             self.progress_tracker.finish(PROGRESS_TASK_SAVE)
+
+    def _handle_configure_label_model(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Select YOLO model", DEFAULT_DATASET_DIR, "Model (*.pt *.pth)")
+        if not path:
+            return
+        self.label_model_path = path
+        self._persist_preferences(label_model=path)
+        if self.label_workflow:
+            self.label_workflow.update_prefs(label_model=path)
+            self.labeling_controller = self.label_workflow.controller
+        self.statusBar().showMessage("Label model configured.", 3000)
+
+    def _handle_configure_label_yaml(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Select labels YAML", DEFAULT_DATASET_DIR, "YAML (*.yaml *.yml)")
+        if not path:
+            return
+        self.label_yaml_path = path
+        self._persist_preferences(label_yaml=path)
+        if not self.label_workflow and self.session.dataset_path:
+            self.label_workflow = LabelWorkflow(Path(self.session.dataset_path), self._default_label_yaml_path, self.session.cache_service.get_preferences())
+        if self.label_workflow:
+            self.label_workflow.set_label_yaml(Path(path))
+            self.label_workflow.copy_yaml_to_dataset(Path(path))
+            self._on_class_map_updated()
+        self.statusBar().showMessage("Label classes loaded.", 3000)
+
+    def _ensure_label_controller(self) -> bool:
+        if self.labeling_controller:
+            return True
+        if not self.label_workflow:
+            return False
+        if self.label_workflow.ensure_controller():
+            self.labeling_controller = self.label_workflow.controller
+            return True
+        return False
+
+    def _label_channel(self) -> str:
+        return "lwir" if self.label_input_mode == "lwir" else "visible"
+
+    def _label_image_path(self, base: str) -> Optional[Path]:
+        if not self.session.loader:
+            return None
+        return self.session.loader.get_image_path(base, self._label_channel())
+
+    def _update_labeling_views(self) -> None:
+        self.vis_view.set_labeling_mode(self._manual_label_mode)
+        self.lwir_view.set_labeling_mode(self._manual_label_mode)
+
+    def _handle_manual_label_mode_toggle(self, enabled: bool) -> None:
+        if enabled and not self.session.has_images():
+            QMessageBox.information(self, "Manual labels", "Load a dataset before enabling manual labelling.")
+            self._manual_label_mode = False
+            self._update_labeling_views()
+            self._sync_action_states()
+            return
+        self._manual_label_mode = enabled
+        self._update_labeling_views()
+        self._sync_action_states()
+        if enabled:
+            if not self.show_labels:
+                self.show_labels = True
+                self._persist_preferences(show_labels=True)
+            self.statusBar().showMessage(
+                "Manual label mode: click two corners (rubber band), right-click to delete a box, Esc cancels.",
+                5000,
+            )
+        else:
+            self.statusBar().showMessage("Manual label mode off.", 2000)
+
+    def _cancel_manual_selection(self) -> bool:
+        if not self._manual_label_mode:
+            return False
+        self.vis_view.cancel_label_selection()
+        self.lwir_view.cancel_label_selection()
+        self.statusBar().showMessage("Label selection cancelled.", 2000)
+        return True
+
+    def _handle_manual_selection_canceled(self, channel: str) -> None:  # noqa: ARG002
+        if self._manual_label_mode:
+            self.statusBar().showMessage("Label selection cancelled.", 2000)
+
+    def _prompt_label_class(self) -> Optional[str]:
+        # Ensure class map is loaded (fallback to default YAML if present)
+        if self.label_workflow and not self.label_workflow.class_map and self._default_label_yaml_path.exists():
+            self.label_workflow.set_label_yaml(self._default_label_yaml_path)
+            self._on_class_map_updated()
+        choices = self.label_workflow.class_choices() if self.label_workflow else []
+        dialog = QInputDialog(self)
+        dialog.setWindowTitle("Label class")
+        dialog.setLabelText("Class name or id:")
+        dialog.setComboBoxItems(choices)
+        dialog.setComboBoxEditable(True)
+        combo = dialog.findChild(QComboBox)
+        if combo:
+            combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+            if combo.completer():
+                completer = combo.completer()
+                completer.setFilterMode(Qt.MatchFlag.MatchContains)
+                completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+                completer.setCompletionMode(completer.CompletionMode.PopupCompletion)
+        ok = dialog.exec() == QDialog.DialogCode.Accepted
+        if not ok:
+            return None
+        text = dialog.textValue().strip()
+        if combo and combo.completer():
+            completion = combo.completer().currentCompletion()
+            if completion:
+                text = completion
+        return text or None
+
+    def _handle_manual_box_defined(self, channel: str, left: float, top: float, right: float, bottom: float) -> None:
+        if not self._manual_label_mode:
+            return
+        base = self._current_base()
+        if not base or not self.session.dataset_path:
+            return
+        cls_value = self._prompt_label_class()
+        if not cls_value:
+            self.statusBar().showMessage("Label entry cancelled.", 2000)
+            return
+        coords = [max(0.0, min(1.0, c)) for c in (left, top, right, bottom)]
+        left, top, right, bottom = coords
+        width = right - left
+        height = bottom - top
+        if width <= 0 or height <= 0:
+            self.statusBar().showMessage("Ignored zero-area box.", 2000)
+            return
+        x_center = left + width / 2
+        y_center = top + height / 2
+        path = self._label_path(base, channel)
+        if not path:
+            return
+        resolved_cls = self.label_workflow.class_id_for_value(cls_value) if self.label_workflow else (cls_value or "")
+        if self.label_workflow and resolved_cls is None:
+            QMessageBox.warning(self, "Label class", "Select a class from the list or type a valid name/id.")
+            return
+        cls_id = resolved_cls or ""
+        if cls_id == "":
+            return
+        if self.label_workflow:
+            self.label_workflow.append_box(base, channel, cls_id, x_center, y_center, width, height)
+        self.invalidate_overlay_cache(base)
+        self.load_current()
+        self.statusBar().showMessage(f"Added label to {channel}:{base}.", 3000)
+
+    def _handle_manual_delete_request(self, channel: str, x_norm: float, y_norm: float, global_pos) -> None:
+        if not self._manual_label_mode:
+            return
+        base = self._current_base()
+        if not base or not self.session.dataset_path or not self.label_workflow:
+            return
+        target = self.label_workflow.find_label_display_at(base, channel, x_norm, y_norm)
+        if not target:
+            self.statusBar().showMessage("No label near click to delete.", 2000)
+            return
+        cls_display = target
+        menu = QMenu(self)
+        delete_action = menu.addAction(f"Delete label {cls_display}")
+        chosen = menu.exec(global_pos)
+        if chosen is delete_action:
+            removed = self.label_workflow.delete_box_at(base, channel, x_norm, y_norm)
+            if removed:
+                self.invalidate_overlay_cache(base)
+                self.load_current()
+
+    def _handle_label_current(self) -> None:
+        if not self.session.has_images():
+            QMessageBox.information(self, "Labelling", "Load a dataset first.")
+            return
+        base = self._current_base()
+        if not base:
+            return
+        if not self._ensure_label_controller():
+            QMessageBox.information(self, "Labelling", "Configure a model and labels YAML first.")
+            return
+        img_path = self._label_image_path(base)
+        if not img_path or not img_path.exists():
+            QMessageBox.information(self, "Labelling", "No image available for the selected channel.")
+            return
+        channel = self._label_channel()
+        boxes = self.labeling_controller.run_single(base, channel, img_path)
+        self.statusBar().showMessage(f"Saved {len(boxes)} labels for {channel}:{base}.", 3000)
+        self.invalidate_overlay_cache(base)
+        self.load_current()
+
+    def _handle_label_dataset(self) -> None:
+        if not self.session.has_images():
+            QMessageBox.information(self, "Labelling", "Load a dataset first.")
+            return
+        if not self._ensure_label_controller():
+            QMessageBox.information(self, "Labelling", "Configure a model and labels YAML first.")
+            return
+        loader = self.session.loader
+        channel = self._label_channel()
+        total = self.session.total_pairs()
+        done = 0
+        for base in list(loader.image_bases):
+            img_path = loader.get_image_path(base, channel)
+            if not img_path or not img_path.exists():
+                continue
+            boxes = self.labeling_controller.run_single(base, channel, img_path)
+            done += 1
+            if done % 10 == 0:
+                self.statusBar().showMessage(f"Labelled {done}/{total} images…", 2000)
+        self.statusBar().showMessage(f"Labelling finished for channel {channel} ({done}/{total}).", 4000)
+        self.invalidate_overlay_cache()
+        self.load_current()
+
+    def _handle_clear_labels_current(self) -> None:
+        base = self._current_base()
+        if not base:
+            return
+        if not self.session.dataset_path:
+            return
+        if self.label_workflow:
+            self.label_workflow.clear_labels(base)
+        self.invalidate_overlay_cache(base)
+        self.load_current()
+        self.statusBar().showMessage("Labels cleared for current image.", 3000)
 
     def _mark_cache_dirty(self) -> None:
         self.session.mark_cache_dirty()
@@ -949,185 +996,75 @@ class ImageViewer(FilterWorkflowMixin, CalibrationWorkflowMixin, QMainWindow):
         self._cache_flush_notifier.finished.disconnect(_check_state)
 
     def invalidate_overlay_cache(self, base: Optional[str] = None) -> None:
-        if base is None:
-            self._overlay_cache.clear()
-            self._overlay_cache_order.clear()
-            return
-        self._overlay_cache.pop(base, None)
-        self._remove_overlay_cache_order(base)
+        self.overlay_workflow.invalidate(base)
 
-    def _corner_signature(self, corner_points: Optional[List[Tuple[float, float]]]) -> Optional[Tuple[Tuple[float, float], ...]]:
-        if not corner_points:
-            return None
-        return tuple((round(u, 4), round(v, 4)) for u, v in corner_points)
+    def _read_label_boxes(self, base: str, channel: str) -> List[Tuple[str, float, float, float, float, QColor]]:
+        if not self.label_workflow:
+            return []
+        return self.label_workflow.read_overlay_boxes(base, channel)
 
-    def _build_overlay_signature(
+    def _label_signature(
         self,
-        reason: Optional[str],
-        calibration: bool,
-        calibration_detected: Optional[bool],
-        corner_points: Optional[List[Tuple[float, float]]],
-        warning_text: Optional[str],
-    ) -> Tuple[Any, ...]:
-        return (
-            self.view_rectified,
-            self.show_grid,
-            reason or "",
-            calibration,
-            calibration_detected,
-            self._corner_signature(corner_points),
-            (warning_text or "")[:64],
-        )
+        base: str,
+        channel: str,
+        boxes: List[Tuple[str, float, float, float, float, QColor]],
+    ) -> Optional[Tuple[Any, ...]]:
+        if not self.label_workflow:
+            return None
+        return self.label_workflow.label_signature(base, channel, boxes)
+
+    def _label_path(self, base: str, channel: str) -> Optional[Path]:
+        if not self.session.dataset_path or not self.label_workflow:
+            return None
+        return self.label_workflow.label_path(base, channel)
 
     def _reset_queue_progress_state(self) -> None:
-        self._calibration_activity_total = 0
-        self._calibration_activity_done = 0
-        self._calibration_activity_last = 0
-        self._signature_activity_total = 0
-        self._signature_activity_done = 0
-        self._signature_activity_last = 0
-        self._signature_scan_target = 0
-        self._signature_progress_started = False
-
-    def _update_queue_progress(
-        self,
-        *,
-        pending: int,
-        label: str,
-        task_id: str,
-        total_attr: str,
-        done_attr: str,
-        last_attr: str,
-        cancel_handler: Optional[Callable[[], None]] = None,
-    ) -> None:
-        total = getattr(self, total_attr)
-        done = getattr(self, done_attr)
-        last = getattr(self, last_attr)
-        if pending <= 0:
-            setattr(self, total_attr, 0)
-            setattr(self, done_attr, 0)
-            setattr(self, last_attr, 0)
-            self._unregister_cancel_handler(task_id)
-            self.progress_tracker.finish(task_id)
-            return
-        if last <= 0 or total <= 0:
-            setattr(self, total_attr, pending)
-            setattr(self, done_attr, 0)
-            setattr(self, last_attr, pending)
-            self.progress_tracker.start(task_id, label, pending)
-            if cancel_handler:
-                self._register_cancel_handler(task_id, cancel_handler)
-            return
-        remaining = max(0, total - done)
-        if pending > remaining:
-            total = done + pending
-            setattr(self, total_attr, total)
-        done = max(0, min(total - pending, total))
-        setattr(self, done_attr, done)
-        setattr(self, last_attr, pending)
-        self.progress_tracker.update(task_id, done, total)
+        self.queue_manager.reset()
+        self.signature_manager.reset_progress()
 
     def _handle_progress_snapshot(self, snapshot) -> None:
         if not self.progress_panel:
             return
         self.progress_panel.set_snapshot(snapshot)
 
-    def _register_cancel_handler(self, task_id: str, handler: Callable[[], None]) -> None:
-        self._cancel_handlers.pop(task_id, None)
-        self._cancel_handlers[task_id] = handler
-        self._cancel_inflight.discard(task_id)
-        self._update_cancel_button()
-
-    def _unregister_cancel_handler(self, task_id: str) -> None:
-        self._cancel_handlers.pop(task_id, None)
-        self._cancel_inflight.discard(task_id)
-        self._update_cancel_button()
-
-    def _active_cancellable_task(self) -> Optional[str]:
-        if not self._cancel_handlers:
-            return None
-        for task_id in reversed(list(self._cancel_handlers.keys())):
-            if task_id not in self._cancel_inflight:
-                return task_id
-        return None
-
     def _update_cancel_button(self) -> None:
         if not self.progress_panel:
             return
-        task_id = self._active_cancellable_task()
+        task_id = self.cancel_controller.active_task()
         if not task_id:
             self.progress_panel.set_cancel_state(False)
             return
         tooltip = CANCEL_ACTION_LABELS.get(task_id, "Cancel current action")
-        enabled = task_id not in self._cancel_inflight
+        enabled = not self.cancel_controller.is_inflight(task_id)
         self.progress_panel.set_cancel_state(enabled, tooltip)
 
     def _handle_cancel_action(self) -> None:
-        task_id = self._active_cancellable_task()
+        task_id = self.cancel_controller.active_task()
         if not task_id:
             return
-        if task_id in self._cancel_inflight:
+        if self.cancel_controller.is_inflight(task_id):
             self.statusBar().showMessage("Cancellation already requested…", 2000)
             return
-        handler = self._cancel_handlers.get(task_id)
+        handler = self.cancel_controller.handler_for(task_id)
         if not handler:
             return
-        self._cancel_inflight.add(task_id)
+        self.cancel_controller.mark_inflight(task_id)
         self._update_cancel_button()
         handler()
         self.progress_tracker.finish(task_id)
-        self._unregister_cancel_handler(task_id)
+        self.cancel_controller.unregister(task_id)
         label = CANCEL_ACTION_LABELS.get(task_id, "Cancelling action…")
         self.statusBar().showMessage(label, 4000)
+        self._update_cancel_button()
 
     def _handle_calibration_activity_changed(self, pending: int) -> None:
-        self._update_queue_progress(
+        self.queue_manager.update(
             pending=pending,
             label="Detecting chessboards",
             task_id=PROGRESS_TASK_DETECTION,
-            total_attr="_calibration_activity_total",
-            done_attr="_calibration_activity_done",
-            last_attr="_calibration_activity_last",
             cancel_handler=self.calibration_controller.cancel_all,
         )
-
-    def _update_signature_progress(self) -> None:
-        pending = len(self._signature_pending) + len(self._signature_scan_queue)
-        total = self._signature_scan_target
-        if pending <= 0 or total <= 0:
-            if self._signature_progress_started:
-                self.progress_tracker.finish(PROGRESS_TASK_SIGNATURES)
-                self._unregister_cancel_handler(PROGRESS_TASK_SIGNATURES)
-            self._signature_progress_started = False
-            self._signature_scan_target = 0
-            self._signature_activity_total = 0
-            self._signature_activity_done = 0
-            self._signature_activity_last = 0
-            return
-        done = max(0, min(total - pending, total))
-        if not self._signature_progress_started:
-            self.progress_tracker.start(
-                PROGRESS_TASK_SIGNATURES,
-                "Scanning duplicates",
-                total,
-            )
-            self._register_cancel_handler(
-                PROGRESS_TASK_SIGNATURES,
-                self._cancel_signature_scan_jobs,
-            )
-            self._signature_progress_started = True
-        else:
-            self.progress_tracker.update(
-                PROGRESS_TASK_SIGNATURES,
-                done,
-                total,
-            )
-        self._signature_activity_total = total
-        self._signature_activity_done = done
-        self._signature_activity_last = pending
-
-    def _handle_signature_activity_changed(self, pending: int) -> None:  # noqa: ARG002
-        self._update_signature_progress()
+        self._update_cancel_button()
 
     def _start_refinement_progress(self, total: int) -> None:
         if total <= 0:
@@ -1139,10 +1076,11 @@ class ImageViewer(FilterWorkflowMixin, CalibrationWorkflowMixin, QMainWindow):
             "Refining chessboard corners",
             total,
         )
-        self._register_cancel_handler(
+        self.cancel_controller.register(
             PROGRESS_TASK_REFINEMENT,
             self.calibration_refiner.cancel,
         )
+        self._update_cancel_button()
 
     def _advance_refinement_progress(self) -> None:
         if self._refine_total <= 0:
@@ -1160,129 +1098,20 @@ class ImageViewer(FilterWorkflowMixin, CalibrationWorkflowMixin, QMainWindow):
         self._refine_total = 0
         self._refine_progress = 0
         self.progress_tracker.finish(PROGRESS_TASK_REFINEMENT)
-        self._unregister_cancel_handler(PROGRESS_TASK_REFINEMENT)
-
-    def _get_cached_overlay(
-        self,
-        base: str,
-        channel: str,
-        signature: Tuple[Any, ...],
-    ) -> Optional[QPixmap]:
-        bucket = self._overlay_cache.get(base)
-        if not bucket:
-            return None
-        entry = bucket.get(channel)
-        if not entry:
-            return None
-        if entry.signature != signature or not entry.pixmap or entry.pixmap.isNull():
-            return None
-        return entry.pixmap
-
-    def _bump_signature_epoch(self) -> None:
-        self.signature_controller.reset()
-        self._reset_signature_tracking()
+        self.cancel_controller.unregister(PROGRESS_TASK_REFINEMENT)
+        self._update_cancel_button()
 
     def _reset_calibration_jobs(self) -> None:
         self.calibration_controller.reset()
 
-    def _reset_signature_tracking(self) -> None:
-        self._signature_pending.clear()
-        self._signature_completed.clear()
-
     def _clear_pending_calibration_marks(self) -> None:
-        self._pending_calibration_marks.clear()
-        self._pending_calibration_forces.clear()
-        if self._calibration_mark_timer.isActive():
-            self._calibration_mark_timer.stop()
-
-    def _stop_signature_scan(self) -> None:
-        self._signature_scan_queue.clear()
-        self._signature_scan_force = False
-        if self._signature_scan_timer.isActive():
-            self._signature_scan_timer.stop()
-        self._update_signature_progress()
-
-    def _cancel_signature_scan_jobs(self) -> None:
-        self.signature_controller.cancel_all()
-        self._signature_scan_queue.clear()
-        self._signature_pending.clear()
-        self._signature_scan_force = False
-        if self._signature_scan_timer.isActive():
-            self._signature_scan_timer.stop()
-        self._signature_scan_target = 0
-        self._update_signature_progress()
+        self.calibration_queue.clear()
 
     def defer_calibration_analysis(self, base: Optional[str], *, force: bool = False) -> None:
-        if (
-            not base
-            or not self.session.loader
-            or base not in self.state.calibration_marked
-        ):
-            return
-        self._pending_calibration_marks.add(base)
-        if force:
-            self._pending_calibration_forces.add(base)
-        if not self._calibration_mark_timer.isActive():
-            self._calibration_mark_timer.start(200)
+        self.calibration_queue.defer(base, force=force)
 
     def cancel_deferred_calibration(self, base: Optional[str]) -> None:
-        if not base:
-            return
-        self._pending_calibration_marks.discard(base)
-        self._pending_calibration_forces.discard(base)
-        if not self._pending_calibration_marks and self._calibration_mark_timer.isActive():
-            self._calibration_mark_timer.stop()
-
-    def _flush_pending_calibration_marks(self) -> None:
-        if not self._pending_calibration_marks:
-            return
-        pending = list(self._pending_calibration_marks)
-        self._pending_calibration_marks.clear()
-        for base in pending:
-            force = base in self._pending_calibration_forces
-            self._pending_calibration_forces.discard(base)
-            self._schedule_calibration_job(base, force=force, priority=True)
-
-    def _has_cached_signatures(self, base: Optional[str]) -> bool:
-        if not base:
-            return False
-        bucket = self.state.signatures.get(base)
-        if not bucket:
-            return False
-        return bucket.get("lwir") is not None and bucket.get("visible") is not None
-
-    def _schedule_signature_job(self, index: int, *, force: bool = False) -> bool:
-        loader = self.session.loader
-        base = self.session.get_base(index)
-        if not loader or base is None:
-            return False
-        if not force:
-            if base in self._signature_pending or base in self._signature_completed:
-                return False
-            if self._has_cached_signatures(base):
-                self._signature_completed.add(base)
-                return False
-        if self.signature_controller.schedule(index, base, loader):
-            self._signature_pending.add(base)
-            return True
-        return False
-
-    def _finalize_signature_job(self, base: Optional[str], *, success: bool) -> None:
-        if not base:
-            return
-        self._signature_pending.discard(base)
-        if success:
-            self._signature_completed.add(base)
-        else:
-            self._signature_completed.discard(base)
-        if self._signature_activity_total > 0:
-            self._signature_activity_done = min(
-                self._signature_activity_total,
-                self._signature_activity_done + 1,
-            )
-        self._update_signature_progress()
-        if self._signature_scan_queue:
-            self._signature_scan_timer.start(SIGNATURE_SCAN_TIMER_INTERVAL_MS)
+        self.calibration_queue.cancel(base)
 
     def _handle_signature_ready(
         self,
@@ -1291,7 +1120,6 @@ class ImageViewer(FilterWorkflowMixin, CalibrationWorkflowMixin, QMainWindow):
         lwir_sig: Optional[bytes],
         vis_sig: Optional[bytes],
     ) -> None:
-        self._finalize_signature_job(base, success=True)
         if not self.session.loader:
             return
         total = self.session.total_pairs()
@@ -1310,7 +1138,6 @@ class ImageViewer(FilterWorkflowMixin, CalibrationWorkflowMixin, QMainWindow):
             self._update_stats_panel()
 
     def _handle_signature_failed(self, base: str, message: str) -> None:
-        self._finalize_signature_job(base, success=False)
         self.statusBar().showMessage(f"Duplicate analysis failed for {base}: {message}", 4000)
 
     def _handle_refinement_ready(
@@ -1350,7 +1177,8 @@ class ImageViewer(FilterWorkflowMixin, CalibrationWorkflowMixin, QMainWindow):
 
     def _handle_calibration_solved(self, payload: Dict[str, Any]) -> None:
         self.progress_tracker.finish(PROGRESS_TASK_SOLVER)
-        self._unregister_cancel_handler(PROGRESS_TASK_SOLVER)
+        self.cancel_controller.unregister(PROGRESS_TASK_SOLVER)
+        self._update_cancel_button()
         channels = payload.get("channels", {}) if isinstance(payload, dict) else {}
         if not channels:
             self.statusBar().showMessage("Calibration solver returned no data.", 4000)
@@ -1429,12 +1257,14 @@ class ImageViewer(FilterWorkflowMixin, CalibrationWorkflowMixin, QMainWindow):
 
     def _handle_calibration_solver_failed(self, message: str) -> None:
         self.progress_tracker.finish(PROGRESS_TASK_SOLVER)
-        self._unregister_cancel_handler(PROGRESS_TASK_SOLVER)
+        self.cancel_controller.unregister(PROGRESS_TASK_SOLVER)
+        self._update_cancel_button()
         self.statusBar().showMessage(f"Calibration solve failed: {message}", 6000)
 
     def _handle_extrinsic_solved(self, payload: Dict[str, Any]) -> None:
         self.progress_tracker.finish(PROGRESS_TASK_EXTRINSIC)
-        self._unregister_cancel_handler(PROGRESS_TASK_EXTRINSIC)
+        self.cancel_controller.unregister(PROGRESS_TASK_EXTRINSIC)
+        self._update_cancel_button()
         snapshot = dict(payload)
         file_path = snapshot.pop("file_path", None)
         per_pair = snapshot.pop("per_pair_errors", None)
@@ -1455,20 +1285,12 @@ class ImageViewer(FilterWorkflowMixin, CalibrationWorkflowMixin, QMainWindow):
 
     def _handle_extrinsic_failed(self, message: str) -> None:
         self.progress_tracker.finish(PROGRESS_TASK_EXTRINSIC)
-        self._unregister_cancel_handler(PROGRESS_TASK_EXTRINSIC)
+        self.cancel_controller.unregister(PROGRESS_TASK_EXTRINSIC)
+        self._update_cancel_button()
         self.statusBar().showMessage(f"Stereo calibration failed: {message}", 6000)
 
     def toggle_mark_current(self):
-        base = self._current_base()
-        if not base:
-            return
-        if not self.state.toggle_manual_mark(base, REASON_USER):
-            return
-        self.invalidate_overlay_cache(base)
-        self._update_delete_button()
-        self.load_image_pair(base)
-        self._update_stats_panel()
-        self._mark_cache_dirty()
+        self.marking_controller.toggle_mark_current()
 
     def toggle_calibration_current(self):
         base = self._current_base()
@@ -1590,7 +1412,8 @@ class ImageViewer(FilterWorkflowMixin, CalibrationWorkflowMixin, QMainWindow):
                 PROGRESS_TASK_SOLVER,
                 "Computing calibration matrices…",
             )
-            self._register_cancel_handler(PROGRESS_TASK_SOLVER, self.calibration_solver.cancel)
+            self.cancel_controller.register(PROGRESS_TASK_SOLVER, self.calibration_solver.cancel)
+            self._update_cancel_button()
             self.statusBar().showMessage("Computing calibration matrices…", 4000)
 
     def _handle_compute_extrinsic_action(self) -> None:
@@ -1619,7 +1442,8 @@ class ImageViewer(FilterWorkflowMixin, CalibrationWorkflowMixin, QMainWindow):
                 PROGRESS_TASK_EXTRINSIC,
                 "Computing stereo calibration…",
             )
-            self._register_cancel_handler(PROGRESS_TASK_EXTRINSIC, self.calibration_extrinsic_solver.cancel)
+            self.cancel_controller.register(PROGRESS_TASK_EXTRINSIC, self.calibration_extrinsic_solver.cancel)
+            self._update_cancel_button()
             self.statusBar().showMessage("Computing stereo calibration…", 4000)
 
     def _calibration_results_path(self) -> Optional[Path]:
@@ -1667,6 +1491,13 @@ class ImageViewer(FilterWorkflowMixin, CalibrationWorkflowMixin, QMainWindow):
         if self.session.has_images():
             self.load_current()
 
+    def _handle_show_labels_toggle(self, enabled: bool) -> None:
+        self.show_labels = enabled
+        self._persist_preferences(show_labels=enabled)
+        self.invalidate_overlay_cache()
+        if self.session.has_images():
+            self.load_current()
+
     def clear_empty_datasets(self) -> None:
         self.dataset_actions.clear_empty_datasets()
 
@@ -1695,54 +1526,35 @@ class ImageViewer(FilterWorkflowMixin, CalibrationWorkflowMixin, QMainWindow):
         self.state.calibration_results.clear()
         self.state.calibration_corners.clear()
         self.state.calibration_warnings.clear()
-        self._reset_signature_tracking()
-        self._stop_signature_scan()
+        self.signature_manager.cancel_all()
         self._reset_calibration_jobs()
         self._clear_pending_calibration_marks()
-        if self.overlay_prefetch_timer.isActive():
-            self.overlay_prefetch_timer.stop()
-        self._overlay_prefetch_queue.clear()
+        self.overlay_prefetcher.clear()
         self.invalidate_overlay_cache()
         self.progress_tracker.clear()
         self._reset_queue_progress_state()
+        if self.label_workflow:
+            self.label_workflow.clear_cache()
+        self._manual_label_mode = False
+        self._update_labeling_views()
+        self._sync_action_states()
         self._update_delete_button()
         self._update_restore_menu()
         self._update_stats_panel()
         self.progress_tracker.clear()
 
+    def _on_class_map_updated(self) -> None:
+        if self.label_workflow:
+            self.label_workflow.clear_cache()
+        self.invalidate_overlay_cache()
+        if self.session.has_images():
+            self.load_current()
+
     def _update_delete_button(self):
-        count = len(self.state.marked_for_delete)
-        base_text = DELETE_BUTTON_TEXT
-        if count:
-            self.ui.btn_delete_marked.setText(f"{base_text} ({count})")
-        else:
-            self.ui.btn_delete_marked.setText(base_text)
-        self.ui.btn_delete_marked.setEnabled(count > 0)
-        delete_action = getattr(self.ui, "action_delete_selected", None)
-        if delete_action:
-            delete_action.setEnabled(count > 0)
+        self.ui_helper.update_delete_button()
 
     def _update_restore_menu(self):
-        base_text = RESTORE_ACTION_TEXT
-        if not hasattr(self.ui, "action_restore_images"):
-            return
-        count = self.session.count_trash_pairs()
-        if count:
-            self.ui.action_restore_images.setText(f"{base_text} ({count})")
-        else:
-            self.ui.action_restore_images.setText(base_text)
-        self.ui.action_restore_images.setEnabled(self.session.loader is not None)
+        self.ui_helper.update_restore_menu()
 
     def _update_stats_panel(self) -> None:
-        if not hasattr(self, "stats_panel"):
-            return
-        missing_counts: Dict[str, int] = {"lwir": 0, "visible": 0}
-        if self.session.loader:
-            missing_counts = self.session.loader.missing_channel_counts()
-        self.stats_panel.update_from_state(
-            self.state,
-            self.session.total_pairs(),
-            missing_counts,
-            self.state.calibration_reproj_errors,
-            self.state.extrinsic_pair_errors,
-        )
+        self.ui_helper.update_stats_panel()

@@ -1,3 +1,8 @@
+"""High-level dataset operations wired to menu actions and context menus.
+
+Handles import/export of calibration data, delete/restore flows, and dataset maintenance actions.
+"""
+
 from __future__ import annotations
 
 import shutil

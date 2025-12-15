@@ -1,3 +1,8 @@
+"""Application entrypoint for the multispectral viewer.
+
+Bootstraps Qt styling, instantiates the main window, and starts the event loop.
+"""
+
 import os
 import sys
 
@@ -5,7 +10,6 @@ from PyQt6.QtWidgets import QApplication, QStyleFactory
 
 from image_viewer import ImageViewer
 from widgets import style as ui_style
-
 
 def _apply_style(app: QApplication) -> None:
     available = [str(s) for s in QStyleFactory.keys()]
@@ -17,7 +21,6 @@ def _apply_style(app: QApplication) -> None:
         app.setStyle(style)
     ui_style.apply_app_style(app)
     # print(f"Qt styles available: {available}; using: {prefer}")
-
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

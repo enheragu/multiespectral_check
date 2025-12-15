@@ -1,4 +1,8 @@
-"""Stereo calibration solver to recover the rigid transform between LWIR and visible cameras."""
+"""Stereo calibration solver to recover the rigid transform between LWIR and visible cameras.
+
+Runs a background task that aggregates per-pair chessboard samples, computes extrinsics, and persists
+results back into the dataset calibration file with detailed per-pair errors.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -10,7 +14,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import yaml
 from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal
 
-from services.calibration_solver import CALIBRATION_RESULTS_FILENAME
+from services.calibration.calibration_solver import CALIBRATION_RESULTS_FILENAME
 from services.dataset_session import DatasetSession
 
 try:  # pragma: no cover - optional dependency

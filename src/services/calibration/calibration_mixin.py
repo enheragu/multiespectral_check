@@ -1,11 +1,17 @@
+"""Shared calibration workflow helpers used by the main window.
+
+Collects calibration targets, manages queuing, emits debug bundles, and keeps cached results
+normalized before refreshing overlays and UI state.
+"""
+
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
 from PyQt6.QtWidgets import QMessageBox
 
-from services.calibration_extrinsic_solver import CalibrationExtrinsicSample
-from services.calibration_solver import CalibrationSample
+from services.calibration.calibration_extrinsic_solver import CalibrationExtrinsicSample
+from services.calibration.calibration_solver import CalibrationSample
 from utils.calibration import evaluate_corner_layout
 
 
