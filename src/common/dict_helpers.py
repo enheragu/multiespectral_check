@@ -1,5 +1,5 @@
 """Safe dictionary access helpers to reduce intermediate variables and checks."""
-from typing import Any, List, Optional, TypeVar, Union, cast
+from typing import Any, Dict, List, Optional, TypeVar, Union, cast
 
 
 T = TypeVar('T')
@@ -201,9 +201,93 @@ def merge_dict_path(
     return True
 
 
+def merge_stats_dicts(target: dict, source: dict) -> dict:
+    """Recursively merge source stats dict into target, aggregating values.
+
+    - int: sum values
+    - bool: OR logic (True if either is True)
+    - dict: recurse
+    - other: overwrite with source
+
+    Args:
+        target: Target dict (modified in place)
+        source: Source dict to merge from
+
+    Returns:
+        The modified target dict
+
+    Example:
+        >>> target = {"calibration": {"user": {"total": 10, "both": 5}}}
+        >>> source = {"calibration": {"user": {"total": 5, "both": 3}}}
+        >>> merge_stats_dicts(target, source)
+        {"calibration": {"user": {"total": 15, "both": 8}}}
+    """
+    for key, src_val in source.items():
+        if key not in target:
+            # Key doesn't exist in target - deep copy if dict, else assign
+            if isinstance(src_val, dict):
+                target[key] = {}
+                merge_stats_dicts(target[key], src_val)
+            else:
+                target[key] = src_val
+        elif isinstance(src_val, dict) and isinstance(target[key], dict):
+            # Both are dicts - recurse
+            merge_stats_dicts(target[key], src_val)
+        elif isinstance(src_val, int) and isinstance(target[key], int):
+            # Both are ints - sum
+            target[key] += src_val
+        elif isinstance(src_val, bool) and isinstance(target[key], bool):
+            # Both are bools - OR logic
+            target[key] = target[key] or src_val
+        else:
+            # Fallback: overwrite
+            target[key] = src_val
+    return target
+
+
 __all__ = [
     "get_dict_path",
     "set_dict_path",
     "has_dict_path",
     "merge_dict_path",
+    "merge_stats_dicts",
+    "normalize_int_dict",
+    "merge_count_dicts",
 ]
+
+
+def normalize_int_dict(data: object) -> Dict[str, int]:
+    """Convert dict values to int, handling None/empty gracefully.
+
+    Args:
+        data: Any object (only processes if dict)
+
+    Returns:
+        Dict with all values converted to int, or empty dict if not a dict
+
+    Examples:
+        >>> normalize_int_dict({"a": 1, "b": "2"})
+        {"a": 1, "b": 2}
+        >>> normalize_int_dict(None)
+        {}
+    """
+    if not isinstance(data, dict):
+        return {}
+    return {k: int(v) for k, v in data.items()}
+
+
+def merge_count_dicts(target: Dict[str, int], source: Dict[str, int]) -> None:
+    """Merge source counts into target dict in-place.
+
+    Args:
+        target: Target dict (modified in place)
+        source: Source dict to merge from
+
+    Examples:
+        >>> target = {"a": 1, "b": 2}
+        >>> merge_count_dicts(target, {"b": 3, "c": 4})
+        >>> target
+        {"a": 1, "b": 5, "c": 4}
+    """
+    for key, val in source.items():
+        target[key] = target.get(key, 0) + val

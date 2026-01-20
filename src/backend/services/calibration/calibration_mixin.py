@@ -207,11 +207,7 @@ class CalibrationWorkflowMixin:
         if base not in self.state.calibration_marked:
             if has_detection:
                 # Auto-mark this image as calibration candidate
-                calib_dict = self.state.cache_data.setdefault("calibration", {})
-                if base not in calib_dict:
-                    calib_dict[base] = {}
-                calib_dict[base]["marked"] = True
-                calib_dict[base]["auto"] = True  # Track that this was auto-detected
+                self.state.set_calibration_mark(base, marked=True, auto=True)
                 log_debug(f"Auto-marked {base} as calibration candidate (pattern detected)", "CALIB_MIXIN")
                 # Persist corners to YAML file
                 self._persist_auto_detected_corners(base, normalized_corners)
@@ -335,25 +331,37 @@ class CalibrationWorkflowMixin:
         if not loader:
             return samples
         out_intrinsic = self.state.calibration_outliers_intrinsic
+        # Check preference: use subpixel corners if enabled
+        use_subpixel = self.session.cache_service.get_preference("use_subpixel_corners", False)
         for base in loader.image_bases:
             if base not in self.state.calibration_marked:
                 continue
             bucket = self.state.calibration_corners.get(base, {})
+
+            # Get image_size from corners bucket (single source of truth)
+            image_sizes = bucket.get("image_size", {})
+
             for channel in ("lwir", "visible"):
                 if base in out_intrinsic.get(channel, set()):
                     continue
-                points = bucket.get(channel)
+                # Use subpixel if enabled AND available, else original
+                if use_subpixel:
+                    points = bucket.get(f"{channel}_subpixel") or bucket.get(channel)
+                else:
+                    points = bucket.get(channel)
                 if not points:
                     continue
-                image_path = loader.get_image_path(base, channel)
-                if not image_path or not image_path.exists():
+                # Get image_size for this channel
+                size = image_sizes.get(channel)
+                if not size:
+                    # Skip if no image_size available (need to re-run chessboard detection)
                     continue
                 samples.append(
                     CalibrationSample(
                         base=base,
                         channel=channel,
-                        image_path=image_path,
                         corners=points,
+                        image_size=tuple(size),  # type: ignore[arg-type]
                     )
                 )
         return samples
@@ -364,12 +372,19 @@ class CalibrationWorkflowMixin:
         if not loader:
             return samples
         out_extrinsic = self.state.calibration_outliers_extrinsic
+        # Check preference: use subpixel corners if enabled
+        use_subpixel = self.session.cache_service.get_preference("use_subpixel_corners", False)
         for base in loader.image_bases:
             if base not in self.state.calibration_marked or base in out_extrinsic:
                 continue
             bucket = self.state.calibration_corners.get(base, {})
-            lwir_points = bucket.get("lwir")
-            visible_points = bucket.get("visible")
+            # Use subpixel if enabled AND available, else original
+            if use_subpixel:
+                lwir_points = bucket.get("lwir_subpixel") or bucket.get("lwir")
+                visible_points = bucket.get("visible_subpixel") or bucket.get("visible")
+            else:
+                lwir_points = bucket.get("lwir")
+                visible_points = bucket.get("visible")
             if not lwir_points or not visible_points:
                 continue
             lwir_path = loader.get_image_path(base, "lwir")

@@ -1,18 +1,20 @@
 """Collection: Manages a group of datasets with aggregation and distribution."""
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
-import time
 
 from backend.dataset_loader import DatasetLoader
-from backend.services.cache_service import (
-    DATASET_CACHE_FILENAME,
-    load_dataset_cache_file,
-    save_dataset_cache_file,
-)
+from backend.services.cache_service import (DATASET_CACHE_FILENAME,
+                                            deserialize_signatures,
+                                            load_dataset_cache_file,
+                                            save_dataset_cache_file)
+from backend.services.handler_registry import get_handler_registry
 from backend.services.stats_manager import DatasetStats
-from common.log_utils import log_debug, log_info, log_warning, log_error
+from backend.services.summary_derivation import derive_summary_from_entry
+from common.dict_helpers import get_dict_path
+from common.log_utils import log_debug, log_error, log_info, log_warning
 
 
 class Collection:
@@ -46,10 +48,12 @@ class Collection:
         self.stats = DatasetStats()  # Aggregated statistics
 
         # Cache for marks (in-memory aggregation from children)
-        self._marks: Dict[str, str] = {}  # Namespaced base -> reason
-        self._auto_marks: Dict[str, Set[str]] = {}  # reason -> set of namespaced bases
+        # New unified format: {base: {reason: str, auto: bool}}
+        self._marks: Dict[str, Dict[str, Any]] = {}
         self._calibration_marked: Set[str] = set()  # Namespaced bases
+        self._calibration_auto: Dict[str, bool] = {}  # Namespaced base -> is_auto flag
         self._calibration_results: Dict[str, Dict[str, bool]] = {}  # Namespaced base -> {lwir: bool, visible: bool}
+        self._calibration_outliers: Dict[str, Dict[str, bool]] = {}  # Namespaced base -> {lwir: bool, visible: bool, stereo: bool}
         self._signatures: Dict[str, Dict[str, bytes]] = {}  # Namespaced base -> channel -> signature
 
         # Sweep flags (aggregated with AND logic: all children must complete)
@@ -131,9 +135,10 @@ class Collection:
 
         # Reset aggregated state
         self._marks.clear()
-        self._auto_marks.clear()
         self._calibration_marked.clear()
+        self._calibration_auto.clear()
         self._calibration_results.clear()
+        self._calibration_outliers.clear()
         self._signatures.clear()
         self.stats = DatasetStats()
 
@@ -156,25 +161,23 @@ class Collection:
                     continue
 
                 # Aggregate marks (prefix with child key)
+                # New unified format: marks[base] = {reason: str, auto: bool}
                 child_marks = child_cache.get('marks', {})
                 if isinstance(child_marks, dict):
-                    for base, reason in child_marks.items():
+                    for base, entry in child_marks.items():
                         prefixed_base = f"{child_key}/{base}"
-                        self._marks[prefixed_base] = reason
+                        if isinstance(entry, dict):
+                            # New format: {reason, auto}
+                            self._marks[prefixed_base] = entry
+                        elif isinstance(entry, str):
+                            # Legacy format fallback: reason_str
+                            self._marks[prefixed_base] = {"reason": entry, "auto": False}
 
-                # Aggregate auto_marks
-                child_auto_marks = child_cache.get('auto_marks', {})
-                if isinstance(child_auto_marks, dict):
-                    for reason, bases in child_auto_marks.items():
-                        # Handle both list (from YAML) and set (from normalized cache)
-                        if isinstance(bases, (list, set)):
-                            prefixed_bases = {f"{child_key}/{b}" for b in bases}
-                            self._auto_marks.setdefault(reason, set()).update(prefixed_bases)
+                # Note: auto_marks is now embedded in marks, no separate aggregation needed
 
                 # Aggregate signatures
                 child_sigs = child_cache.get('signatures', {})
                 if isinstance(child_sigs, dict):
-                    from backend.services.cache_service import deserialize_signatures
                     deserialized_sigs = deserialize_signatures(child_sigs)
                     for base, sig_dict in deserialized_sigs.items():
                         prefixed_base = f"{child_key}/{base}"
@@ -183,18 +186,30 @@ class Collection:
                         if filtered_sigs:
                             self._signatures[prefixed_base] = filtered_sigs
 
-                # Aggregate calibration_marked and calibration_results
+                # Aggregate calibration_marked, calibration_auto, and calibration_results
+                # Format: calibration: { base: {auto: bool, results: {...}, outlier: {...}} }
+                # Presence in dict = marked (no explicit 'marked' field)
                 child_calib = child_cache.get('calibration', {})
                 if isinstance(child_calib, dict):
                     for base, calib_entry in child_calib.items():
                         if isinstance(calib_entry, dict):
                             prefixed_base = f"{child_key}/{base}"
-                            if calib_entry.get('marked', False):
-                                self._calibration_marked.add(prefixed_base)
+                            # Presence in calibration dict means it's marked
+                            self._calibration_marked.add(prefixed_base)
+                            # Store auto flag for each marked calibration image
+                            self._calibration_auto[prefixed_base] = calib_entry.get('auto', False)
                             # Also aggregate results (detection status per channel)
                             results = calib_entry.get('results', {})
                             if isinstance(results, dict) and results:
                                 self._calibration_results[prefixed_base] = dict(results)
+                            # Also aggregate outlier flags
+                            outlier = calib_entry.get('outlier', {})
+                            if isinstance(outlier, dict):
+                                self._calibration_outliers[prefixed_base] = {
+                                    "lwir": bool(outlier.get("lwir", False)),
+                                    "visible": bool(outlier.get("visible", False)),
+                                    "stereo": bool(outlier.get("stereo", False)),
+                                }
 
                 # Aggregate sweep flags
                 child_sweep_flags = child_cache.get('sweep_flags', {})
@@ -219,16 +234,18 @@ class Collection:
         if children_sweep_flags['patterns']:
             self._sweep_flags["patterns"] = all(children_sweep_flags['patterns'])
 
+        # Count auto marks from unified format
+        auto_mark_count = sum(1 for entry in self._marks.values() if isinstance(entry, dict) and entry.get("auto"))
         elapsed = time.perf_counter() - start
         log_info(
             f"Collection {self.name}: Aggregated from {len(self._child_dirs)} children: "
-            f"{len(self._marks)} marks, {sum(len(v) for v in self._auto_marks.values())} auto_marks, "
+            f"{len(self._marks)} marks ({auto_mark_count} auto), "
             f"sweep_flags=(D:{self._sweep_flags['duplicates']}, Q:{self._sweep_flags['quality']}, P:{self._sweep_flags['patterns']}) "
             f"in {elapsed:.3f}s",
             "COLLECTION"
         )
 
-    def distribute_to_children(self, marks: Dict[str, str], auto_marks: Dict[str, Set[str]],
+    def distribute_to_children(self, marks: Dict[str, Dict[str, Any]],
                                calibration_marked: Set[str],
                                calibration_data: Optional[Dict[str, Dict[str, Any]]] = None) -> None:
         """
@@ -238,8 +255,7 @@ class Collection:
         to individual child dataset caches.
 
         Args:
-            marks: Dict of base -> reason
-            auto_marks: Dict of reason -> set of bases
+            marks: Dict of base -> {reason: str, auto: bool}
             calibration_marked: Set of bases marked for calibration
             calibration_data: Optional dict of base -> {marked, auto, results, ...}
         """
@@ -247,42 +263,35 @@ class Collection:
         calibration_data = calibration_data or {}
 
         # Group by child
-        child_marks: Dict[str, Dict[str, str]] = {}  # child_key -> {base: reason}
-        child_auto_marks: Dict[str, Dict[str, Set[str]]] = {}  # child_key -> {reason: {bases}}
+        child_marks: Dict[str, Dict[str, Dict[str, Any]]] = {}  # child_key -> {base: {reason, auto}}
         child_calibration: Dict[str, Dict[str, Dict[str, Any]]] = {}  # child_key -> {base: calib_entry}
 
-        # Process regular marks
-        for prefixed_base, reason in marks.items():
+        # Process marks (unified format with embedded auto flag)
+        for prefixed_base, mark_entry in marks.items():
             if "/" not in prefixed_base:
                 continue
             child_key, local_base = prefixed_base.split("/", 1)
-            child_marks.setdefault(child_key, {})[local_base] = reason
+            child_marks.setdefault(child_key, {})[local_base] = mark_entry
 
-        # Process auto_marks
-        for reason, prefixed_bases in auto_marks.items():
-            for prefixed_base in prefixed_bases:
-                if "/" not in prefixed_base:
-                    continue
-                child_key, local_base = prefixed_base.split("/", 1)
-                child_auto_marks.setdefault(child_key, {}).setdefault(reason, set()).add(local_base)
-
-        # Process calibration data (includes marked, auto, results)
-        # Iterate over ALL entries in calibration_data, not just calibration_marked
-        # This ensures results are persisted even if marked status changes
-        all_calib_bases = set(calibration_marked) | set(calibration_data.keys())
-        for prefixed_base in all_calib_bases:
+        # Process calibration data - only marked entries (presence = marked)
+        # Unmarked entries should not exist in the child cache
+        for prefixed_base in calibration_marked:
             if "/" not in prefixed_base:
                 continue
             child_key, local_base = prefixed_base.split("/", 1)
             # Get full calibration entry if available, or create minimal one
             calib_entry = calibration_data.get(prefixed_base, {})
-            # Set marked based on whether it's in calibration_marked
-            calib_entry["marked"] = prefixed_base in calibration_marked
+            # Presence in dict = marked (no explicit field needed)
             child_calibration.setdefault(child_key, {})[local_base] = dict(calib_entry)
+
+            # Log outlier distribution
+            outlier_dict = calib_entry.get("outlier", {})
+            if isinstance(outlier_dict, dict) and any(outlier_dict.values()):
+                log_debug(f"Distributing outliers for {prefixed_base}: {outlier_dict}", "COLLECTION")
 
         # Save to each child's cache
         updated_children = 0
-        for child_key in set(child_marks.keys()) | set(child_auto_marks.keys()) | set(child_calibration.keys()):
+        for child_key in set(child_marks.keys()) | set(child_calibration.keys()):
             child_dir = self._child_dirs.get(child_key)
             if not child_dir or not child_dir.exists():
                 log_warning(f"Collection {self.name}: Child directory not found: {child_key}", "COLLECTION")
@@ -293,7 +302,7 @@ class Collection:
                 child_cache_path = child_dir / DATASET_CACHE_FILENAME
                 child_cache = load_dataset_cache_file(child_cache_path)
 
-                # Merge marks
+                # Merge marks (unified format: base -> {reason, auto})
                 existing_marks = child_cache.get("marks", {})
                 if not isinstance(existing_marks, dict):
                     existing_marks = {}
@@ -302,20 +311,9 @@ class Collection:
                     existing_marks.update(marks_to_add)
                     child_cache["marks"] = existing_marks
 
-                # Merge auto_marks
-                existing_auto = child_cache.get("auto_marks", {})
-                if not isinstance(existing_auto, dict):
-                    existing_auto = {}
-                else:
-                    # Deserialize lists to sets
-                    existing_auto = {r: set(b) if isinstance(b, list) else b for r, b in existing_auto.items()}
-
-                auto_to_add = child_auto_marks.get(child_key, {})
-                if auto_to_add:
-                    for reason, bases in auto_to_add.items():
-                        existing_auto.setdefault(reason, set()).update(bases)
-                    # Serialize back to lists
-                    child_cache["auto_marks"] = {r: list(b) for r, b in existing_auto.items()}
+                # Remove legacy auto_marks field if present
+                if "auto_marks" in child_cache:
+                    del child_cache["auto_marks"]
 
                 # Merge calibration (now includes full entry with results)
                 calibration_to_add = child_calibration.get(child_key, {})
@@ -331,27 +329,30 @@ class Collection:
                         existing_entry = existing_calib[local_base]
                         if not isinstance(existing_entry, dict):
                             existing_entry = {}
-                        # Update with new values (marked, auto, results, outliers)
-                        existing_entry["marked"] = calib_entry.get("marked", True)
+                        # Presence in dict = marked (no explicit field needed)
+                        # Update with new values (auto, results, outliers)
                         if "auto" in calib_entry:
                             existing_entry["auto"] = calib_entry["auto"]
                         if "results" in calib_entry and calib_entry["results"]:
                             existing_entry["results"] = calib_entry["results"]
-                        if "outlier_lwir" in calib_entry:
-                            existing_entry["outlier_lwir"] = calib_entry["outlier_lwir"]
-                        if "outlier_visible" in calib_entry:
-                            existing_entry["outlier_visible"] = calib_entry["outlier_visible"]
-                        if "outlier_stereo" in calib_entry:
-                            existing_entry["outlier_stereo"] = calib_entry["outlier_stereo"]
+                        # Handle outlier in new nested format
+                        if "outlier" in calib_entry and isinstance(calib_entry["outlier"], dict):
+                            if "outlier" not in existing_entry:
+                                existing_entry["outlier"] = {"lwir": False, "visible": False, "stereo": False}
+                            existing_entry["outlier"]["lwir"] = calib_entry["outlier"].get("lwir", False)
+                            existing_entry["outlier"]["visible"] = calib_entry["outlier"].get("visible", False)
+                            existing_entry["outlier"]["stereo"] = calib_entry["outlier"].get("stereo", False)
                         existing_calib[local_base] = existing_entry
 
                     child_cache["calibration"] = existing_calib
 
-                # Update reason_counts
-                all_marks = set(existing_marks.keys())
+                # Update reason_counts (read from unified format)
                 reason_counts: Dict[str, int] = {}
-                for base in all_marks:
-                    reason = existing_marks.get(base, "")
+                for base, mark_entry in existing_marks.items():
+                    if isinstance(mark_entry, dict):
+                        reason = mark_entry.get("reason", "")
+                    else:
+                        reason = mark_entry  # Legacy: just string
                     if reason:
                         reason_counts[reason] = reason_counts.get(reason, 0) + 1
                 child_cache["reason_counts"] = reason_counts
@@ -360,7 +361,6 @@ class Collection:
                 save_dataset_cache_file(child_cache_path, child_cache)
 
                 # Notify handler registry
-                from backend.services.handler_registry import get_handler_registry
                 registry = get_handler_registry()
                 handler = registry.get(child_dir)
                 if handler:
@@ -369,10 +369,10 @@ class Collection:
 
                 updated_children += 1
                 mark_count = len(marks_to_add)
-                auto_count = sum(len(bases) for bases in auto_to_add.values())
+                auto_count = sum(1 for m in marks_to_add.values() if isinstance(m, dict) and m.get("auto"))
                 calib_count = len(calibration_to_add)
-                if mark_count or auto_count or calib_count:
-                    log_info(f"Collection {self.name}: Distributed to {child_key}: {mark_count} marks, {auto_count} auto_marks, {calib_count} calibration", "COLLECTION")
+                if mark_count or calib_count:
+                    log_info(f"Collection {self.name}: Distributed to {child_key}: {mark_count} marks ({auto_count} auto), {calib_count} calibration", "COLLECTION")
 
             except Exception as e:
                 log_error(f"Collection {self.name}: Failed to distribute to child {child_key}: {e}", "COLLECTION")
@@ -444,14 +444,12 @@ class Collection:
 
     # Properties for read-only access to aggregated data
     @property
-    def marks(self) -> Dict[str, str]:
-        """Aggregated marks (namespaced)."""
-        return dict(self._marks)
+    def marks(self) -> Dict[str, Dict[str, Any]]:
+        """Aggregated marks (namespaced).
 
-    @property
-    def auto_marks(self) -> Dict[str, Set[str]]:
-        """Aggregated auto_marks (namespaced)."""
-        return {reason: set(bases) for reason, bases in self._auto_marks.items()}
+        New unified format: {base: {reason: str, auto: bool}}
+        """
+        return dict(self._marks)
 
     @property
     def calibration_marked(self) -> Set[str]:
@@ -459,9 +457,19 @@ class Collection:
         return set(self._calibration_marked)
 
     @property
+    def calibration_auto(self) -> Dict[str, bool]:
+        """Aggregated calibration auto flags (namespaced base -> is_auto)."""
+        return dict(self._calibration_auto)
+
+    @property
     def calibration_results(self) -> Dict[str, Dict[str, bool]]:
         """Aggregated calibration detection results (namespaced)."""
         return dict(self._calibration_results)
+
+    @property
+    def calibration_outliers(self) -> Dict[str, Dict[str, bool]]:
+        """Aggregated calibration outlier flags (namespaced base -> {lwir, visible, stereo})."""
+        return dict(self._calibration_outliers)
 
     @property
     def signatures(self) -> Dict[str, Dict[str, bytes]]:
@@ -488,39 +496,12 @@ class Collection:
         return "", base
 
     def _extract_stats_from_cache(self, cache: Dict) -> DatasetStats:
-        """Extract DatasetStats from cache dict."""
-        stats = DatasetStats()
+        """Extract DatasetStats from cache dict using derive_summary_from_entry."""
 
-        # Basic counts
-        stats.total_pairs = cache.get("total_pairs", 0)
-        stats.removed_total = cache.get("removed_total", 0)
-        stats.tagged_manual = cache.get("tagged_manual", 0)
-        stats.tagged_auto = cache.get("tagged_auto", 0)
-
-        # Reason dictionaries
-        stats.removed_by_reason = cache.get("removed_by_reason", {})
-        stats.removed_user_by_reason = cache.get("removed_user_by_reason", {})
-        stats.removed_auto_by_reason = cache.get("removed_auto_by_reason", {})
-        stats.tagged_by_reason = cache.get("tagged_by_reason", {})
-        stats.tagged_auto_by_reason = cache.get("tagged_auto_by_reason", {})
-
-        # Calibration counts
-        stats.calibration_marked = cache.get("calibration_marked", 0)
-        stats.calibration_both = cache.get("calibration_both", 0)
-        stats.calibration_partial = cache.get("calibration_partial", 0)
-        stats.calibration_missing = cache.get("calibration_missing", 0)
-        stats.outlier_lwir = cache.get("outlier_lwir", 0)
-        stats.outlier_visible = cache.get("outlier_visible", 0)
-        stats.outlier_stereo = cache.get("outlier_stereo", 0)
-
-        # Sweep flags
-        sweep_flags = cache.get("sweep_flags", {})
-        if isinstance(sweep_flags, dict):
-            stats.sweep_duplicates_done = sweep_flags.get("duplicates", False)
-            stats.sweep_quality_done = sweep_flags.get("quality", False)
-            stats.sweep_patterns_done = sweep_flags.get("patterns", False)
-
-        return stats
+        # Use derive_summary_from_entry for consistency (single source of truth)
+        summary = derive_summary_from_entry(cache)
+        stats_data = get_dict_path(summary, "stats", {}, dict) or {}
+        return DatasetStats(stats_data)
 
     @staticmethod
     def is_collection_dir(path: Path) -> bool:

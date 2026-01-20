@@ -38,7 +38,8 @@ def get_calibration_marks_from_cache(cache_entry: Dict) -> Set[str]:
 
     marked = set()
     for base, data in calibration.items():
-        if isinstance(data, dict) and data.get("marked") is True:
+        # Presence in dict = marked (no explicit 'marked' check)
+        if isinstance(data, dict):
             marked.add(str(base))
 
     return marked
@@ -130,11 +131,10 @@ def fix_dataset_consistency(dataset_path: Path, add_missing_marks: bool = True, 
     if add_missing_marks and corners_without_marks:
         log_debug(f"  Adding {len(corners_without_marks)} missing marks", "CONSISTENCY")
         for base in corners_without_marks:
+            # Presence in dict = marked (no explicit 'marked' field needed)
             calibration[base] = {
-                "marked": True,
-                "outlier_lwir": False,
-                "outlier_visible": False,
-                "outlier_stereo": False,
+                "auto": False,
+                "outlier": {"lwir": False, "visible": False, "stereo": False},
                 "results": {"lwir": False, "visible": False}
             }
             fixed_marks.add(base)

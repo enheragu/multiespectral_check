@@ -1,16 +1,24 @@
 """Helpers to inspect workspace datasets and persist per-dataset notes."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import json
 import os
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Set, TYPE_CHECKING
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
-import yaml
-
+from backend.services.cache_service import (DATASET_CACHE_FILENAME,
+                                            empty_dataset_entry,
+                                            load_dataset_cache_file,
+                                            save_dataset_cache_file)
+from backend.services.stats_manager import DatasetStats
+from backend.services.summary_derivation import derive_summary_from_entry
+from backend.utils.cache import DatasetCache
+from common.dict_helpers import get_dict_path, normalize_int_dict
+from common.log_utils import log_debug, log_perf
+from common.yaml_utils import load_yaml
 
 if TYPE_CHECKING:
     from backend.services.thread_pool_manager import ThreadPoolManager
@@ -20,40 +28,11 @@ try:
 except ImportError:
     get_thread_pool_manager = None  # type: ignore
 
-from backend.services.cache_service import (
-    DATASET_CACHE_FILENAME,
-    empty_dataset_entry,
-    load_dataset_cache_file,
-    save_dataset_cache_file,
-    deserialize_calibration,
-)
-from backend.services.summary_derivation import derive_summary_from_entry
-from common.dict_helpers import get_dict_path
-from backend.utils.cache import DatasetCache
-from common.reasons import AUTO_REASONS
-from backend.services.stats_manager import DatasetStats
-from common.log_utils import log_debug, log_perf, log_debug
-
-
-
 WORKSPACE_INDEX_FILENAME = ".workspace_index.json"
 
 # Bump this version whenever workspace aggregation logic changes
 # to force cache regeneration
 WORKSPACE_LOGIC_VERSION = 3
-
-
-def _normalize_int_dict(data: object) -> Dict[str, int]:
-    """Convert dict values to int, handling None/empty gracefully."""
-    if not isinstance(data, dict):
-        return {}
-    return {k: int(v) for k, v in data.items()}
-
-
-def _merge_count_dicts(target: Dict[str, int], source: Dict[str, int]) -> None:
-    """Merge source counts into target dict in-place."""
-    for key, val in source.items():
-        target[key] = target.get(key, 0) + val
 
 
 @dataclass
@@ -180,6 +159,10 @@ def scan_workspace(workspace_dir: Path) -> List[WorkspaceDatasetInfo]:
 
 
 def collect_dataset_info(dataset_dir: Path, parent: Optional[str] = None) -> WorkspaceDatasetInfo | None:
+    """Collect dataset info from filesystem/cache.
+
+    Uses derive_summary_from_entry() for consistency - single source of truth.
+    """
     if not dataset_dir.exists() or not dataset_dir.is_dir():
         return None
     if not _is_dataset_dir(dataset_dir):
@@ -189,6 +172,7 @@ def collect_dataset_info(dataset_dir: Path, parent: Optional[str] = None) -> Wor
     cache_entry: DatasetCache = load_dataset_cache_file(cache_path)
     cache_mtime = cache_path.stat().st_mtime if cache_path.exists() else 0.0
 
+    # Check if we can use cached shortcut
     quick_sig = _quick_signature(dataset_dir)
     cached_sig = cache_entry.get("workspace_sig") if isinstance(cache_entry, dict) else None
     if cached_sig and abs(float(cached_sig) - quick_sig) < 1e-6:
@@ -196,109 +180,23 @@ def collect_dataset_info(dataset_dir: Path, parent: Optional[str] = None) -> Wor
         if info:
             log_perf(f"dataset {dataset_dir.name}: cache_shortcut=True in {time.perf_counter() - start:.3f}s", "perf:workspace")
             return info
+
+    # Cache miss - ensure total_pairs is updated
     cache_valid = cache_mtime >= _dataset_signature(dataset_dir)
-    cache_dirty = False
-
     total_pairs, pairs_dirty = _load_total_pairs(dataset_dir, cache_entry, cache_valid)
-    cache_dirty = cache_dirty or pairs_dirty
+    if pairs_dirty:
+        cache_entry["total_pairs"] = total_pairs
 
-    # ALWAYS compute reason_counts from marks dict (single source of truth)
-    # reason_counts in cache may be corrupted from earlier bugs
-    marks = cache_entry.get("marks") if isinstance(cache_entry, dict) else {}
-    tagged_reason_counts: Dict[str, int] = {}
-
-    if isinstance(marks, dict):
-        # Count marks by reason from marks dict
-        for base, reason in marks.items():
-            if isinstance(reason, str) and isinstance(base, str):
-                tagged_reason_counts[reason] = tagged_reason_counts.get(reason, 0) + 1
-        log_debug(f"Dataset: {dataset_dir.name}: Computed reason_counts from marks: {tagged_reason_counts}", "WorkspaceInspector")
-
-    # Deserialize auto_marks (dict of reason -> list of bases)
-    tagged_auto_marks_raw = cache_entry.get("auto_marks") if isinstance(cache_entry, dict) else {}
-    tagged_auto_marks: Dict[str, Set[str]] = {}
-    if isinstance(tagged_auto_marks_raw, dict):
-        for reason, bases in tagged_auto_marks_raw.items():
-            if isinstance(reason, str) and isinstance(bases, list):
-                tagged_auto_marks[reason] = {b for b in bases if isinstance(b, str)}
-
-    if tagged_auto_marks:
-        log_debug(f"Dataset: {dataset_dir.name}: auto_marks loaded: {', '.join(f'{k}={len(v)}' for k, v in tagged_auto_marks.items())}", "WorkspaceInspector")
-
-    # If we have reason_counts but no auto_marks, reconstruct them
-    if tagged_reason_counts and not tagged_auto_marks:
-        marks = cache_entry.get("marks") if isinstance(cache_entry, dict) else {}
-
-        if isinstance(marks, dict):
-            for base, reason in marks.items():
-                if isinstance(base, str) and isinstance(reason, str) and reason in AUTO_REASONS:
-                    tagged_auto_marks.setdefault(reason, set()).add(base)
-            if tagged_auto_marks:
-                log_debug(f"Dataset: {dataset_dir.name}: reconstructed auto_marks from marks: {list(tagged_auto_marks.keys())}", "WorkspaceInspector")
-            # Mark cache dirty so reconstructed auto_counts get saved
-            if tagged_auto_marks:
-                cache_dirty = True
-
-    # Calculate counts from auto_marks
-    tagged_auto_counts = {reason: len(bases) for reason, bases in tagged_auto_marks.items()}
-
-    log_debug(f"Dataset: {dataset_dir.name}: reason_counts={tagged_reason_counts}, auto_counts={tagged_auto_counts}", "WorkspaceInspector")
-
-    tagged_manual_by_reason: Dict[str, int] = {}
-    for reason, count in tagged_reason_counts.items():
-        auto_val = tagged_auto_counts.get(reason, 0)
-        tagged_manual_by_reason[reason] = max(0, count - auto_val)
-    tagged_manual_total = sum(tagged_manual_by_reason.values())
-    tagged_auto_total = sum(tagged_auto_counts.values())
-
-    log_debug(f"Dataset: {dataset_dir.name}: manual_total={tagged_manual_total}, auto_total={tagged_auto_total}, manual_by_reason={tagged_manual_by_reason}", "WorkspaceInspector")
-
-    removed_user_by_reason, removed_auto_by_reason = _load_delete_reasons(dataset_dir)
-    removed_by_reason: Dict[str, int] = {}
-    for reason, count in removed_user_by_reason.items():
-        removed_by_reason[reason] = removed_by_reason.get(reason, 0) + count
-    for reason, count in removed_auto_by_reason.items():
-        removed_by_reason[reason] = removed_by_reason.get(reason, 0) + count
-    removed_total = _count_deleted_pairs(dataset_dir)
-
-    note_value = cache_entry.get("note") if isinstance(cache_entry, dict) else ""
-    note = note_value if isinstance(note_value, str) else ""
-    calib = _calibration_summary(cache_entry)
-
-    # Extract sweep_flags from cache
-    sweep_flags = cache_entry.get("sweep_flags", {}) if isinstance(cache_entry, dict) else {}
-    sweep_dups = sweep_flags.get("duplicates", False) if isinstance(sweep_flags, dict) else False
-    sweep_qual = sweep_flags.get("quality", False) if isinstance(sweep_flags, dict) else False
-    sweep_pats = sweep_flags.get("patterns", False) if isinstance(sweep_flags, dict) else False
-
+    # Update workspace signature
     cache_entry["workspace_sig"] = quick_sig
-    cache_entry["reason_counts"] = tagged_reason_counts
-    cache_entry["auto_counts"] = tagged_auto_counts
-    if cache_dirty:
+    if pairs_dirty:
         save_dataset_cache_file(cache_path, cache_entry)
-        log_debug(f"Dataset: {dataset_dir.name}: Saved cache with auto_counts={tagged_auto_counts}", "WorkspaceInspector")
 
-    stats = DatasetStats(
-        total_pairs=total_pairs,
-        removed_total=removed_total,
-        tagged_manual=tagged_manual_total,
-        tagged_auto=tagged_auto_total,
-        removed_by_reason=removed_by_reason if removed_total > 0 else {},
-        removed_user_by_reason=removed_user_by_reason if removed_total > 0 else {},
-        removed_auto_by_reason=removed_auto_by_reason if removed_total > 0 else {},
-        tagged_by_reason=tagged_manual_by_reason,
-        tagged_auto_by_reason=tagged_auto_counts,
-        calibration_marked=calib["marked"],
-        calibration_both=calib["both"],
-        calibration_partial=calib["partial"],
-        calibration_missing=calib["missing"],
-        outlier_lwir=calib["out_lwir"],
-        outlier_visible=calib["out_vis"],
-        outlier_stereo=calib["out_stereo"],
-        sweep_duplicates_done=sweep_dups,
-        sweep_quality_done=sweep_qual,
-        sweep_patterns_done=sweep_pats,
-    )
+    # Derive summary and build info (single source of truth)
+    summary_dict = derive_summary_from_entry(cache_entry)
+    stats_data = get_dict_path(summary_dict, "stats", {}, expected_type=dict) or {}
+    stats = DatasetStats(stats_data)
+    note = get_dict_path(summary_dict, "dataset_info.note", "", expected_type=str) or ""
 
     info = WorkspaceDatasetInfo(
         name=dataset_dir.name,
@@ -308,8 +206,8 @@ def collect_dataset_info(dataset_dir: Path, parent: Optional[str] = None) -> Wor
         stats=stats,
     )
     log_perf(
-        f"dataset {dataset_dir.name}: pairs={total_pairs} removed={removed_total} "
-        f"calib={calib['marked']} cache_valid={cache_valid} in {time.perf_counter() - start:.3f}s",
+        f"dataset {dataset_dir.name}: pairs={stats.total_pairs} removed={stats.removed_total} "
+        f"calib={stats.calibration_marked} cache_valid={cache_valid} in {time.perf_counter() - start:.3f}s",
         "perf:workspace"
     )
     return info
@@ -339,11 +237,11 @@ def _load_reason_counts(
     cache_dirty = False
     cached_reasons = cache_entry.get("reason_counts") if isinstance(cache_entry, dict) else {}
     cached_auto = cache_entry.get("auto_counts") if isinstance(cache_entry, dict) else {}
-    normalized_auto = _normalize_int_dict(cached_auto)
+    normalized_auto = normalize_int_dict(cached_auto)
     reason_files = _reason_files(dataset_dir)
     has_reason_files = bool(reason_files)
     if cache_valid and (isinstance(cached_reasons, dict) or isinstance(cached_auto, dict)):
-        normalized_reasons = _normalize_int_dict(cached_reasons)
+        normalized_reasons = normalize_int_dict(cached_reasons)
         if not normalized_reasons and normalized_auto:
             normalized_reasons = dict(normalized_auto)
         if normalized_reasons or not has_reason_files:
@@ -353,79 +251,21 @@ def _load_reason_counts(
     cache_entry["reason_counts"] = reason_counts
     cache_entry["auto_counts"] = normalized_auto
     cache_dirty = True
-    normalized_reasons = _normalize_int_dict(reason_counts)
+    normalized_reasons = normalize_int_dict(reason_counts)
     if not normalized_reasons and normalized_auto:
         normalized_reasons = dict(normalized_auto)
     return normalized_reasons, normalized_auto, cache_dirty
 
 
 def _load_total_pairs(dataset_dir: Path, cache_entry: DatasetCache, cache_valid: bool) -> tuple[int, bool]:
-    cached_total = cache_entry.get("total_pairs") if isinstance(cache_entry, dict) else None
-    if cache_valid and isinstance(cached_total, (int, float)):
-        return int(cached_total), False
+    """Count total image pairs from filesystem.
+
+    NOTE: total_pairs is NOT persisted to YAML (derived from filesystem).
+    Always counts from filesystem for accuracy.
+    """
     total_pairs = _quick_count_pairs(dataset_dir)
-    cache_entry["total_pairs"] = total_pairs
-    return total_pairs, True
-
-
-def _calibration_summary(entry: DatasetCache) -> Dict[str, int]:
-    raw = entry.get("calibration") if isinstance(entry, dict) else {}
-    calibration = deserialize_calibration(raw)
-
-    # Extract marked, results, and outliers from the new dict format
-    marked = {base for base, data in calibration.items() if data.get("marked")}
-    results = {base: data.get("results", {}) for base, data in calibration.items()}
-    out_lwir = {base for base, data in calibration.items() if data.get("outlier_lwir")}
-    out_visible = {base for base, data in calibration.items() if data.get("outlier_visible")}
-    out_stereo = {base for base, data in calibration.items() if data.get("outlier_stereo")}
-
-    counts = {"marked": len(marked), "both": 0, "partial": 0, "missing": 0}
-    bases = set(marked) | set(results.keys())
-
-    # If results are empty but we have marked images, infer detection status from saved corners on disk
-    inferred: Dict[str, Dict[str, bool]] = {}
-    if marked and (not isinstance(results, dict) or not results):
-        try:
-            # Late import to avoid circular deps; calibration corners live in per-dataset YAMLs.
-            from backend.services.calibration_corners_io import load_corners_for_dataset
-
-            dataset_path = entry.get("dataset_path") if isinstance(entry, dict) else None
-            # Some callers don't inject dataset_path; infer from active workspace inspector caller if present.
-            if dataset_path is None:
-                dataset_path = entry.get("_dataset_path") if isinstance(entry, dict) else None
-            # load_corners_for_dataset expects a Path
-            if dataset_path is not None:
-                corners_map = load_corners_for_dataset(Path(dataset_path))
-                # corners_map: base -> {lwir: [...], visible: [...]}
-                for base, bucket in (corners_map or {}).items():
-                    if not isinstance(base, str) or not isinstance(bucket, dict):
-                        continue
-                    inferred[base] = {
-                        "lwir": bool(bucket.get("lwir")),
-                        "visible": bool(bucket.get("visible")),
-                    }
-        except Exception:
-            inferred = {}
-
-    for base in bases:
-        res = results.get(base, {}) if isinstance(results, dict) else {}
-        if isinstance(res, dict) and (res.get("lwir") is True or res.get("visible") is True):
-            positives = sum(1 for cam in ("lwir", "visible") if res.get(cam) is True)
-        else:
-            inferred_res = inferred.get(base, {})
-            positives = sum(1 for cam in ("lwir", "visible") if inferred_res.get(cam) is True)
-        if positives >= 2:
-            counts["both"] += 1
-        elif positives == 1:
-            counts["partial"] += 1
-        else:
-            counts["missing"] += 1
-    return {
-        **counts,
-        "out_lwir": len(out_lwir),
-        "out_vis": len(out_visible),
-        "out_stereo": len(out_stereo),
-    }
+    cache_entry["total_pairs"] = total_pairs  # Update in-memory cache
+    return total_pairs, False  # Never dirty (not persisted)
 
 
 def _load_delete_reasons(dataset_dir: Path, reason_files: Optional[List[Path]] = None) -> Tuple[Dict[str, int], Dict[str, int]]:
@@ -442,10 +282,8 @@ def _load_delete_reasons(dataset_dir: Path, reason_files: Optional[List[Path]] =
     user_counts: Dict[str, int] = {}
     auto_counts: Dict[str, int] = {}
     for yaml_path in reason_files:
-        try:
-            with open(yaml_path, "r", encoding="utf-8") as handle:
-                payload = yaml.safe_load(handle)
-        except (OSError, yaml.YAMLError):  # noqa: PERF203
+        payload = load_yaml(yaml_path)
+        if payload=={} or payload is None:
             continue
         reason_value = payload.get("reason") if isinstance(payload, dict) else None
         if not isinstance(reason_value, str):
@@ -535,7 +373,7 @@ _workspace_cache: Dict[Path, Dict[str, object]] = {}
 def invalidate_workspace_cache(workspace_dir: Path) -> None:
     """Invalidate workspace cache so it rescans on next access.
 
-    Call this after modifying dataset statistics (marks, auto_marks, etc.)
+    Call this after modifying dataset statistics (marks, calibration, etc.)
     to ensure workspace panel shows updated data.
     """
 
@@ -612,73 +450,12 @@ def _build_info_from_cache(cache_entry: DatasetCache, dataset_dir: Path, parent:
     # ✅ Use derive_summary_from_entry() for consistency (single source of truth)
     summary_dict = derive_summary_from_entry(cache_entry)
 
-    # Extract values using get_dict_path (safe nested access)
-    total_pairs = get_dict_path(summary_dict, "img_number.num_pairs", 0, expected_type=int) or 0
-    tagged_manual = get_dict_path(summary_dict, "img_number.tagged_user_to_delete", 0, expected_type=int) or 0
-    tagged_auto = get_dict_path(summary_dict, "img_number.tagged_auto_to_delete", 0, expected_type=int) or 0
+    # Extract stats dict directly - much simpler!
+    stats_data = get_dict_path(summary_dict, "stats", {}, expected_type=dict) or {}
+    stats = DatasetStats(stats_data)
 
-    # Reason breakdowns
-    tagged_by_reason: Dict[str, int] = get_dict_path(summary_dict, "tagged_user_to_delete_reasons", {}, expected_type=dict) or {}
-    tagged_auto_by_reason: Dict[str, int] = get_dict_path(summary_dict, "tagged_auto_to_delete_reasons", {}, expected_type=dict) or {}
-
-    # Calibration stats
-    calibration: Dict[str, Any] = get_dict_path(summary_dict, "calibration", {}, expected_type=dict) or {}
-    calib_marked = get_dict_path(calibration, "marked", 0, expected_type=int) or 0
-    calib_both = get_dict_path(calibration, "found_both_chessboard", 0, expected_type=int) or 0
-    calib_only_lwir = get_dict_path(calibration, "found_only_lwir_chessboard", 0, expected_type=int) or 0
-    calib_only_vis = get_dict_path(calibration, "found_only_visible_chessboard", 0, expected_type=int) or 0
-    calib_none = get_dict_path(calibration, "found_none_chessboard", 0, expected_type=int) or 0
-    # Combine for total partial calibration
-    calib_partial = calib_only_lwir + calib_only_vis
-
-    # Outliers
-    out_lwir = get_dict_path(calibration, "outlier_discarded_lwir", 0, expected_type=int) or 0
-    out_vis = get_dict_path(calibration, "outlier_discarded_visible", 0, expected_type=int) or 0
-    out_stereo = get_dict_path(calibration, "outlier_discarded_stereo", 0, expected_type=int) or 0
-
-    # Note
+    # Note from dataset_info
     note = get_dict_path(summary_dict, "dataset_info.note", "", expected_type=str) or ""
-
-    # Sweep flags from cache_entry (not from derived summary)
-    sweep_flags = cache_entry.get("sweep_flags", {}) if isinstance(cache_entry, dict) else {}
-    sweep_dups = sweep_flags.get("duplicates", False) if isinstance(sweep_flags, dict) else False
-    sweep_qual = sweep_flags.get("quality", False) if isinstance(sweep_flags, dict) else False
-    sweep_pats = sweep_flags.get("patterns", False) if isinstance(sweep_flags, dict) else False
-
-    # Load deleted data from filesystem (not in cache)
-    removed_user_by_reason, removed_auto_by_reason = _load_delete_reasons(dataset_dir)
-    removed_by_reason: Dict[str, int] = {}
-    for reason, count in removed_user_by_reason.items():
-        removed_by_reason[reason] = removed_by_reason.get(reason, 0) + count
-    for reason, count in removed_auto_by_reason.items():
-        removed_by_reason[reason] = removed_by_reason.get(reason, 0) + count
-    removed_total = _count_deleted_pairs(dataset_dir)
-    if removed_total == 0:
-        removed_by_reason = {}
-        removed_user_by_reason = {}
-        removed_auto_by_reason = {}
-
-    stats = DatasetStats(
-        total_pairs=total_pairs,
-        removed_total=removed_total,
-        tagged_manual=tagged_manual,
-        tagged_auto=tagged_auto,
-        removed_by_reason=removed_by_reason,
-        removed_user_by_reason=removed_user_by_reason,
-        removed_auto_by_reason=removed_auto_by_reason,
-        tagged_by_reason=tagged_by_reason,
-        tagged_auto_by_reason=tagged_auto_by_reason,
-        calibration_marked=calib_marked,
-        calibration_both=calib_both,
-        calibration_partial=calib_partial,
-        calibration_missing=calib_none,
-        outlier_lwir=out_lwir,
-        outlier_visible=out_vis,
-        outlier_stereo=out_stereo,
-        sweep_duplicates_done=sweep_dups,
-        sweep_quality_done=sweep_qual,
-        sweep_patterns_done=sweep_pats,
-    )
 
     return WorkspaceDatasetInfo(
         name=dataset_dir.name,
@@ -697,48 +474,23 @@ def _reason_files(dataset_dir: Path) -> List[Path]:
 
 
 def _aggregate_collection(collection_dir: Path, children: List[WorkspaceDatasetInfo]) -> WorkspaceDatasetInfo:
-    """Aggregate collection info from children using Collection class.
+    """Aggregate collection info from children by merging stats.
 
-    Creates a Collection instance, aggregates data, and builds WorkspaceDatasetInfo.
+    Uses DatasetStats.merge() for proper aggregation (sums ints, ORs bools).
     """
-    from backend.services.collection import Collection
 
     child_names = [c.name for c in children]
     log_debug(f"Collection {collection_dir.name}: aggregating from {len(children)} children: {child_names}", "INSPECTOR")
 
-    # Create Collection and aggregate from children
-    collection = Collection(collection_dir)
-    collection.discover_children()
-    collection.aggregate_from_children()
-
-    # Extract aggregated data from collection
-    tagged_manual_total = len([b for b, r in collection.marks.items() if not r.startswith("auto:")])
-    tagged_auto_total = len([b for b, r in collection.marks.items() if r.startswith("auto:")])
-
-    # Count by reason
-    tagged_by_reason: Dict[str, int] = {}
-    tagged_auto_by_reason: Dict[str, int] = {}
-    for base, reason in collection.marks.items():
-        if reason.startswith("auto:"):
-            actual_reason = reason[5:]  # Strip "auto:" prefix
-            tagged_auto_by_reason[actual_reason] = tagged_auto_by_reason.get(actual_reason, 0) + 1
-        else:
-            tagged_by_reason[reason] = tagged_by_reason.get(reason, 0) + 1
-
-    log_debug(f"Collection {collection_dir.name}: aggregated - manual={tagged_manual_total}, auto={tagged_auto_total}", "INSPECTOR")
-
-    # Aggregate these from children
-    total_pairs = sum(child.stats.total_pairs for child in children)
-    removed_total = sum(child.stats.removed_total for child in children)
-    removed_by_reason: Dict[str, int] = {}
-    for child in children:
-        _merge_count_dicts(removed_by_reason, child.stats.removed_by_reason)
-
-    # Create collection stats by merging children (includes sweep flags OR logic)
-    from backend.services.stats_manager import DatasetStats
+    # Create collection stats by merging all children
     collection_stats = DatasetStats()
     for child in children:
         collection_stats.merge(child.stats)
+
+    log_debug(f"Collection {collection_dir.name}: aggregated - "
+              f"pairs={collection_stats.total_pairs}, "
+              f"manual={collection_stats.tagged_manual}, "
+              f"auto={collection_stats.tagged_auto}", "INSPECTOR")
 
     return WorkspaceDatasetInfo(
         name=collection_dir.name,
@@ -752,38 +504,19 @@ def _aggregate_collection(collection_dir: Path, children: List[WorkspaceDatasetI
 
 
 def _info_to_summary(info: WorkspaceDatasetInfo, workspace_dir: Path) -> Dict[str, object]:
+    """Convert WorkspaceDatasetInfo to summary dict for index storage."""
     return {
         "name": info.name,
         "rel": str(info.path.relative_to(workspace_dir)),
-        "total_pairs": info.stats.total_pairs,
-        "removed_total": info.stats.removed_total,
-        "tagged_manual": info.stats.tagged_manual,
-        "tagged_auto": info.stats.tagged_auto,
-        "removed_by_reason": dict(info.stats.removed_by_reason),
-        "tagged_by_reason": dict(info.stats.tagged_by_reason),
-        "tagged_auto_by_reason": dict(info.stats.tagged_auto_by_reason),
         "note": info.note,
         "parent": info.parent,
         "is_collection": info.is_collection,
-        "calibration": {
-            "marked": info.stats.calibration_marked,
-            "both": info.stats.calibration_both,
-            "partial": info.stats.calibration_partial,
-            "missing": info.stats.calibration_missing,
-            "out_lwir": info.stats.outlier_lwir,
-            "out_vis": info.stats.outlier_visible,
-            "out_stereo": info.stats.outlier_stereo,
-        },
-        "sweep_flags": {
-            "duplicates": info.stats.sweep_duplicates_done,
-            "quality": info.stats.sweep_quality_done,
-            "patterns": info.stats.sweep_patterns_done,
-        },
+        "stats": info.stats.to_dict(),  # Direct dict serialization!
     }
 
 
 def _summary_to_info(summary: Dict[str, object], workspace_dir: Path, parent_hint: Optional[str]) -> Optional[WorkspaceDatasetInfo]:
-    """Convert summary dict to WorkspaceDatasetInfo using get_dict_path() for safe access."""
+    """Convert summary dict to WorkspaceDatasetInfo."""
     if not isinstance(summary, dict):
         return None
 
@@ -796,110 +529,19 @@ def _summary_to_info(summary: Dict[str, object], workspace_dir: Path, parent_hin
     path = workspace_dir / rel
     parent = parent_hint if parent_hint is not None else get_dict_path(summary, "parent", expected_type=str)
     is_coll = get_dict_path(summary, "is_collection", False, expected_type=bool)
-
-    # Image counts
-    total_pairs = get_dict_path(summary, "total_pairs", 0, expected_type=int)
-    removed_total = get_dict_path(summary, "removed_total", 0, expected_type=int)
-    tagged_manual = get_dict_path(summary, "tagged_manual", 0, expected_type=int)
-    tagged_auto = get_dict_path(summary, "tagged_auto", 0, expected_type=int)
-
-    # Reason breakdowns
-    removed_by_reason = _normalize_int_dict(get_dict_path(summary, "removed_by_reason", {}))
-    tagged_by_reason = _normalize_int_dict(get_dict_path(summary, "tagged_by_reason", {}))
-    tagged_auto_by_reason = _normalize_int_dict(get_dict_path(summary, "tagged_auto_by_reason", {}))
-
-    # Calibration stats using get_dict_path
-    calib_marked = get_dict_path(summary, "calibration.marked", 0, expected_type=int)
-    calib_both = get_dict_path(summary, "calibration.both", 0, expected_type=int)
-    calib_partial = get_dict_path(summary, "calibration.partial", 0, expected_type=int)
-    calib_missing = get_dict_path(summary, "calibration.missing", 0, expected_type=int)
-    out_lwir = get_dict_path(summary, "calibration.out_lwir", 0, expected_type=int)
-    out_vis = get_dict_path(summary, "calibration.out_vis", 0, expected_type=int)
-    out_stereo = get_dict_path(summary, "calibration.out_stereo", 0, expected_type=int)
-
-    # Sweep flags using get_dict_path
-    sweep_duplicates = get_dict_path(summary, "sweep_flags.duplicates", False, expected_type=bool)
-    sweep_quality = get_dict_path(summary, "sweep_flags.quality", False, expected_type=bool)
-    sweep_patterns = get_dict_path(summary, "sweep_flags.patterns", False, expected_type=bool)
-
-    # Note
     note = get_dict_path(summary, "note", "", expected_type=str)
 
-    stats = DatasetStats(
-        total_pairs=total_pairs,
-        removed_total=removed_total,
-        tagged_manual=tagged_manual,
-        tagged_auto=tagged_auto,
-        removed_by_reason=removed_by_reason,
-        tagged_by_reason=tagged_by_reason,
-        tagged_auto_by_reason=tagged_auto_by_reason,
-        calibration_marked=calib_marked,
-        calibration_both=calib_both,
-        calibration_partial=calib_partial,
-        calibration_missing=calib_missing,
-        outlier_lwir=out_lwir,
-        outlier_visible=out_vis,
-        outlier_stereo=out_stereo,
-        sweep_duplicates_done=sweep_duplicates,
-        sweep_quality_done=sweep_quality,
-        sweep_patterns_done=sweep_patterns,
-    )
+    # Stats from dict - much simpler!
+    stats_data = get_dict_path(summary, "stats", {}, expected_type=dict) or {}
+    stats = DatasetStats(stats_data)
 
-    info = WorkspaceDatasetInfo(
+    return WorkspaceDatasetInfo(
         name=name,
         path=path,
         note=note,
         is_collection=is_coll,
         parent=parent,
         stats=stats,
-    )
-
-    # Refresh deleted info from disk to avoid stale cached values
-    removed_total = _count_deleted_pairs(info.path)
-    if removed_total > 0:
-        removed_user_by_reason, removed_auto_by_reason = _load_delete_reasons(info.path)
-        # Merge both user and auto into removed_by_reason already computed above
-        for reason, count in removed_user_by_reason.items():
-            removed_by_reason[reason] = removed_by_reason.get(reason, 0) + count
-        for reason, count in removed_auto_by_reason.items():
-            removed_by_reason[reason] = removed_by_reason.get(reason, 0) + count
-    else:
-        removed_by_reason = {}
-        removed_user_by_reason = {}
-        removed_auto_by_reason = {}
-
-    # Create new stats with updated removed data from disk
-    updated_stats = DatasetStats(
-        total_pairs=info.stats.total_pairs,
-        removed_total=removed_total,
-        tagged_manual=info.stats.tagged_manual,
-        tagged_auto=info.stats.tagged_auto,
-        removed_by_reason=removed_by_reason,
-        removed_user_by_reason=removed_user_by_reason,
-        removed_auto_by_reason=removed_auto_by_reason,
-        tagged_by_reason=info.stats.tagged_by_reason,
-        tagged_auto_by_reason=info.stats.tagged_auto_by_reason,
-        calibration_marked=info.stats.calibration_marked,
-        calibration_both=info.stats.calibration_both,
-        calibration_partial=info.stats.calibration_partial,
-        calibration_missing=info.stats.calibration_missing,
-        outlier_lwir=info.stats.outlier_lwir,
-        outlier_visible=info.stats.outlier_visible,
-        outlier_stereo=info.stats.outlier_stereo,
-        sweep_duplicates_done=info.stats.sweep_duplicates_done,
-        sweep_quality_done=info.stats.sweep_quality_done,
-        sweep_patterns_done=info.stats.sweep_patterns_done,
-    )
-
-    # Always reconstruct with fresh deleted data from disk
-    return WorkspaceDatasetInfo(
-        name=info.name,
-        path=info.path,
-        note=info.note,
-        is_collection=info.is_collection,
-        children=info.children,
-        parent=info.parent,
-        stats=updated_stats,
     )
 
 

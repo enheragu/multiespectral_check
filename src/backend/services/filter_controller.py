@@ -122,23 +122,41 @@ class FilterController(QObject):
                 action.setChecked(mode == self.filter_mode)
                 action.blockSignals(False)
 
-    def reconcile_filter_state(self, show_warning: bool = False) -> None:
+    def get_first_matching_index(self) -> Optional[int]:
+        """Find the first image index that passes the current filter.
+
+        Returns:
+            Index of first matching image, or None if no matches
+        """
+        if not self.session.loader:
+            return None
+        for idx, base in enumerate(self.session.loader.image_bases):
+            if self.filter_accepts_base(base):
+                return idx
+        return None
+
+    def reconcile_filter_state(self, show_warning: bool = False) -> Optional[int]:
         """Reconcile filter state when marks change.
 
         Ensures filter mode is still valid after marking/unmarking images.
+        Returns the index to navigate to if the current image doesn't pass
+        the filter but other images do.
 
         Args:
             show_warning: Whether to show warning dialog if filter has no matches
+
+        Returns:
+            Index to navigate to, or None if no navigation needed
         """
         if self.filter_mode == FILTER_ALL:
-            return
+            return None
 
         # Check if current filter has any matches
         if not self.session.loader:
-            return
+            return None
 
-        has_matches = any(self.filter_accepts_base(base) for base in self.session.loader.image_bases)
-        if not has_matches:
+        first_match = self.get_first_matching_index()
+        if first_match is None:
             # No matches - switch to FILTER_ALL
             self.filter_mode = FILTER_ALL
             self.update_filter_checks()
@@ -151,6 +169,10 @@ class FilterController(QObject):
                     title,
                     f"No images match filter '{title}'. Switching to 'All images'.",
                 )
+            return None
+
+        # Return first match if current image doesn't pass filter
+        return first_match
 
     def filter_accepts_base(self, base: str) -> bool:
         """Check if base passes current filter.

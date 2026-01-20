@@ -53,7 +53,7 @@ def load_class_map(yaml_path: Optional[Path]) -> Dict[str, str]:
     if not yaml_path or not yaml_path.exists():
         return {}
     try:
-        import yaml  # type: ignore
+        from common.yaml_utils import load_yaml, save_yaml  # type: ignore
     except Exception:
         return {}
     try:

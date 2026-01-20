@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Optional
-import yaml
+from typing import Any, Dict, List, Optional, Tuple
 
 from common.log_utils import log_debug
+from common.yaml_utils import load_yaml, save_yaml
 
 
 CALIBRATION_DIR = "calibration"
@@ -38,19 +38,29 @@ def get_corners_file(dataset_path: Path, image_base: str) -> Path:
         return calib_dir / f"{image_base}.yaml"
 
 
+# Channels that can have corners (original and subpixel)
+CORNER_CHANNELS = ("lwir", "visible", "lwir_subpixel", "visible_subpixel")
+
+
 def save_corners(
     dataset_path: Path,
     image_base: str,
     corners: Dict[str, Optional[List[List[float]]]],
-    refined: Optional[Dict[str, bool]] = None,
+    image_sizes: Optional[Dict[str, Tuple[int, int]]] = None,
 ) -> None:
     """Save corners for a specific image to its individual file.
 
     Args:
         dataset_path: Path to the dataset (or collection root)
         image_base: Image base name (e.g., "IMG_001" or "child_dataset/IMG_001" for collections)
-        corners: Dict with "lwir" and "visible" keys, each containing list of (x,y) tuples or None
-        refined: Optional dict with "lwir" and "visible" keys indicating if corners were subpixel refined
+        corners: Dict with corner keys:
+            - "lwir": Original LWIR corners (list of [x, y])
+            - "visible": Original visible corners
+            - "lwir_subpixel": Subpixel-refined LWIR corners (optional)
+            - "visible_subpixel": Subpixel-refined visible corners (optional)
+        image_sizes: Optional dict with image sizes per channel:
+            - "lwir": (width, height) of LWIR image
+            - "visible": (width, height) of visible image
     """
     corners_file = get_corners_file(dataset_path, image_base)
 
@@ -58,27 +68,32 @@ def save_corners(
     corners_file.parent.mkdir(parents=True, exist_ok=True)
 
     # Serialize corners (convert tuples to lists for YAML)
-    serialized: Dict[str, Optional[List[List[float]]]] = {}
-    for channel in ["lwir", "visible"]:
+    serialized: Dict[str, Any] = {}
+    for channel in CORNER_CHANNELS:
         corner_list = corners.get(channel)
         if corner_list is not None:
             serialized[channel] = [[float(x), float(y)] for x, y in corner_list]
-        else:
-            serialized[channel] = None
 
-    # Add refined flags if provided
-    if refined:
-        serialized["refined"] = refined  # type: ignore[assignment]
-        log_debug(f"   Refined flags: {refined}", "CORNERS")
+    # Add image sizes if provided
+    if image_sizes:
+        sizes_dict: Dict[str, List[int]] = {}
+        for ch in ("lwir", "visible"):
+            if ch in image_sizes and image_sizes[ch]:
+                sizes_dict[ch] = list(image_sizes[ch])
+        if sizes_dict:
+            serialized["image_size"] = sizes_dict
 
     log_debug(f"💾 Saving corners for {image_base} in {dataset_path.name} → {corners_file.relative_to(dataset_path)}", "CORNERS")
-    log_debug(f"   LWIR: {len(serialized.get('lwir', []) or [])} corners, VIS: {len(serialized.get('visible', []) or [])} corners", "CORNERS")
+    lwir_count = len(serialized.get('lwir', []) or [])
+    vis_count = len(serialized.get('visible', []) or [])
+    lwir_sub = len(serialized.get('lwir_subpixel', []) or [])
+    vis_sub = len(serialized.get('visible_subpixel', []) or [])
+    log_debug(f"   LWIR: {lwir_count} corners{f' (+{lwir_sub} subpixel)' if lwir_sub else ''}, VIS: {vis_count} corners{f' (+{vis_sub} subpixel)' if vis_sub else ''}", "CORNERS")
 
-    with open(corners_file, "w") as f:
-        yaml.safe_dump(serialized, f, default_flow_style=False, sort_keys=False)
+    save_yaml(corners_file, serialized)
 
 
-def load_corners(dataset_path: Path, image_base: str) -> Optional[Dict[str, Optional[List[List[float]]]]]:
+def load_corners(dataset_path: Path, image_base: str) -> Optional[Dict[str, Any]]:
     """Load corners for a specific image from its individual file.
 
     Args:
@@ -86,8 +101,8 @@ def load_corners(dataset_path: Path, image_base: str) -> Optional[Dict[str, Opti
         image_base: Image base name (e.g., "IMG_001")
 
     Returns:
-        Dict with "lwir" and "visible" keys, or None if file doesn't exist.
-        May also include "refined" key with dict of channel → bool.
+        Dict with corner keys ("lwir", "visible", etc.) and optionally "image_size".
+        Returns None if file doesn't exist.
     """
     corners_file = get_corners_file(dataset_path, image_base)
 
@@ -96,30 +111,37 @@ def load_corners(dataset_path: Path, image_base: str) -> Optional[Dict[str, Opti
         return None
 
     try:
-        with open(corners_file, "r") as f:
-            data = yaml.safe_load(f)
+        data = load_yaml(corners_file)
 
-        if not isinstance(data, dict):
+        if not data:
             return None
 
         # Deserialize corners (convert lists back to tuples)
-        corners: Dict[str, Optional[List[List[float]]]] = {}
-        for channel in ["lwir", "visible"]:
+        corners: Dict[str, Any] = {}
+        for channel in CORNER_CHANNELS:
             corner_data = data.get(channel)
             if corner_data is None:
-                corners[channel] = None
+                continue  # Skip None/missing channels
             elif isinstance(corner_data, list):
                 corners[channel] = [[float(pt[0]), float(pt[1])] for pt in corner_data if len(pt) == 2]
-            else:
-                corners[channel] = None
 
-        # Load refined flags if present
-        refined = data.get("refined")
-        if isinstance(refined, dict):
-            corners["refined"] = refined  # type: ignore[assignment]
+        # Load image sizes if present
+        image_size_data = data.get("image_size")
+        if isinstance(image_size_data, dict):
+            image_sizes: Dict[str, Tuple[int, int]] = {}
+            for ch in ("lwir", "visible"):
+                ch_size = image_size_data.get(ch)
+                if isinstance(ch_size, (list, tuple)) and len(ch_size) >= 2:
+                    image_sizes[ch] = (int(ch_size[0]), int(ch_size[1]))
+            if image_sizes:
+                corners["image_size"] = image_sizes
 
         log_debug(f"📖 Loaded corners for {image_base} from {dataset_path.name}", "CORNERS")
-        log_debug(f"   LWIR: {len(corners.get('lwir', []) or [])} corners, VIS: {len(corners.get('visible', []) or [])} corners", "CORNERS")
+        lwir_count = len(corners.get('lwir', []) or [])
+        vis_count = len(corners.get('visible', []) or [])
+        lwir_sub = len(corners.get('lwir_subpixel', []) or [])
+        vis_sub = len(corners.get('visible_subpixel', []) or [])
+        log_debug(f"   LWIR: {lwir_count} corners{f' (+{lwir_sub} subpixel)' if lwir_sub else ''}, VIS: {vis_count} corners{f' (+{vis_sub} subpixel)' if vis_sub else ''}", "CORNERS")
         return corners
 
     except Exception as e:

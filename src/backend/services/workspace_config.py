@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
-import yaml
+from common.yaml_utils import load_yaml, save_yaml
 
 from common.log_utils import log_debug, log_info, log_warning
 
@@ -111,8 +111,7 @@ class WorkspaceConfigService:
             return
 
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
+            data = load_yaml(config_path)
             self._config = WorkspaceConfig.from_dict(data)
             log_info(f"Loaded workspace config from {config_path.name}", "WORKSPACE_CFG")
         except Exception as e:
@@ -126,8 +125,7 @@ class WorkspaceConfigService:
             return False
 
         try:
-            with open(config_path, "w", encoding="utf-8") as f:
-                yaml.safe_dump(self._config.to_dict(), f, default_flow_style=False, sort_keys=False)
+            save_yaml(config_path, self._config.to_dict(), sort_keys=False)
             log_info(f"Saved workspace config to {config_path.name}", "WORKSPACE_CFG")
             return True
         except Exception as e:

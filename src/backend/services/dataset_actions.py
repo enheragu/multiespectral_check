@@ -9,7 +9,7 @@ import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
-import yaml
+from common.yaml_utils import load_yaml, save_yaml
 from PyQt6.QtCore import Qt, QRunnable, QThreadPool, pyqtSignal, QObject
 from PyQt6.QtWidgets import QFileDialog, QMessageBox, QInputDialog
 
@@ -100,11 +100,9 @@ class DatasetActions:
         )
         if not file_path:
             return
-        try:
-            with open(file_path, "r", encoding="utf-8") as handle:
-                payload = yaml.safe_load(handle)
-        except (OSError, yaml.YAMLError) as exc:  # noqa: BLE001
-            QMessageBox.warning(viewer, "Calibration data", f"Could not read file: {exc}")
+        payload = load_yaml(file_path)
+        if payload == {}:
+            QMessageBox.warning(viewer, "Calibration data", f"Could not read file, empty payload: {file_path}")
             return
         matrices, extrinsic = self._parse_calibration_payload(payload)
         if not any(matrices.values()):
@@ -280,7 +278,16 @@ class DatasetActions:
             return
         if not session.loader:
             return
-        targets = [base for base, r in state.cache_data["marks"].items() if r == reason]
+        marks = state.cache_data["marks"]
+        targets = []
+        for base, entry in marks.items():
+            if isinstance(entry, dict):
+                if entry.get("reason") == reason:
+                    targets.append(base)
+            else:
+                # Legacy format
+                if entry == reason:
+                    targets.append(base)
         if not targets:
             QMessageBox.information(viewer, "Delete", "No images marked with that reason.")
             return
@@ -294,9 +301,11 @@ class DatasetActions:
         if reply != QMessageBox.StandardButton.Yes:
             return
         total = len(targets)
-        # Check if these marks are auto by seeing if any target is in the auto_marks bucket for this reason
-        auto_marks = state.cache_data["auto_marks"]
-        is_auto = reason in auto_marks and any(base in auto_marks[reason] for base in targets)
+        # Check if any of these marks are auto (unified format)
+        is_auto = any(
+            isinstance(marks.get(base), dict) and marks[base].get("auto", False)
+            for base in targets
+        )
         self._ignore_delete_results = False
         self._delete_job_active = True
         viewer.setCursor(Qt.CursorShape.BusyCursor)
@@ -321,17 +330,11 @@ class DatasetActions:
         if not session.loader or loader_ref is not session.loader:
             viewer.statusBar().showMessage("Dataset changed before deletion completed", 6000)
             return
+        calib = state.cache_data.setdefault("calibration", {})
         for base in moved:
             state.set_mark_reason(base, None, reason)
-            state.calibration_marked.discard(base)
-            state.calibration_results.pop(base, None)
-            # Remove corners from cache_data["calibration"]
-            calib = state.cache_data.get("calibration", {})
-            if base in calib and isinstance(calib[base], dict):
-                calib[base].pop("corners", None)
-            state.calibration_outliers_extrinsic.discard(base)
-            for bucket in state.calibration_outliers_intrinsic.values():
-                bucket.discard(base)
+            # Clear calibration data by removing from dict (presence = marked)
+            calib.pop(base, None)
             viewer.invalidate_overlay_cache(base)
             viewer._evict_pixmap_cache_entry(base)
         viewer._bump_signature_epoch()
@@ -402,13 +405,14 @@ class DatasetActions:
         QMessageBox.information(viewer, "Restore", restored_pairs_message(restored_pairs))
         viewer._mark_cache_dirty()
 
-    def set_calibration_mark(self, base: str, enabled: bool, *, auto: bool = False) -> bool:
+    def set_calibration_mark(self, base: str, enabled: bool, *, auto: Optional[bool] = None) -> bool:
         """Set or clear calibration mark for a base.
 
         Args:
             base: Image base name
             enabled: True to mark, False to unmark
-            auto: True if marking from auto-detection sweep
+            auto: True if marking from auto-detection sweep, False for manual,
+                  None to preserve existing auto flag (default for UI toggle)
 
         Returns:
             True if state changed, False otherwise
@@ -419,7 +423,8 @@ class DatasetActions:
             if base in state.calibration_marked:
                 return False
             # Use the state method that modifies cache_data directly
-            state.set_calibration_mark(base, marked=True, auto=auto)
+            # Pass auto=False for manual marking (new mark), None preserves existing
+            state.set_calibration_mark(base, marked=True, auto=auto if auto is not None else False)
             viewer.defer_calibration_analysis(base, force=True)
             viewer.invalidate_overlay_cache(base)
             state.refresh_calibration_entry(base)

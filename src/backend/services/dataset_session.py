@@ -33,6 +33,7 @@ from backend.utils.duplicates import (compute_signature_from_path,
 from common.log_utils import log_debug, log_info, log_perf, log_warning
 from common.reasons import (REASON_BLURRY, REASON_DUPLICATE,
                             REASON_MISSING_PAIR, REASON_MOTION, REASON_PATTERN)
+from common.yaml_utils import load_yaml
 from config import get_config
 
 if TYPE_CHECKING:
@@ -150,22 +151,29 @@ class DatasetSession:
         self.cache_service.record_dataset_kind(dir_path, "collection")
         self._collection_save_logged = False
 
-        # Hydrate state from collection's aggregated data
+        # Hydrate state from collection's aggregated marks (unified format: base -> {reason, auto})
         self.state.cache_data["marks"] = collection.marks
-        self.state.cache_data["auto_marks"] = {r: set(bases) for r, bases in collection.auto_marks.items()}
 
         self.state.cache_data["signatures"] = collection.signatures
-        # Update calibration marked bases and results
+        # Update calibration marked bases, auto flag, and results
         calib_dict = self.state.cache_data.setdefault("calibration", {})
+        calib_auto_flags = collection.calibration_auto
         for base in collection.calibration_marked:
             if base not in calib_dict:
                 calib_dict[base] = {}
-            calib_dict[base]["marked"] = True
+            # Presence in dict = marked (no explicit field needed)
+            # Copy auto flag from collection (essential for stats panel)
+            calib_dict[base]["auto"] = calib_auto_flags.get(base, False)
         # Also hydrate calibration results (detection status per channel)
         for base, results in collection.calibration_results.items():
             if base not in calib_dict:
                 calib_dict[base] = {}
             calib_dict[base]["results"] = dict(results)
+        # Also hydrate calibration outliers
+        for base, outliers in collection.calibration_outliers.items():
+            if base not in calib_dict:
+                calib_dict[base] = {}
+            calib_dict[base]["outlier"] = dict(outliers)
         self.state.cache_data["sweep_flags"] = collection.sweep_flags
 
         # Calculate missing counts
@@ -220,6 +228,21 @@ class DatasetSession:
         if self.loader:
             return self.loader.get_image_path(base, channel)
         return None
+
+    def get_original_image_size(self, base: str, channel: str) -> Optional[Tuple[int, int]]:
+        """Get the original image size (width, height) from disk without loading full pixmap.
+
+        This returns the size of the image file on disk, before any undistortion
+        or other transformations. Useful for transforming normalized coordinates.
+        """
+        path = self.get_image_path(base, channel)
+        if not path or not path.exists():
+            return None
+        # Use QPixmap to get size without full decode (Qt optimizes this)
+        pm = QPixmap(str(path))
+        if pm.isNull():
+            return None
+        return (pm.width(), pm.height())
 
     def calibration_filter_position(self, current_index: int) -> Tuple[int, int]:
         if not self.loader or not self.loader.image_bases or not self.state.calibration_marked:
@@ -510,7 +533,6 @@ class DatasetSession:
             if self.collection:
                 self.collection.distribute_to_children(
                     self.state.cache_data["marks"],
-                    self.state.cache_data["auto_marks"],
                     self.state.calibration_marked,
                     self.state.cache_data.get("calibration", {}),  # Include full calibration data
                 )
@@ -533,9 +555,25 @@ class DatasetSession:
     # Calibration corners management (individual files)
     # ------------------------------------------------------------------
     def set_corners(self, base: str, corners: Dict[str, Optional[List[List[float]]]]) -> None:
-        """Set corners for an image and mark them as dirty for saving."""
-        refined_info: Dict[str, bool] = corners.get("refined", {}) if isinstance(corners.get("refined"), dict) else {}  # type: ignore[assignment]
-        log_debug(f"set_corners({base}): LWIR={len(corners.get('lwir', []) or [])} corners, VIS={len(corners.get('visible', []) or [])} corners, refined={refined_info}", "SESSION")
+        """Set corners for an image and mark them as dirty for saving.
+
+        Args:
+            base: Image base name
+            corners: Dict with corner keys:
+                - "lwir": Original LWIR corners
+                - "visible": Original visible corners
+                - "lwir_subpixel": Subpixel-refined LWIR corners (optional)
+                - "visible_subpixel": Subpixel-refined visible corners (optional)
+        """
+        lwir_count = len(corners.get('lwir', []) or [])
+        vis_count = len(corners.get('visible', []) or [])
+        lwir_sub = len(corners.get('lwir_subpixel', []) or [])
+        vis_sub = len(corners.get('visible_subpixel', []) or [])
+        log_debug(
+            f"set_corners({base}): LWIR={lwir_count}{f'+{lwir_sub}sub' if lwir_sub else ''}, "
+            f"VIS={vis_count}{f'+{vis_sub}sub' if vis_sub else ''}",
+            "SESSION"
+        )
         # Store directly in cache_data["calibration"] structure
         if "calibration" not in self.state.cache_data:
             self.state.cache_data["calibration"] = {}
@@ -590,13 +628,9 @@ class DatasetSession:
             calib = self.state.cache_data.get("calibration", {})
             corners = calib.get(base, {}).get("corners") if base in calib else None
             if corners is not None:
-                # Extract refined flags from corners dict if present (don't pop, just get)
-                refined_data = corners.get("refined")
-                refined: Optional[Dict[str, bool]] = None
-                if isinstance(refined_data, dict):
-                    refined = dict(refined_data)  # Copy to avoid mutation issues
-                    log_debug(f"_flush_dirty_corners({base}): refined={refined}", "SESSION")
-                save_corners(self.dataset_path, base, corners, refined=refined)
+                # Extract image_sizes if present
+                image_sizes = corners.get("image_size")
+                save_corners(self.dataset_path, base, corners, image_sizes=image_sizes)
 
         self._dirty_corners.clear()
         log_debug("_flush_dirty_corners(): Complete", "SESSION")
@@ -612,24 +646,27 @@ class DatasetSession:
         moved = 0
         targets = list(self.state.cache_data["marks"].items())
         total = len(targets)
-        for idx, (base, reason) in enumerate(targets, start=1):
-            # Check if this mark is auto by seeing if it's in any auto_marks bucket
-            is_auto = any(base in bucket for bucket in self.state.cache_data["auto_marks"].values())
+        calib = self.state.cache_data.setdefault("calibration", {})
+        for idx, (base, mark_entry) in enumerate(targets, start=1):
+            # Check if this mark is auto (unified format)
+            if isinstance(mark_entry, dict):
+                reason = mark_entry.get("reason", "")
+                is_auto = mark_entry.get("auto", False)
+            else:
+                reason = mark_entry  # Legacy string format
+                is_auto = False
             if not self.loader.delete_entry(base, reason, auto=is_auto):
                 failed.append(base)
                 continue
             self._archive_entry_state(base)
             self.state.cache_data["marks"].pop(base, None)
             self._evict_pixmap_cache_entry(base)
-            self.state.calibration_marked.discard(base)
-            for bucket in self.state.calibration_outliers_intrinsic.values():
-                bucket.discard(base)
-            self.state.calibration_outliers_extrinsic.discard(base)
-            self.state.calibration_results.pop(base, None)
-            self.delete_corners(base)  # Use new method to delete from disk too
+            # Clear calibration by removing from dict (presence = marked)
+            calib.pop(base, None)
             for bucket in self.state.cache_data["reproj_errors"].values():
                 bucket.pop(base, None)
             self.state.cache_data["extrinsic_errors"].pop(base, None)
+            self.delete_corners(base)  # Use new method to delete from disk too
             self.state.remove_calibration_entry(base)
             self.state.cache_data["overrides"].discard(base)
             moved += 1
@@ -642,14 +679,8 @@ class DatasetSession:
             self._filter_state_by_loader()
             self._auto_mark_missing_pairs()
         else:
-            self.state.calibration_marked.clear()
-            self.state.calibration_outliers_intrinsic = {"lwir": set(), "visible": set()}
-            self.state.calibration_outliers_extrinsic.clear()
-            self.state.calibration_results.clear()
-            # Clear all corners from cache_data["calibration"]
-            for base_data in self.state.cache_data.get("calibration", {}).values():
-                if isinstance(base_data, dict):
-                    base_data.pop("corners", None)
+            # Clear all calibration entries (presence = marked, so clear dict)
+            calib.clear()
             self.state.cache_data["extrinsic_errors"].clear()
             self.state.cache_data["overrides"].clear()
         self.state.rebuild_reason_counts()
@@ -703,14 +734,12 @@ class DatasetSession:
             pass
         self.cache_service.clear_dataset_cache(dataset_path)
 
-        from backend.services.dataset_handler import SUMMARY_CACHE_FILENAME
-
         config = get_config()
         cache_files_to_remove = [
             DATASET_CACHE_FILENAME,  # image_labels.yaml
             config.calibration_intrinsic_filename,  # calibration_intrinsic.yaml
             config.calibration_extrinsic_filename,  # calibration_extrinsic.yaml
-            SUMMARY_CACHE_FILENAME,  # .summary_cache.yaml
+            config.summary_cache_filename,  # .summary_cache.yaml
         ]
 
         for filename in cache_files_to_remove:
@@ -789,13 +818,9 @@ class DatasetSession:
         if not image_bases:
             return
         valid = set(image_bases)
-        # Remove marks and caches for missing bases
-        for bucket in (self.state.cache_data["marks"], self.state.cache_data["auto_marks"].get(REASON_DUPLICATE, set())):
-            pass
-        self.state.cache_data["marks"] = {b: r for b, r in self.state.cache_data["marks"].items() if b in valid}
+        # Remove marks for missing bases (unified format)
+        self.state.cache_data["marks"] = {b: entry for b, entry in self.state.cache_data["marks"].items() if b in valid}
         self.state.calibration_marked.intersection_update(valid)
-        for bucket in self.state.cache_data["auto_marks"].values():
-            bucket.intersection_update(valid)
         for mapping in (
             self.state.calibration_results,
             self.state.calibration_corners,
@@ -937,8 +962,7 @@ class DatasetSession:
         images_with_labels = set()
         if labels_file.exists():
             try:
-                with open(labels_file, "r") as f:
-                    labels_data = yaml.safe_load(f) or {}
+                labels_data = load_yaml(labels_file)
                 images_with_labels = set(labels_data.keys())
                 log_debug(f"[CONSISTENCY] Found {len(images_with_labels)} images in image_labels.yaml", "SESSION")
             except Exception as e:
@@ -975,17 +999,8 @@ class DatasetSession:
             else:
                 base_data[key] = value
 
-        # Assign merged structure (auto_marks/overrides already Set from cache.py normalization)
+        # Assign merged structure (marks now in unified format from cache.py normalization)
         self.state.cache_data = base_data
-
-        # Verify consistency: if marks exist with auto reasons but aren't in auto_marks, add them
-        auto_reasons = {REASON_DUPLICATE, REASON_MISSING_PAIR, REASON_BLURRY, REASON_MOTION, REASON_PATTERN}
-
-        for base, reason in self.state.cache_data["marks"].items():
-            if reason in auto_reasons:
-                if base not in self.state.cache_data["auto_marks"].get(reason, set()):
-                    self.state.add_auto_mark(reason, base)
-                    log_debug(f"Reconstructed auto_mark: {base} -> {reason}", "SESSION")
 
         # Load archived entries
         archived_raw = cache_entry.get("archived", {})
@@ -996,7 +1011,10 @@ class DatasetSession:
         self.state.rebuild_reason_counts()
         self.state.rebuild_calibration_summary()
 
-        log_debug(f"Hydrated cache: {len(self.state.cache_data['marks'])} marks, {sum(len(v) for v in self.state.cache_data['auto_marks'].values())} auto_marks, sweep_flags={self.state.cache_data['sweep_flags']['duplicates']}", "SESSION")
+        # Count auto marks from unified format
+        auto_mark_count = sum(1 for entry in self.state.cache_data["marks"].values()
+                              if isinstance(entry, dict) and entry.get("auto", False))
+        log_debug(f"Hydrated cache: {len(self.state.cache_data['marks'])} marks ({auto_mark_count} auto), sweep_flags={self.state.cache_data['sweep_flags']['duplicates']}", "SESSION")
 
     def _load_calibration_files(self) -> None:
         """Load calibration matrices and errors from YAML files.
@@ -1032,19 +1050,12 @@ class DatasetSession:
         # Load intrinsic calibration
         if intrinsic_path.exists():
             try:
-                with open(intrinsic_path, "r", encoding="utf-8") as f:
-                    data = yaml.safe_load(f) or {}
+                data = load_yaml(intrinsic_path)
                 channels = data.get("channels", {})
                 if isinstance(channels, dict):
                     for channel, channel_data in channels.items():
                         if isinstance(channel_data, dict):
                             self.state.cache_data["_matrices"][channel] = channel_data
-                            # Restore per_view_errors to reproj_errors
-                            per_view = channel_data.get("per_view_errors", {})
-                            if isinstance(per_view, dict):
-                                for base, err in per_view.items():
-                                    if isinstance(err, (int, float)):
-                                        self.state.cache_data["reproj_errors"].setdefault(channel, {})[base] = float(err)
                     log_info(f"Loaded intrinsic calibration from {intrinsic_path.name}: {list(channels.keys())}", "SESSION")
             except (OSError, yaml.YAMLError) as e:
                 log_warning(f"Failed to load intrinsic calibration: {e}", "SESSION")
@@ -1052,24 +1063,42 @@ class DatasetSession:
         # Load extrinsic calibration (extrinsic_path already set above, may be from workspace default)
         if extrinsic_path.exists():
             try:
-                with open(extrinsic_path, "r", encoding="utf-8") as f:
-                    data = yaml.safe_load(f) or {}
+                data = load_yaml(extrinsic_path)
                 # Extrinsic data structure may differ - check for common fields
                 if isinstance(data, dict):
                     # Store extrinsic matrices in cache_data["_extrinsic"]
                     if "R" in data or "T" in data or "rotation" in data or "translation" in data:
                         self.state.cache_data["_extrinsic"] = data
-                    # Restore stereo per-view errors (list format from solver)
-                    per_pair = data.get("per_pair_errors", [])
+                    log_info(f"Loaded extrinsic calibration from {extrinsic_path.name}", "SESSION")
+            except (OSError, yaml.YAMLError) as e:
+                log_warning(f"Failed to load extrinsic calibration: {e}", "SESSION")
+
+        # Load calibration errors from cache file
+        errors_path = self.dataset_path / config.calibration_errors_filename
+        if errors_path.exists():
+            try:
+                errors_data = load_yaml(errors_path)
+                if isinstance(errors_data, dict):
+                    # Load intrinsic per_view_errors
+                    for channel in ("lwir", "visible"):
+                        channel_errors = errors_data.get("channels", {}).get(channel, {})
+                        per_view = channel_errors.get("per_view_errors", {})
+                        if isinstance(per_view, dict):
+                            for base, err in per_view.items():
+                                if isinstance(err, (int, float)):
+                                    self.state.cache_data["reproj_errors"].setdefault(channel, {})[base] = float(err)
+                    # Load stereo per_pair_errors
+                    stereo_errors = errors_data.get("stereo", {})
+                    per_pair = stereo_errors.get("per_pair_errors", [])
                     if isinstance(per_pair, list):
                         for entry in per_pair:
                             if isinstance(entry, dict) and isinstance(entry.get("base"), str):
                                 trans_err = entry.get("translation_error")
                                 if isinstance(trans_err, (int, float)):
                                     self.state.cache_data["extrinsic_errors"][entry["base"]] = float(trans_err)
-                    log_info(f"Loaded extrinsic calibration from {extrinsic_path.name}", "SESSION")
+                    log_info(f"Loaded calibration errors from {errors_path.name}", "SESSION")
             except (OSError, yaml.YAMLError) as e:
-                log_warning(f"Failed to load extrinsic calibration: {e}", "SESSION")
+                log_warning(f"Failed to load calibration errors: {e}", "SESSION")
 
     def _validate_bottom_up_consistency(self) -> None:
         """Validate cache consistency with lower-level YAML files.
@@ -1134,6 +1163,7 @@ class DatasetSession:
 
         valid_bases = set(self.loader.image_bases)
         restored_count = 0
+        calib = self.state.cache_data.setdefault("calibration", {})
 
         for base, entry in list(self._archived_entries.items()):
             if base not in valid_bases:
@@ -1144,36 +1174,36 @@ class DatasetSession:
             if mark_reason and isinstance(mark_reason, str):
                 self.state.cache_data["marks"][base] = mark_reason
 
-            # Restore calibration marked
+            # Ensure calibration entry exists for this base if restoring calibration_marked
+            # Presence in dict = marked, so we only create entry if calibration_marked is true
             if entry.get("calibration_marked"):
-                self.state.calibration_marked.add(base)
+                if base not in calib or not isinstance(calib[base], dict):
+                    calib[base] = {"auto": False, "outlier": {"lwir": False, "visible": False, "stereo": False}, "results": {}}
 
             # Restore auto override
             if entry.get("auto_override"):
                 self.state.cache_data["overrides"].add(base)
 
-            # Restore outliers
-            if entry.get("outlier_lwir"):
-                self.state.calibration_outliers_intrinsic.setdefault("lwir", set()).add(base)
-            if entry.get("outlier_visible"):
-                self.state.calibration_outliers_intrinsic.setdefault("visible", set()).add(base)
-            if entry.get("outlier_stereo"):
-                self.state.calibration_outliers_extrinsic.add(base)
+            # Restore outliers - from archived entry's nested format (only if entry exists)
+            if base in calib:
+                if "outlier" not in calib[base]:
+                    calib[base]["outlier"] = {"lwir": False, "visible": False, "stereo": False}
+                archived_outliers = entry.get("outliers", {})
+                if isinstance(archived_outliers, dict):
+                    if archived_outliers.get("lwir"):
+                        calib[base]["outlier"]["lwir"] = True
+                    if archived_outliers.get("visible"):
+                        calib[base]["outlier"]["visible"] = True
+                    if archived_outliers.get("stereo"):
+                        calib[base]["outlier"]["stereo"] = True
 
-            # Restore calibration results
-            calib_results = entry.get("calibration_results")
-            if isinstance(calib_results, dict) and calib_results:
-                self.state.calibration_results[base] = calib_results
+            # Restore calibration results (only if entry exists)
+            if base in calib:
+                calib_results = entry.get("calibration_results")
+                if isinstance(calib_results, dict) and calib_results:
+                    calib[base]["results"] = calib_results
 
-            # Restore reprojection errors
-            reproj_errors = entry.get("reproj_errors", {})
-            if isinstance(reproj_errors, dict):
-                lwir_err = reproj_errors.get("lwir")
-                if isinstance(lwir_err, (int, float)):
-                    self.state.cache_data["reproj_errors"].setdefault("lwir", {})[base] = float(lwir_err)
-                vis_err = reproj_errors.get("visible")
-                if isinstance(vis_err, (int, float)):
-                    self.state.cache_data["reproj_errors"].setdefault("visible", {})[base] = float(vis_err)
+            # NOTE: reproj_errors NOT restored from archived - regenerated from calibration file
 
             # Restore extrinsic error
             extrinsic_err = entry.get("extrinsic_error")
@@ -1183,12 +1213,7 @@ class DatasetSession:
             # Restore calibration corners
             calib_corners = entry.get("calibration_corners")
             if isinstance(calib_corners, dict) and calib_corners:
-                # Store directly in cache_data["calibration"] structure
-                if "calibration" not in self.state.cache_data:
-                    self.state.cache_data["calibration"] = {}
-                if base not in self.state.cache_data["calibration"]:
-                    self.state.cache_data["calibration"][base] = {}
-                self.state.cache_data["calibration"][base]["corners"] = calib_corners
+                calib[base]["corners"] = calib_corners
 
             restored_count += 1
             # Remove from archived list after restoration
@@ -1225,7 +1250,8 @@ class DatasetSession:
             if not isinstance(calib_entry, dict):
                 calib_entry = {}
 
-            is_marked = calib_entry.get("marked", False)
+            # Presence in dict = marked (no explicit 'marked' field needed)
+            is_marked = base in self.state.cache_data.get("calibration", {})
             is_outlier_lwir = base in outliers_lwir
             is_outlier_vis = base in outliers_vis
             is_outlier_stereo = base in outliers_stereo

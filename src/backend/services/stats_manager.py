@@ -1,192 +1,227 @@
 """Statistics manager for dataset/collection stats.
 
-Centralizes all statistics tracking and formatting logic, providing both
-compact and full format output for consistency across UI components.
+Centralizes all statistics tracking and formatting logic.
+Uses dict-based internal storage - NO properties, NO legacy formats.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Dict
+from copy import deepcopy
+from typing import Any, Dict
 
+from common.dict_helpers import get_dict_path, merge_stats_dicts
 from common.reasons import reason_text
 
 
-@dataclass
+def empty_stats_dict() -> Dict[str, Any]:
+    """Return empty stats dict with proper structure.
+
+    Structure (simplified - no redundant totals):
+        img:
+            total: 0
+            removed: 0
+        tagged:
+            user: {}  # reason -> count (no wrapper, no total)
+            auto: {}  # reason -> count (includes pattern:xxx)
+        removed:
+            user: {}  # reason -> count
+            auto: {}  # reason -> count
+        calibration:
+            user: {both: 0, partial: 0, none: 0}  # no total, sum to get it
+            auto: {both: 0, partial: 0, none: 0}
+            outlier: {lwir: 0, visible: 0, stereo: 0}
+        sweep:
+            duplicates: False
+            quality: False
+            patterns: False
+    """
+    return {
+        "img": {
+            "total": 0,
+            "removed": 0,
+        },
+        "tagged": {
+            "user": {},  # reason -> count directly
+            "auto": {},  # reason -> count directly
+        },
+        "removed": {
+            "user": {},  # reason -> count directly
+            "auto": {},  # reason -> count directly
+        },
+        "calibration": {
+            "user": {
+                "both": 0,
+                "partial": 0,
+                "none": 0,
+            },
+            "auto": {
+                "both": 0,
+                "partial": 0,
+                "none": 0,
+            },
+            "outlier": {
+                "lwir": 0,
+                "visible": 0,
+                "stereo": 0,
+            },
+        },
+        "sweep": {
+            "duplicates": False,
+            "quality": False,
+            "patterns": False,
+        },
+    }
+
+
 class DatasetStats:
     """Statistics for a single dataset or collection.
 
-    Tracks pairs, deleted items, tagged items (manual/auto), calibration, and outliers.
-    Provides compact and full format strings for UI display.
+    Uses dict-based internal storage. Access data via:
+    - self.data["path"]["to"]["value"] for direct access
+    - get_dict_path(self.data, "path.to.value") for safe access
+
+    NO properties - use dict access directly.
     """
 
-    # Basic counts
-    total_pairs: int = 0
-    removed_total: int = 0
-    tagged_manual: int = 0
-    tagged_auto: int = 0
+    def __init__(self, data: Dict[str, Any] | None = None) -> None:
+        """Initialize from dict or empty."""
+        if data is None:
+            self._data = empty_stats_dict()
+        else:
+            self._data = deepcopy(data)
 
-    # Breakdown by reason
-    removed_by_reason: Dict[str, int] = field(default_factory=dict)  # Total removed (user+auto combined)
-    removed_user_by_reason: Dict[str, int] = field(default_factory=dict)  # User-initiated removals
-    removed_auto_by_reason: Dict[str, int] = field(default_factory=dict)  # Auto-detected removals
-    tagged_by_reason: Dict[str, int] = field(default_factory=dict)
-    tagged_auto_by_reason: Dict[str, int] = field(default_factory=dict)
-    pattern_matches: Dict[str, int] = field(default_factory=dict)  # pattern_name -> count
+    @property
+    def data(self) -> Dict[str, Any]:
+        """Get internal data dict."""
+        return self._data
 
-    # Calibration
-    calibration_marked: int = 0
-    calibration_both: int = 0
-    calibration_partial: int = 0
-    calibration_missing: int = 0
-
-    # Outliers
-    outlier_lwir: int = 0
-    outlier_visible: int = 0
-    outlier_stereo: int = 0
-
-    # Sweep completion flags (user-initiated operations)
-    sweep_duplicates_done: bool = False
-    sweep_quality_done: bool = False
-    sweep_patterns_done: bool = False
-
-    def __post_init__(self) -> None:
-        """Ensure all dict fields are initialized."""
-        if self.removed_by_reason is None:
-            self.removed_by_reason = {}
-        if self.tagged_by_reason is None:
-            self.tagged_by_reason = {}
-        if self.tagged_auto_by_reason is None:
-            self.tagged_auto_by_reason = {}
+    def to_dict(self) -> Dict[str, Any]:
+        """Return a copy of internal dict for serialization."""
+        return deepcopy(self._data)
 
     @classmethod
-    def from_dict(cls, data: dict) -> DatasetStats:
-        """Create from cache dict."""
-        return cls(
-            total_pairs=data.get("total_pairs", 0),
-            removed_total=data.get("removed_total", 0),
-            tagged_manual=data.get("tagged_manual", 0),
-            tagged_auto=data.get("tagged_auto", 0),
-            removed_by_reason=data.get("removed_by_reason", {}),
-            tagged_by_reason=data.get("tagged_by_reason", {}),
-            tagged_auto_by_reason=data.get("tagged_auto_by_reason", {}),
-            calibration_marked=data.get("calibration_marked", 0),
-            calibration_both=data.get("calibration_both", 0),
-            calibration_partial=data.get("calibration_partial", 0),
-            calibration_missing=data.get("calibration_missing", 0),
-            outlier_lwir=data.get("outlier_lwir", 0),
-            outlier_visible=data.get("outlier_visible", 0),
-            outlier_stereo=data.get("outlier_stereo", 0),
-            sweep_duplicates_done=data.get("sweep_duplicates_done", False),
-            sweep_quality_done=data.get("sweep_quality_done", False),
-            sweep_patterns_done=data.get("sweep_patterns_done", False),
-        )
+    def from_dict(cls, data: Dict[str, Any]) -> "DatasetStats":
+        """Create from dict."""
+        return cls(data)
 
-    def to_dict(self) -> dict:
-        """Serialize to cache dict."""
-        return {
-            "total_pairs": self.total_pairs,
-            "removed_total": self.removed_total,
-            "tagged_manual": self.tagged_manual,
-            "tagged_auto": self.tagged_auto,
-            "removed_by_reason": self.removed_by_reason,
-            "tagged_by_reason": self.tagged_by_reason,
-            "tagged_auto_by_reason": self.tagged_auto_by_reason,
-            "calibration_marked": self.calibration_marked,
-            "calibration_both": self.calibration_both,
-            "calibration_partial": self.calibration_partial,
-            "calibration_missing": self.calibration_missing,
-            "outlier_lwir": self.outlier_lwir,
-            "outlier_visible": self.outlier_visible,
-            "outlier_stereo": self.outlier_stereo,
-        }
-
-    def merge(self, other: DatasetStats) -> None:
+    def merge(self, other: "DatasetStats") -> None:
         """Merge another stats object into this one (for aggregating collections)."""
-        self.total_pairs += other.total_pairs
-        self.removed_total += other.removed_total
-        self.tagged_manual += other.tagged_manual
-        self.tagged_auto += other.tagged_auto
-
-        for reason, count in other.removed_by_reason.items():
-            self.removed_by_reason[reason] = self.removed_by_reason.get(reason, 0) + count
-        for reason, count in other.tagged_by_reason.items():
-            self.tagged_by_reason[reason] = self.tagged_by_reason.get(reason, 0) + count
-        for reason, count in other.tagged_auto_by_reason.items():
-            self.tagged_auto_by_reason[reason] = self.tagged_auto_by_reason.get(reason, 0) + count
-        for pattern, count in other.pattern_matches.items():
-            self.pattern_matches[pattern] = self.pattern_matches.get(pattern, 0) + count
-
-        self.calibration_marked += other.calibration_marked
-        self.calibration_both += other.calibration_both
-        self.calibration_partial += other.calibration_partial
-        self.calibration_missing += other.calibration_missing
-
-        self.outlier_lwir += other.outlier_lwir
-        self.outlier_visible += other.outlier_visible
-        self.outlier_stereo += other.outlier_stereo
-
-        # Sweep flags: OR logic (if any child has done the sweep, collection has it done)
-        self.sweep_duplicates_done = self.sweep_duplicates_done or other.sweep_duplicates_done
-        self.sweep_quality_done = self.sweep_quality_done or other.sweep_quality_done
-        self.sweep_patterns_done = self.sweep_patterns_done or other.sweep_patterns_done
+        merge_stats_dicts(self._data, other._data)
 
     # ============================================================================
-    # FORMATTING: Removed (deleted) images
+    # GETTERS: Convenience accessors for common paths (read-only)
+    # These are NOT legacy - they access the new format directly
+    # ============================================================================
+
+    def get(self, path: str, default: Any = 0) -> Any:
+        """Get value at path with default."""
+        return get_dict_path(self._data, path, default)
+
+    # Image counts
+    @property
+    def total_pairs(self) -> int:
+        return self.get("img.total", 0) or 0
+
+    @property
+    def removed_total(self) -> int:
+        return self.get("img.removed", 0) or 0
+
+    # Tagged counts (calculated from reasons dict)
+    @property
+    def tagged_manual(self) -> int:
+        user_reasons = self.get("tagged.user", {}) or {}
+        return sum(user_reasons.values()) if isinstance(user_reasons, dict) else 0
+
+    @property
+    def tagged_auto(self) -> int:
+        auto_reasons = self.get("tagged.auto", {}) or {}
+        return sum(auto_reasons.values()) if isinstance(auto_reasons, dict) else 0
+
+    # Calibration counts (calculated from breakdown)
+    @property
+    def calibration_marked(self) -> int:
+        """Total calibration marked = user + auto (each = both + partial + none)."""
+        user = self.get("calibration.user", {}) or {}
+        auto = self.get("calibration.auto", {}) or {}
+        user_total = sum(user.get(k, 0) for k in ("both", "partial", "none"))
+        auto_total = sum(auto.get(k, 0) for k in ("both", "partial", "none"))
+        return user_total + auto_total
+
+    @property
+    def calibration_both(self) -> int:
+        user = self.get("calibration.user.both", 0) or 0
+        auto = self.get("calibration.auto.both", 0) or 0
+        return user + auto
+
+    # Sweep flags
+    @property
+    def sweep_duplicates_done(self) -> bool:
+        return self.get("sweep.duplicates", False) or False
+
+    @property
+    def sweep_quality_done(self) -> bool:
+        return self.get("sweep.quality", False) or False
+
+    @property
+    def sweep_patterns_done(self) -> bool:
+        return self.get("sweep.patterns", False) or False
+
+    # Pattern matches (extracted from tagged.auto with pattern: prefix)
+    @property
+    def pattern_matches(self) -> Dict[str, int]:
+        """Pattern matches extracted from tagged.auto (pattern:xxx keys)."""
+        auto_reasons = self.get("tagged.auto", {}) or {}
+        if not isinstance(auto_reasons, dict):
+            return {}
+        return {
+            k.replace("pattern:", ""): v
+            for k, v in auto_reasons.items()
+            if k.startswith("pattern:")
+        }
+
+    # ============================================================================
+    # FORMATTING: Use get_dict_path directly - NO intermediate properties
     # ============================================================================
 
     def format_removed_count(self, *, compact: bool = True) -> str:
-        """Format removed/deleted count.
-
-        Args:
-            compact: If True, return empty string when zero; if False, always show "0".
-
-        Returns:
-            Formatted string for removed count column.
-        """
-        if self.removed_total == 0:
+        """Format removed/deleted count."""
+        removed = get_dict_path(self._data, "img.removed", 0, int) or 0
+        if removed == 0:
             return "" if compact else "0"
-        return str(self.removed_total)
+        return str(removed)
 
     def format_removed_reasons(self, *, compact: bool = True) -> str:
-        """Format breakdown of deleted items by reason.
-
-        Args:
-            compact: If True, omit reasons with zero count; if False, show all.
-
-        Returns:
-            Formatted string with reason breakdown (e.g., "Blurry: 5, Motion: 3").
-        """
-        if self.removed_total == 0:
+        """Format breakdown of deleted items by reason."""
+        removed = get_dict_path(self._data, "img.removed", 0, int) or 0
+        if removed == 0:
             return "" if compact else "None"
 
-        reasons = self.removed_by_reason or {}
-        if not reasons:
-            return str(self.removed_total)
+        # Combine user + auto removed reasons (now directly at removed.user/auto)
+        user_reasons = get_dict_path(self._data, "removed.user", {}, dict) or {}
+        auto_reasons = get_dict_path(self._data, "removed.auto", {}, dict) or {}
+        combined: Dict[str, int] = {}
+        for reason, count in user_reasons.items():
+            combined[reason] = combined.get(reason, 0) + count
+        for reason, count in auto_reasons.items():
+            combined[reason] = combined.get(reason, 0) + count
+
+        if not combined:
+            return str(removed)
 
         parts = [
             f"{reason_text(k)}: {v}"
-            for k, v in reasons.items()
+            for k, v in combined.items()
             if not compact or v > 0
         ]
-        return ", ".join(parts) if parts else (str(self.removed_total) if compact else "None")
-
-    # ============================================================================
-    # FORMATTING: Tagged (marked for deletion) images
-    # ============================================================================
+        return ", ".join(parts) if parts else (str(removed) if compact else "None")
 
     def format_tagged_summary(self, *, compact: bool = True, multiline: bool = True) -> str:
-        """Format tagged (marked for deletion) summary with Auto/Manual breakdown.
-
-        Args:
-            compact: If True, omit zero counts; if False, show all.
-            multiline: If True, separate Manual/Auto on different lines; if False, single line.
-
-        Returns:
-            Formatted string with Manual/Auto breakdown and reason details.
-        """
-        manual_total = self.tagged_manual
-        auto_total = self.tagged_auto
+        """Format tagged (marked for deletion) summary with Auto/Manual breakdown."""
+        # Totals calculated from reason dicts (no stored total)
+        manual_reasons = get_dict_path(self._data, "tagged.user", {}, dict) or {}
+        auto_reasons = get_dict_path(self._data, "tagged.auto", {}, dict) or {}
+        manual_total = sum(manual_reasons.values()) if isinstance(manual_reasons, dict) else 0
+        auto_total = sum(auto_reasons.values()) if isinstance(auto_reasons, dict) else 0
         total = manual_total + auto_total
 
         if total == 0:
@@ -195,15 +230,11 @@ class DatasetStats:
         lines = []
 
         if manual_total > 0 or not compact:
-            reason_breakdown = self._format_reason_breakdown(
-                self.tagged_by_reason, compact=compact
-            )
+            reason_breakdown = self._format_reason_breakdown(manual_reasons, compact=compact)
             lines.append(f"Manual: {manual_total}{reason_breakdown}")
 
         if auto_total > 0 or not compact:
-            reason_breakdown = self._format_reason_breakdown(
-                self.tagged_auto_by_reason, compact=compact
-            )
+            reason_breakdown = self._format_reason_breakdown(auto_reasons, compact=compact)
             lines.append(f"Auto: {auto_total}{reason_breakdown}")
 
         if not lines:
@@ -224,80 +255,81 @@ class DatasetStats:
         ]
         return f" ({', '.join(parts)})" if parts else ""
 
-    # ============================================================================
-    # FORMATTING: Calibration
-    # ============================================================================
-
     def format_calibration(self, *, compact: bool = True) -> str:
-        """Format calibration statistics.
+        """Format calibration statistics as two lines (manual/auto)."""
+        # Totals calculated from breakdown (no stored total)
+        user_data = get_dict_path(self._data, "calibration.user", {}, dict) or {}
+        auto_data = get_dict_path(self._data, "calibration.auto", {}, dict) or {}
 
-        Args:
-            compact: If True, omit zero counts; if False, show all.
+        manual_both = user_data.get("both", 0) or 0
+        manual_partial = user_data.get("partial", 0) or 0
+        manual_none = user_data.get("none", 0) or 0
+        manual_total = manual_both + manual_partial + manual_none
 
-        Returns:
-            Formatted string with calibration breakdown (e.g., "5 (both 3; partial 2)").
-        """
-        total = self.calibration_marked
-        if total == 0:
-            return "" if compact else "0"
+        auto_both = auto_data.get("both", 0) or 0
+        auto_partial = auto_data.get("partial", 0) or 0
+        auto_none = auto_data.get("none", 0) or 0
+        auto_total = auto_both + auto_partial + auto_none
 
-        parts = []
-        if self.calibration_both > 0 or not compact:
-            parts.append(f"both {self.calibration_both}")
-        if self.calibration_partial > 0 or not compact:
-            parts.append(f"partial {self.calibration_partial}")
-        if self.calibration_missing > 0 or not compact:
-            parts.append(f"missing {self.calibration_missing}")
+        calib_total = manual_total + auto_total
+        if calib_total == 0:
+            return "" if compact else "Manual: 0\nAuto: 0"
 
-        breakdown = f" ({'; '.join(parts)})" if parts else ""
-        return f"Tagged: {total}{breakdown}"
+        lines = []
 
-    # ============================================================================
-    # FORMATTING: Outliers
-    # ============================================================================
+        # Manual line
+        manual_parts = []
+        if manual_both > 0 or not compact:
+            manual_parts.append(f"both {manual_both}")
+        if manual_partial > 0 or not compact:
+            manual_parts.append(f"partial {manual_partial}")
+        if manual_none > 0 or not compact:
+            manual_parts.append(f"none {manual_none}")
+        manual_breakdown = f" ({', '.join(manual_parts)})" if manual_parts else ""
+        lines.append(f"Manual: {manual_total}{manual_breakdown}")
+
+        # Auto line
+        auto_parts = []
+        if auto_both > 0 or not compact:
+            auto_parts.append(f"both {auto_both}")
+        if auto_partial > 0 or not compact:
+            auto_parts.append(f"partial {auto_partial}")
+        if auto_none > 0 or not compact:
+            auto_parts.append(f"none {auto_none}")
+        auto_breakdown = f" ({', '.join(auto_parts)})" if auto_parts else ""
+        lines.append(f"Auto: {auto_total}{auto_breakdown}")
+
+        return "\n".join(lines)
 
     def format_outliers(self, *, compact: bool = True) -> str:
-        """Format outlier statistics.
+        """Format outlier statistics."""
+        lwir = get_dict_path(self._data, "calibration.outlier.lwir", 0, int) or 0
+        visible = get_dict_path(self._data, "calibration.outlier.visible", 0, int) or 0
+        stereo = get_dict_path(self._data, "calibration.outlier.stereo", 0, int) or 0
 
-        Args:
-            compact: If True, omit zero counts; if False, show all.
-
-        Returns:
-            Formatted string with outlier breakdown (e.g., "L 2; V 1; S 0").
-        """
         parts = []
-        if self.outlier_lwir > 0 or not compact:
-            parts.append(f"L {self.outlier_lwir}")
-        if self.outlier_visible > 0 or not compact:
-            parts.append(f"V {self.outlier_visible}")
-        if self.outlier_stereo > 0 or not compact:
-            parts.append(f"S {self.outlier_stereo}")
+        if lwir > 0 or not compact:
+            parts.append(f"L {lwir}")
+        if visible > 0 or not compact:
+            parts.append(f"V {visible}")
+        if stereo > 0 or not compact:
+            parts.append(f"S {stereo}")
 
         if not parts:
             return "" if compact else "None"
         return "; ".join(parts)
 
-    # ============================================================================
-    # FORMATTING: Comprehensive summary
-    # ============================================================================
-
     def format_summary(self, *, compact: bool = True) -> str:
-        """Format complete summary of all statistics.
+        """Format complete summary of all statistics."""
+        total_pairs = get_dict_path(self._data, "img.total", 0, int) or 0
+        removed = get_dict_path(self._data, "img.removed", 0, int) or 0
 
-        Args:
-            compact: If True, omit zero counts; if False, show everything.
+        lines = [f"Total pairs: {total_pairs}"]
 
-        Returns:
-            Multi-line formatted summary suitable for tooltips or detailed views.
-        """
-        lines = [
-            f"Total pairs: {self.total_pairs}",
-        ]
-
-        if self.removed_total > 0 or not compact:
+        if removed > 0 or not compact:
             lines.append(f"Deleted: {self.format_removed_count(compact=False)}")
             reasons = self.format_removed_reasons(compact=compact)
-            if reasons and reasons != str(self.removed_total):
+            if reasons and reasons != str(removed):
                 lines.append(f"  {reasons}")
 
         tagged = self.format_tagged_summary(compact=compact, multiline=True)
@@ -313,3 +345,6 @@ class DatasetStats:
             lines.append(f"Outliers: {outliers}")
 
         return "\n".join(lines)
+
+
+__all__ = ["DatasetStats", "empty_stats_dict"]

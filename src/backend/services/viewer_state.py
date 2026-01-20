@@ -1,23 +1,25 @@
 """Mutable state container for per-dataset viewer data."""
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Set, List
+from typing import Any, Dict, List, Optional, Set
 
 from PyQt6.QtGui import QPixmap
 
 from backend.utils.duplicates import SignatureCache
 from common.dict_helpers import get_dict_path, set_dict_path
-from common.log_utils import log_debug, log_info, log_warning, log_error
+from common.log_utils import log_debug, log_error, log_info, log_warning
 
 
 def _empty_cache_data() -> Dict[str, Any]:
-    """Create empty cache data structure matching YAML schema."""
+    """Create empty cache data structure matching YAML schema.
+
+    Marks format (unified): marks[base] = {reason: str, auto: bool}
+    """
     return {
-        "marks": {},
+        "marks": {},  # {base: {reason: str, auto: bool}}
         "reason_counts": {},
-        "auto_counts": {},
-        "auto_marks": {},
         "calibration": {},
         "reproj_errors": {"lwir": {}, "visible": {}},
         "extrinsic_errors": {},
@@ -68,11 +70,47 @@ class ViewerState:
     # Properties ELIMINADOS - acceso directo:
     # - calibration_detection_bins → cache_data["_detection_bins"]
     # - calibration_detection_counts → cache_data["_detection_counts"]
-    # - auto_marks → cache_data["auto_marks"]
     # - auto_override → cache_data["overrides"]
     # - calibration_reproj_errors → cache_data["reproj_errors"]
     # - extrinsic_pair_errors → cache_data["extrinsic_errors"]
     # - calibration_matrices → cache_data["_matrices"]
+    #
+    # UNIFIED MARKS FORMAT (new):
+    # - marks[base] = {reason: str, auto: bool}
+    # - Use get_mark_reason(), is_mark_auto(), get_auto_marks_for_reason()
+
+    # ===================================================================
+    # MARKS DATA HELPERS
+    # New unified format: marks[base] = {reason: str, auto: bool}
+    # ===================================================================
+
+    def get_mark_reason(self, base: str) -> Optional[str]:
+        """Get mark reason for a base, or None if not marked."""
+        entry = self.cache_data["marks"].get(base)
+        if isinstance(entry, dict):
+            return entry.get("reason")
+        return None
+
+    def is_mark_auto(self, base: str) -> bool:
+        """Check if mark was set automatically."""
+        entry = self.cache_data["marks"].get(base)
+        if isinstance(entry, dict):
+            return bool(entry.get("auto", False))
+        return False
+
+    def get_auto_marks_for_reason(self, reason: str) -> Set[str]:
+        """Get all bases with auto marks for a given reason."""
+        return {
+            base for base, entry in self.cache_data["marks"].items()
+            if isinstance(entry, dict) and entry.get("reason") == reason and entry.get("auto", False)
+        }
+
+    def count_auto_marks_for_reason(self, reason: str) -> int:
+        """Count auto marks for a reason (efficient, no set creation)."""
+        return sum(
+            1 for entry in self.cache_data["marks"].values()
+            if isinstance(entry, dict) and entry.get("reason") == reason and entry.get("auto", False)
+        )
 
     # ===================================================================
     # CALIBRATION DATA HELPERS
@@ -80,9 +118,9 @@ class ViewerState:
     # ===================================================================
 
     def is_calibration_marked(self, base: str) -> bool:
-        """Check if base is marked for calibration."""
+        """Check if base is marked for calibration (presence in dict = marked)."""
         calib_entry = self.cache_data.get("calibration", {}).get(base)
-        return isinstance(calib_entry, dict) and calib_entry.get("marked", False)
+        return isinstance(calib_entry, dict)
 
     def get_calibration_results(self, base: str) -> Dict[str, Optional[bool]]:
         """Get calibration detection results for a base."""
@@ -94,8 +132,10 @@ class ViewerState:
         calib_entry = self.cache_data.get("calibration", {}).get(base)
         if not isinstance(calib_entry, dict):
             return False
-        key = f"outlier_{channel}" if channel != "stereo" else "outlier_stereo"
-        return bool(calib_entry.get(key, False))
+        outlier_dict = calib_entry.get("outlier", {})
+        if isinstance(outlier_dict, dict):
+            return bool(outlier_dict.get(channel, False))
+        return False
 
     @property
     def reason_counts(self) -> Dict[str, int]:
@@ -105,9 +145,27 @@ class ViewerState:
 
     @property
     def calibration_marked(self) -> Set[str]:
-        """Bases that are marked for calibration."""
+        """Bases that are marked for calibration (presence in dict = marked)."""
         calib = self.cache_data.get("calibration", {})
-        return {base for base, data in calib.items() if isinstance(data, dict) and data.get("marked")}
+        return {base for base, data in calib.items() if isinstance(data, dict)}
+
+    @property
+    def calibration_count_auto(self) -> int:
+        """Count of auto-detected calibration images."""
+        calib = self.cache_data.get("calibration", {})
+        return sum(
+            1 for base, data in calib.items()
+            if isinstance(data, dict) and data.get("auto", False)
+        )
+
+    @property
+    def calibration_count_manual(self) -> int:
+        """Count of manually-marked calibration images."""
+        calib = self.cache_data.get("calibration", {})
+        return sum(
+            1 for base, data in calib.items()
+            if isinstance(data, dict) and not data.get("auto", False)
+        )
 
     @property
     def calibration_results(self) -> Dict[str, Dict[str, Optional[bool]]]:
@@ -118,6 +176,13 @@ class ViewerState:
             for base, data in calib.items()
             if isinstance(data, dict) and "results" in data
         }
+
+    @property
+    def calibration_usable_extrinsic_count(self) -> int:
+        """Count of images usable for extrinsic calibration (both detected, not stereo outliers)."""
+        both_detected = self.cache_data["_detection_counts"].get("both", 0)
+        stereo_outliers = len(self.calibration_outliers_extrinsic)
+        return max(0, both_detected - stereo_outliers)
 
     @property
     def calibration_corners(self) -> Dict[str, Dict[str, Optional[List[List[float]]]]]:
@@ -137,21 +202,26 @@ class ViewerState:
         for base, data in calib.items():
             if not isinstance(data, dict):
                 continue
-            if data.get("outlier_lwir"):
-                outliers["lwir"].add(base)
-            if data.get("outlier_visible"):
-                outliers["visible"].add(base)
+            outlier_dict = data.get("outlier", {})
+            if isinstance(outlier_dict, dict):
+                if outlier_dict.get("lwir"):
+                    outliers["lwir"].add(base)
+                if outlier_dict.get("visible"):
+                    outliers["visible"].add(base)
         return outliers
 
     @calibration_outliers_intrinsic.setter
     def calibration_outliers_intrinsic(self, value: Dict[str, Set[str]]) -> None:
         """Set intrinsic outliers by updating calibration dict."""
-        # First clear all outlier flags
         calib = self.cache_data.get("calibration", {})
+        # First clear all outlier flags
         for data in calib.values():
             if isinstance(data, dict):
-                data["outlier_lwir"] = False
-                data["outlier_visible"] = False
+                if "outlier" not in data:
+                    data["outlier"] = {"lwir": False, "visible": False, "stereo": False}
+                if isinstance(data["outlier"], dict):
+                    data["outlier"]["lwir"] = False
+                    data["outlier"]["visible"] = False
 
         # Then set new outliers
         lwir_outliers = value.get("lwir", set())
@@ -159,19 +229,30 @@ class ViewerState:
 
         for base in lwir_outliers:
             if base not in calib:
-                calib[base] = {"marked": False, "outlier_lwir": False, "outlier_visible": False, "outlier_stereo": False, "results": {}}
-            calib[base]["outlier_lwir"] = True
+                calib[base] = {"auto": False, "outlier": {"lwir": False, "visible": False, "stereo": False}, "results": {}}
+            if "outlier" not in calib[base]:
+                calib[base]["outlier"] = {"lwir": False, "visible": False, "stereo": False}
+            calib[base]["outlier"]["lwir"] = True
 
         for base in vis_outliers:
             if base not in calib:
-                calib[base] = {"marked": False, "outlier_lwir": False, "outlier_visible": False, "outlier_stereo": False, "results": {}}
-            calib[base]["outlier_visible"] = True
+                calib[base] = {"auto": False, "outlier": {"lwir": False, "visible": False, "stereo": False}, "results": {}}
+            if "outlier" not in calib[base]:
+                calib[base]["outlier"] = {"lwir": False, "visible": False, "stereo": False}
+            calib[base]["outlier"]["visible"] = True
 
     @property
     def calibration_outliers_extrinsic(self) -> Set[str]:
-        """Extrinsic outliers."""
+        """Extrinsic (stereo) outliers."""
         calib = self.cache_data.get("calibration", {})
-        return {base for base, data in calib.items() if isinstance(data, dict) and data.get("outlier_stereo")}
+        result: Set[str] = set()
+        for base, data in calib.items():
+            if not isinstance(data, dict):
+                continue
+            outlier_dict = data.get("outlier", {})
+            if isinstance(outlier_dict, dict) and outlier_dict.get("stereo"):
+                result.add(base)
+        return result
 
     # All removed - use cache_data["key"] directly instead
     # Sweep flags removed - use cache_data["sweep_flags"][key] directly
@@ -186,7 +267,7 @@ class ViewerState:
     # Helper methods for calibration manipulation
     def set_calibration_mark(self, base: str, marked: bool = True,
                            outlier_lwir: bool = False, outlier_visible: bool = False,
-                           outlier_stereo: bool = False, *, auto: bool = False) -> None:
+                           outlier_stereo: bool = False, *, auto: Optional[bool] = None) -> None:
         """Set or clear calibration mark for a base.
 
         Args:
@@ -195,16 +276,22 @@ class ViewerState:
             outlier_lwir: Mark as lwir outlier
             outlier_visible: Mark as visible outlier
             outlier_stereo: Mark as stereo outlier
-            auto: True if marked by auto-detection sweep, False if manual
+            auto: True if marked by auto-detection sweep, False if manual.
+                  None preserves existing value (default for manual toggle).
         """
         if marked:
             existing = self.cache_data["calibration"].get(base, {})
+            # Preserve existing auto flag unless explicitly overridden
+            existing_auto = existing.get("auto", False) if isinstance(existing, dict) else False
+            resolved_auto = auto if auto is not None else existing_auto
+            # Presence in dict = marked (no explicit 'marked' field needed)
             self.cache_data["calibration"][base] = {
-                "marked": True,
-                "auto": auto,  # Track if auto-detected or manual
-                "outlier_lwir": outlier_lwir,
-                "outlier_visible": outlier_visible,
-                "outlier_stereo": outlier_stereo,
+                "auto": resolved_auto,
+                "outlier": {
+                    "lwir": outlier_lwir,
+                    "visible": outlier_visible,
+                    "stereo": outlier_stereo,
+                },
                 "results": existing.get("results", {}),  # Preserve existing results
             }
         else:
@@ -217,8 +304,8 @@ class ViewerState:
         """
         calib = self.cache_data["calibration"]
         if base not in calib:
-            # Create minimal entry if doesn't exist
-            calib[base] = {"marked": False, "results": {}}
+            # Create minimal entry if doesn't exist (presence = marked)
+            calib[base] = {"auto": False, "outlier": {"lwir": False, "visible": False, "stereo": False}, "results": {}}
         calib[base]["results"] = dict(results)
 
     def clear_calibration_results(self, base: str) -> None:
@@ -232,30 +319,14 @@ class ViewerState:
         calib_entry = self.cache_data.get("calibration", {}).get(base)
         return isinstance(calib_entry, dict) and calib_entry.get("auto", False)
 
-    def add_auto_mark(self, reason: str, base: str) -> None:
-        """Add an auto mark for a base under a reason."""
-        if reason not in self.cache_data["auto_marks"]:
-            self.cache_data["auto_marks"][reason] = set()
-        self.cache_data["auto_marks"][reason].add(base)
-
-    def remove_auto_mark(self, reason: str, base: str) -> None:
-        """Remove an auto mark for a base."""
-        if reason in self.cache_data["auto_marks"]:
-            self.cache_data["auto_marks"][reason].discard(base)
-            if not self.cache_data["auto_marks"][reason]:
-                del self.cache_data["auto_marks"][reason]
-
     def rebuild_reason_counts(self) -> None:
+        """Rebuild reason counts from marks (new unified format)."""
         self.cache_data["reason_counts"].clear()
-        # Prune auto marks to existing entries
-        marks = self.cache_data["marks"]
-        auto_marks = self.cache_data["auto_marks"]
-        for reason in list(auto_marks.keys()):
-            auto_marks[reason] = {b for b in auto_marks[reason] if marks.get(b) == reason}
-            if not auto_marks[reason]:
-                auto_marks.pop(reason, None)
-        for reason in marks.values():
-            self._adjust_reason_count(reason, 1)
+        for base, entry in self.cache_data["marks"].items():
+            if isinstance(entry, dict):
+                reason = entry.get("reason")
+                if reason:
+                    self._adjust_reason_count(reason, 1)
 
     def mark_sweep_done(self, sweep_type: str) -> None:
         """Mark a sweep as completed. Sweep types: duplicates, missing, quality, patterns."""
@@ -275,24 +346,36 @@ class ViewerState:
             self._apply_calibration_summary_delta(base)
 
     def breakdown_marks(self) -> Dict[str, int]:
-        """Compute manual/auto breakdown using current counts."""
+        """Compute manual/auto breakdown using new unified marks format."""
+        marks = self.cache_data["marks"]
         reason_counts = self.cache_data["reason_counts"]
+
+        # Count by reason and auto status
+        auto_by_reason: Dict[str, int] = {}
+        for entry in marks.values():
+            if isinstance(entry, dict):
+                reason = entry.get("reason", "")
+                if entry.get("auto", False) and reason:
+                    auto_by_reason[reason] = auto_by_reason.get(reason, 0) + 1
+
         total_marked = sum(reason_counts.values())
         duplicate_marked = reason_counts.get("duplicate", 0)
         missing_pair_marked = reason_counts.get("missing_pair", 0)
         manual_delete = reason_counts.get("user_marked", 0)
         blurry_marked = reason_counts.get("blurry", 0)
         motion_marked = reason_counts.get("motion", 0)
-        auto_marks = self.cache_data["auto_marks"]
-        auto_blurry = len(auto_marks.get("blurry", set()))
-        auto_motion = len(auto_marks.get("motion", set()))
+
+        auto_blurry = auto_by_reason.get("blurry", 0)
+        auto_motion = auto_by_reason.get("motion", 0)
         manual_blurry = max(0, blurry_marked - auto_blurry)
         manual_motion = max(0, motion_marked - auto_motion)
         manual_marked = max(0, total_marked - duplicate_marked - missing_pair_marked - auto_blurry - auto_motion)
         sync_marked = reason_counts.get("sync_error", 0)
+
         pattern_marked = sum(count for reason, count in reason_counts.items() if isinstance(reason, str) and reason.startswith("pattern"))
-        auto_pattern = sum(len(bucket) for reason, bucket in auto_marks.items() if isinstance(reason, str) and reason.startswith("pattern"))
+        auto_pattern = sum(count for reason, count in auto_by_reason.items() if isinstance(reason, str) and reason.startswith("pattern"))
         manual_patterns = max(0, pattern_marked - auto_pattern)
+
         return {
             "manual_total": manual_marked,
             "manual_delete": manual_delete,
@@ -358,8 +441,10 @@ class ViewerState:
         return "missing"
 
     def set_mark_reason(self, base: str, reason: Optional[str], manual_reason: str, *, auto: bool = False) -> bool:
-        """Assign or clear a delete reason while managing auto overrides."""
-        import os
+        """Assign or clear a delete reason.
+
+        New unified format: marks[base] = {reason: str, auto: bool}
+        """
         debug = os.environ.get("DEBUG_MARKS", "").lower() in {"1", "true", "on"}
 
         # If auto-marking, check if user has overridden (manually unmarked) this image
@@ -374,51 +459,44 @@ class ViewerState:
         elif auto and reason is not None and debug:
             log_debug(f"AUTO mark set: {base} -> {reason}", "MARK")
 
+        marks = self.cache_data["marks"]
+
         if reason is None:
-            marks = self.cache_data["marks"]
-            previous = marks.pop(base, None)
-            if previous is None:
+            # Removing mark
+            previous_entry = marks.pop(base, None)
+            if previous_entry is None:
                 return False
-            self._adjust_reason_count(previous, -1)
-            auto_marks = self.cache_data["auto_marks"]
-            if previous in auto_marks:
-                auto_marks[previous].discard(base)
-                if not auto_marks[previous]:
-                    auto_marks.pop(previous, None)
-            if previous != manual_reason:
+            previous_reason = previous_entry.get("reason") if isinstance(previous_entry, dict) else previous_entry
+            self._adjust_reason_count(previous_reason, -1)
+            if previous_reason != manual_reason:
                 self.cache_data["overrides"].add(base)
             if debug:
-                log_debug(f"Removed mark from {base} (was: {previous})", "MARK")
+                log_debug(f"Removed mark from {base} (was: {previous_reason})", "MARK")
             return True
-        marks = self.cache_data["marks"]
-        existing = marks.get(base)
-        if existing == reason:
-            return False
-        if existing:
-            self._adjust_reason_count(existing, -1)
-            auto_marks = self.cache_data["auto_marks"]
-            if existing in auto_marks:
-                auto_marks[existing].discard(base)
-                if not auto_marks[existing]:
-                    auto_marks.pop(existing, None)
-        self.cache_data["overrides"].discard(base)
-        marks[base] = reason
-        self._adjust_reason_count(reason, 1)
-        if auto:
-            auto_marks = self.cache_data["auto_marks"]
-            bucket = auto_marks.setdefault(reason, set())
-            bucket.add(base)
+
+        # Setting mark
+        existing_entry = marks.get(base)
+        existing_reason = existing_entry.get("reason") if isinstance(existing_entry, dict) else None
+
+        if existing_reason == reason:
+            # Same reason, maybe update auto flag
+            if isinstance(existing_entry, dict) and existing_entry.get("auto") == auto:
+                return False  # No change
+            # Update auto flag
+            marks[base] = {"reason": reason, "auto": auto}
             if debug:
-                log_debug(f"Added to auto_marks[{reason}]: {base}", "MARK")
-        else:
-            auto_marks = self.cache_data["auto_marks"]
-            if reason in auto_marks:
-                auto_marks[reason].discard(base)
-                if not auto_marks[reason]:
-                    auto_marks.pop(reason, None)
-                log_info(f"Removed from auto_marks[{reason}]: {base} (manual mark)", "MARK")
+                log_debug(f"Updated auto flag for {base}: {reason} (auto={auto})", "MARK")
+            return True
+
+        if existing_reason:
+            self._adjust_reason_count(existing_reason, -1)
+
+        self.cache_data["overrides"].discard(base)
+        marks[base] = {"reason": reason, "auto": auto}
+        self._adjust_reason_count(reason, 1)
+
         if debug:
-            log_debug(f"Set mark on {base}: {reason} (auto={auto}, existing={existing})", "MARK")
+            log_debug(f"Set mark on {base}: {reason} (auto={auto}, existing={existing_reason})", "MARK")
         return True
 
     # ========================================================================
@@ -474,17 +552,8 @@ class ViewerState:
         """
         self.image_data.pop(base, None)
 
-        # Clear marks
+        # Clear marks (unified format: {reason, auto})
         self.cache_data["marks"].pop(base, None)
-
-        # Clear auto_marks - need to check all reasons
-        auto_marks = self.cache_data.get("auto_marks", {})
-        for reason, bases in auto_marks.items():
-            if isinstance(bases, (list, set)) and base in bases:
-                if isinstance(bases, list):
-                    bases.remove(base)
-                else:
-                    bases.discard(base)
 
         # Clear calibration data - modify the dict directly
         calib = self.cache_data.get("calibration", {})
@@ -504,4 +573,3 @@ class ViewerState:
         self.cache_data["marks"].clear()
         self.cache_data["reason_counts"].clear()
         self.cache_data["overrides"].clear()
-        self.cache_data["auto_marks"].clear()

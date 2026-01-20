@@ -76,6 +76,10 @@ class AppConfig:
     # Calibration files
     calibration_intrinsic_filename: str = "calibration_intrinsic.yaml"
     calibration_extrinsic_filename: str = "calibration_extrinsic.yaml"
+    calibration_errors_filename: str = ".calibration_errors_cached.yaml"  # Hidden cache file
+
+    # Cache files
+    summary_cache_filename: str = ".summary_cache.yaml"
 
 
 # Global singleton instance

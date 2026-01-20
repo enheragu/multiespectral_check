@@ -8,6 +8,8 @@ from typing import Any, Dict, Optional
 
 import yaml
 
+from common.yaml_utils import get_timestamp_fields, load_yaml, save_yaml
+
 from common.log_utils import log_warning
 from config import get_config
 
@@ -31,16 +33,15 @@ def _default_cache() -> CacheData:
 def _normalize_dataset_entry(raw: Any) -> DatasetCache:
     """Normalize raw YAML data to in-memory format.
 
-    auto_marks: YAML stores as Dict[str, List], memory uses Dict[str, Set]
+    Expected marks format (unified):
+        marks: {base: {reason: str, auto: bool}}
+
     overrides: YAML stores as List, memory uses Set
     """
     entry: DatasetCache = {
         "marks": {},
         "reason_counts": {},
-        "auto_counts": {},
-        "auto_marks": {},  # Dict[str, Set[str]]
         "calibration": {},
-        "reproj_errors": {},
         "extrinsic_errors": {},
         "overrides": set(),  # Set[str]
         "note": "",
@@ -51,17 +52,22 @@ def _normalize_dataset_entry(raw: Any) -> DatasetCache:
     if not isinstance(raw, dict):
         return entry
 
-    entry["marks"] = raw.get("marks", {}) if isinstance(raw.get("marks"), dict) else {}
-    entry["reason_counts"] = raw.get("reason_counts", {}) if isinstance(raw.get("reason_counts"), dict) else {}
-    entry["auto_counts"] = raw.get("auto_counts", {}) if isinstance(raw.get("auto_counts"), dict) else {}
+    # Load marks (unified format: base -> {reason, auto})
+    raw_marks = raw.get("marks", {})
+    if isinstance(raw_marks, dict):
+        for base, value in raw_marks.items():
+            base_str = str(base)
+            if isinstance(value, dict) and "reason" in value:
+                # Expected format: {reason: str, auto: bool}
+                entry["marks"][base_str] = {
+                    "reason": str(value.get("reason", "")),
+                    "auto": bool(value.get("auto", False)),
+                }
+            # Skip invalid entries (should not happen with migrated data)
 
-    # auto_marks: List→Set conversion at load boundary
-    raw_auto_marks = raw.get("auto_marks", {})
-    if isinstance(raw_auto_marks, dict):
-        entry["auto_marks"] = {k: set(v) if isinstance(v, (list, set)) else set() for k, v in raw_auto_marks.items()}
+    entry["reason_counts"] = raw.get("reason_counts", {}) if isinstance(raw.get("reason_counts"), dict) else {}
 
     entry["calibration"] = raw.get("calibration", {}) if isinstance(raw.get("calibration"), dict) else {}
-    entry["reproj_errors"] = raw.get("reproj_errors", {}) if isinstance(raw.get("reproj_errors"), dict) else {}
     entry["extrinsic_errors"] = raw.get("extrinsic_errors", {}) if isinstance(raw.get("extrinsic_errors"), dict) else {}
 
     # overrides: List→Set conversion at load boundary
@@ -86,12 +92,18 @@ def _normalize_dataset_entry(raw: Any) -> DatasetCache:
 def serialize_dataset_entry(entry: DatasetCache) -> DatasetCache:
     """Prepare dataset entry for YAML persistence.
 
+    Marks format: {base: {reason: str, auto: bool}}
     Set→List conversion at save boundary (YAML doesn't handle sets well).
+    Adds last_updated timestamp for traceability.
+
+    NOTE: Some fields are NOT persisted because they're derived:
+    - reason_counts: rebuilt from marks at load time
+    - total_pairs: counted from filesystem at load time
     """
     PERSIST_FIELDS = {
-        "marks", "reason_counts", "auto_counts", "auto_marks",
-        "calibration", "reproj_errors", "extrinsic_errors",
-        "archived", "sweep_flags", "note", "total_pairs", "overrides",
+        "marks",  # Source of truth for tagged images
+        "calibration", "extrinsic_errors",  # Calibration data (reproj_errors regenerated from per_view_errors)
+        "archived", "sweep_flags", "note", "overrides",  # Other state
     }
 
     result: DatasetCache = {k: deepcopy(v) for k, v in entry.items() if k in PERSIST_FIELDS}
@@ -102,11 +114,8 @@ def serialize_dataset_entry(entry: DatasetCache) -> DatasetCache:
     overrides = result.get("overrides", set())
     result["overrides"] = sorted(overrides) if isinstance(overrides, (set, list)) else []
 
-    auto_marks = result.get("auto_marks", {})
-    if isinstance(auto_marks, dict):
-        result["auto_marks"] = {k: sorted(v) if isinstance(v, (set, list)) else [] for k, v in auto_marks.items()}
-
-    result["total_pairs"] = int(result.get("total_pairs", 0) or 0)
+    # Add timestamp for traceability
+    result.update(get_timestamp_fields())
 
     return result
 
@@ -153,11 +162,10 @@ def load_cache() -> CacheData:
     except OSError:
         pass
 
-    try:
-        with open(CACHE_FILE, "r", encoding="utf-8") as handle:
-            raw = yaml.safe_load(handle)  # type: ignore[arg-type]
-    except (OSError, yaml.YAMLError):  # noqa: PERF203
+    raw = load_yaml(CACHE_FILE)
+    if raw=={} or raw is None:
         return _default_cache()
+
     cache = _normalize_cache(raw)
     cache["version"] = config.cache_version
 
@@ -181,13 +189,14 @@ def load_cache() -> CacheData:
 def save_cache(cache: CacheData) -> None:
     config = get_config()
     cache["version"] = config.cache_version
+    # Add timestamp for traceability
+    cache.update(get_timestamp_fields())
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
     except OSError:
         return
     try:
-        with open(CACHE_FILE, "w", encoding="utf-8") as handle:
-            yaml.safe_dump(cache, handle, allow_unicode=False, sort_keys=True)
+        save_yaml(CACHE_FILE, cache, sort_keys=True)
     except OSError:
         return
 

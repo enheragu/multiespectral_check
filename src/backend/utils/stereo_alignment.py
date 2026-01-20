@@ -308,6 +308,11 @@ class AlignmentTransform:
         lwir_scale: Scale factor applied to LWIR image
         output_size: (width, height) of the output images
         fov_corners_out: FOV corners in output coordinates (4x2 array)
+        homography: Optional 3x3 homography matrix for LWIR→Visible mapping
+        lwir_calib_size: LWIR calibration size for homography scaling
+        vis_calib_size: Visible calibration size for homography scaling
+        lwir_display_size: LWIR display size for homography scaling
+        vis_display_size: Visible display size for homography scaling
     """
 
     def __init__(
@@ -318,6 +323,11 @@ class AlignmentTransform:
         output_size: Tuple[int, int],
         fov_corners_out: Any,
         lwir_crop_offset: Tuple[int, int] = (0, 0),
+        homography: Any = None,
+        lwir_calib_size: Optional[Tuple[int, int]] = None,
+        vis_calib_size: Optional[Tuple[int, int]] = None,
+        lwir_display_size: Optional[Tuple[int, int]] = None,
+        vis_display_size: Optional[Tuple[int, int]] = None,
     ):
         self.vis_matrix = vis_matrix
         self.lwir_offset = lwir_offset
@@ -325,6 +335,11 @@ class AlignmentTransform:
         self.output_size = output_size
         self.fov_corners_out = fov_corners_out
         self.lwir_crop_offset = lwir_crop_offset
+        self.homography = homography
+        self.lwir_calib_size = lwir_calib_size
+        self.vis_calib_size = vis_calib_size
+        self.lwir_display_size = lwir_display_size
+        self.vis_display_size = vis_display_size
 
         # Compute inverse matrix for visible
         if np is not None and vis_matrix is not None:
@@ -356,6 +371,15 @@ class AlignmentTransform:
         pts_h = np.hstack([pts, ones])
         transformed = (self.vis_matrix @ pts_h.T).T
 
+        # Log first point transformation for debugging
+        if len(pts) > 0:
+            log_debug(
+                f"transform_vis_points: ({pts[0,0]:.1f},{pts[0,1]:.1f}) -> "
+                f"({transformed[0,0]:.1f},{transformed[0,1]:.1f}) "
+                f"[vis_matrix[0,2]={self.vis_matrix[0,2]:.1f}, vis_matrix[1,2]={self.vis_matrix[1,2]:.1f}]",
+                "ALIGN"
+            )
+
         return transformed
 
     def transform_vis_points_inverse(self, points: Any) -> Any:
@@ -380,11 +404,99 @@ class AlignmentTransform:
 
         return transformed
 
-    def transform_lwir_points(self, points: Any) -> Any:
-        """Transform points from original LWIR coords to output coords.
+    def transform_vis_corners_complete(
+        self,
+        normalized_corners: Any,
+        original_size: Tuple[int, int],
+        view_rectified: bool,
+        camera_matrix: Optional[Any] = None,
+        distortion: Optional[Any] = None,
+    ) -> Any:
+        """Transform Visible corners from normalized RAW coords to output coords.
+
+        This method handles the complete transformation chain:
+        1. Denormalize to pixel coords (relative to original_size)
+        2. If view_rectified: apply undistort transformation
+        3. Apply vis_matrix affine transform to get output coords
+
+        Note: Unlike LWIR, visible doesn't have crop_offset since no border
+        is cropped from the visible image.
 
         Args:
-            points: Nx2 array of (x, y) points in original LWIR coordinates
+            normalized_corners: Nx2 array of (u, v) in 0-1 range
+            original_size: (width, height) of original RAW image
+            view_rectified: Whether undistort was applied to the display image
+            camera_matrix: Camera intrinsic matrix (needed if view_rectified)
+            distortion: Distortion coefficients (needed if view_rectified)
+
+        Returns:
+            Nx2 array of (x, y) in output pixel coordinates
+        """
+        if np is None or self.vis_matrix is None:
+            return normalized_corners
+
+        corners = np.asarray(normalized_corners, dtype=np.float32)
+        if corners.ndim == 1:
+            corners = corners.reshape(1, 2)
+
+        orig_w, orig_h = original_size
+
+        # Step 1: Denormalize to RAW pixel coordinates
+        pixel_coords = corners.copy()
+        pixel_coords[:, 0] = corners[:, 0] * orig_w
+        pixel_coords[:, 1] = corners[:, 1] * orig_h
+
+        # Step 2: If view_rectified, apply undistort to points
+        if view_rectified and camera_matrix is not None and distortion is not None:
+            try:
+                import cv2
+                cam = np.array(camera_matrix, dtype=np.float32)
+                dist = np.array(distortion, dtype=np.float32).reshape(-1)
+
+                # Get new camera matrix (same as undistort_pixmap uses)
+                new_cam, _ = cv2.getOptimalNewCameraMatrix(
+                    cam, dist, (orig_w, orig_h), 1, (orig_w, orig_h)
+                )
+
+                # undistortPoints expects (N, 1, 2) shape
+                pts = pixel_coords.reshape(-1, 1, 2)
+                undistorted = cv2.undistortPoints(pts, cam, dist, P=new_cam)
+                pixel_coords = undistorted.reshape(-1, 2)
+
+                log_debug(
+                    f"transform_vis_corners_complete: undistort applied, "
+                    f"first point ({corners[0,0]*orig_w:.1f},{corners[0,1]*orig_h:.1f}) -> "
+                    f"({pixel_coords[0,0]:.1f},{pixel_coords[0,1]:.1f})",
+                    "ALIGN"
+                )
+            except Exception as e:
+                log_warning(f"Failed to undistort visible corners: {e}", "ALIGN")
+
+        # Step 3: Apply vis_matrix affine transform
+        ones = np.ones((pixel_coords.shape[0], 1))
+        pts_h = np.hstack([pixel_coords, ones])
+        output_coords = (self.vis_matrix @ pts_h.T).T
+
+        # Log transformation summary
+        if len(corners) > 0:
+            log_debug(
+                f"transform_vis_corners_complete: normalized({corners[0,0]:.4f},{corners[0,1]:.4f}) -> "
+                f"output({output_coords[0,0]:.1f},{output_coords[0,1]:.1f}) "
+                f"[rectified={view_rectified}]",
+                "ALIGN"
+            )
+
+        return output_coords
+
+    def transform_lwir_points(self, points: Any) -> Any:
+        """Transform points from cropped LWIR coords to output coords.
+
+        NOTE: This expects points in coordinates of the CROPPED LWIR image
+        (after _crop_black_borders was applied). For points in original
+        image coordinates, use transform_lwir_points_from_original().
+
+        Args:
+            points: Nx2 array of (x, y) points in cropped LWIR coordinates
 
         Returns:
             Nx2 array of transformed points in output coordinates
@@ -396,10 +508,49 @@ class AlignmentTransform:
         if pts.ndim == 1:
             pts = pts.reshape(1, 2)
 
-        # Account for crop offset, then scale and translate
+        # For cropped coords: just scale and translate (crop offset already applied)
+        transformed = pts.copy()
+        transformed[:, 0] = pts[:, 0] * self.lwir_scale + self.lwir_offset[0]
+        transformed[:, 1] = pts[:, 1] * self.lwir_scale + self.lwir_offset[1]
+
+        return transformed
+
+    def transform_lwir_points_from_original(self, points: Any) -> Any:
+        """Transform points from ORIGINAL LWIR coords (pre-crop) to output coords.
+
+        Use this for calibration corners which are stored as normalized
+        coordinates relative to the original image file on disk.
+
+        Args:
+            points: Nx2 array of (x, y) points in original LWIR coordinates
+                   (before any crop/undistort was applied)
+
+        Returns:
+            Nx2 array of transformed points in output coordinates
+        """
+        if np is None:
+            return points
+
+        pts = np.asarray(points, dtype=np.float32)
+        if pts.ndim == 1:
+            pts = pts.reshape(1, 2)
+
+        # For original image coords, we need to:
+        # 1. Subtract crop_offset to get coordinates in the cropped image
+        # 2. Multiply by lwir_scale (cropped image is scaled to output)
+        # 3. Add lwir_offset (position of scaled LWIR in output canvas)
         transformed = pts.copy()
         transformed[:, 0] = (pts[:, 0] - self.lwir_crop_offset[0]) * self.lwir_scale + self.lwir_offset[0]
         transformed[:, 1] = (pts[:, 1] - self.lwir_crop_offset[1]) * self.lwir_scale + self.lwir_offset[1]
+
+        # Log first point transformation for debugging
+        if len(pts) > 0:
+            log_debug(
+                f"transform_lwir_points_from_original: ({pts[0,0]:.1f},{pts[0,1]:.1f}) -> "
+                f"({transformed[0,0]:.1f},{transformed[0,1]:.1f}) "
+                f"[crop_off={self.lwir_crop_offset}, scale={self.lwir_scale:.3f}, off={self.lwir_offset}]",
+                "ALIGN"
+            )
 
         return transformed
 
@@ -426,13 +577,105 @@ class AlignmentTransform:
 
         return transformed
 
+    def transform_lwir_corners_complete(
+        self,
+        normalized_corners: Any,
+        original_size: Tuple[int, int],
+        view_rectified: bool,
+        camera_matrix: Optional[Any] = None,
+        distortion: Optional[Any] = None,
+    ) -> Any:
+        """Transform LWIR corners from normalized RAW coords to output coords.
+
+        This method handles the complete transformation chain:
+        1. Denormalize to pixel coords (relative to original_size)
+        2. If view_rectified: apply undistort transformation
+        3. Subtract crop_offset (only meaningful if view_rectified)
+        4. Apply scale and offset to get output coords
+
+        Args:
+            normalized_corners: Nx2 array of (u, v) in 0-1 range
+            original_size: (width, height) of original RAW image
+            view_rectified: Whether undistort was applied to the display image
+            camera_matrix: Camera intrinsic matrix (needed if view_rectified)
+            distortion: Distortion coefficients (needed if view_rectified)
+
+        Returns:
+            Nx2 array of (x, y) in output pixel coordinates
+        """
+        if np is None:
+            return normalized_corners
+
+        corners = np.asarray(normalized_corners, dtype=np.float32)
+        if corners.ndim == 1:
+            corners = corners.reshape(1, 2)
+
+        orig_w, orig_h = original_size
+
+        # Step 1: Denormalize to RAW pixel coordinates
+        pixel_coords = corners.copy()
+        pixel_coords[:, 0] = corners[:, 0] * orig_w
+        pixel_coords[:, 1] = corners[:, 1] * orig_h
+
+        # Step 2: If view_rectified, apply undistort to points
+        if view_rectified and camera_matrix is not None and distortion is not None:
+            try:
+                import cv2
+                cam = np.array(camera_matrix, dtype=np.float32)
+                dist = np.array(distortion, dtype=np.float32).reshape(-1)
+
+                # Get new camera matrix (same as undistort_pixmap uses)
+                new_cam, _ = cv2.getOptimalNewCameraMatrix(
+                    cam, dist, (orig_w, orig_h), 1, (orig_w, orig_h)
+                )
+
+                # undistortPoints expects (N, 1, 2) shape
+                pts = pixel_coords.reshape(-1, 1, 2)
+                undistorted = cv2.undistortPoints(pts, cam, dist, P=new_cam)
+                pixel_coords = undistorted.reshape(-1, 2)
+
+                log_debug(
+                    f"transform_lwir_corners_complete: undistort applied, "
+                    f"first point ({corners[0,0]*orig_w:.1f},{corners[0,1]*orig_h:.1f}) -> "
+                    f"({pixel_coords[0,0]:.1f},{pixel_coords[0,1]:.1f})",
+                    "ALIGN"
+                )
+            except Exception as e:
+                log_warning(f"Failed to undistort corners: {e}", "ALIGN")
+
+        # Step 3: Subtract crop offset (from undistort border removal)
+        # This is (0,0) if view_rectified=False or no magenta borders found
+        crop_x, crop_y = self.lwir_crop_offset
+        cropped_coords = pixel_coords.copy()
+        cropped_coords[:, 0] = pixel_coords[:, 0] - crop_x
+        cropped_coords[:, 1] = pixel_coords[:, 1] - crop_y
+
+        # Step 4: Apply scale and offset
+        output_coords = cropped_coords.copy()
+        output_coords[:, 0] = cropped_coords[:, 0] * self.lwir_scale + self.lwir_offset[0]
+        output_coords[:, 1] = cropped_coords[:, 1] * self.lwir_scale + self.lwir_offset[1]
+
+        # Log transformation summary
+        if len(corners) > 0:
+            log_debug(
+                f"transform_lwir_corners_complete: normalized({corners[0,0]:.4f},{corners[0,1]:.4f}) -> "
+                f"output({output_coords[0,0]:.1f},{output_coords[0,1]:.1f}) "
+                f"[rectified={view_rectified}, crop=({crop_x},{crop_y}), scale={self.lwir_scale:.3f}, "
+                f"off=({self.lwir_offset[0]},{self.lwir_offset[1]})]",
+                "ALIGN"
+            )
+
+        return output_coords
+
 
 def _crop_black_borders(img: Any) -> Tuple[Any, Tuple[int, int, int, int]]:
-    """Crop black borders from an image (e.g., from undistortion).
+    """Crop border fill from an image (e.g., from undistortion).
 
-    Uses an iterative approach to find the largest axis-aligned rectangle
-    that contains only valid (non-black) pixels. This is more robust than
-    contour-based approaches for undistorted images.
+    Detects the magenta fill color (255, 0, 255) used by undistort_pixmap
+    to mark areas outside the original image. Does NOT detect black pixels
+    as borders since LWIR thermal images may have legitimate dark areas.
+
+    If no magenta pixels are found, returns the image unchanged (no crop).
 
     Returns:
         Tuple of (cropped_image, (x, y, w, h) of the crop region)
@@ -442,15 +685,29 @@ def _crop_black_borders(img: Any) -> Tuple[Any, Tuple[int, int, int, int]]:
 
     h, w = img.shape[:2]
 
-    # Convert to grayscale for threshold
+    # Create mask of INVALID pixels (magenta border fill only)
+    # Do NOT detect black as invalid - LWIR images have legitimate dark areas
     if len(img.shape) == 3:
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        # Magenta in BGR: B=255, G=0, R=255
+        is_magenta = (
+            (img[:, :, 0] > 250) &  # B channel high
+            (img[:, :, 1] < 10) &   # G channel low
+            (img[:, :, 2] > 250)    # R channel high
+        )
+        invalid_mask = is_magenta
     else:
-        gray = img
+        # Grayscale: can't detect magenta, so no crop
+        return img, (0, 0, w, h)
 
-    # Create binary mask of valid (non-black) pixels
-    # Threshold at 5 to handle near-black from compression artifacts
-    _, valid_mask = cv2.threshold(gray, 5, 255, cv2.THRESH_BINARY)
+    # Check if there are any magenta pixels at all
+    magenta_count = np.sum(invalid_mask)
+    if magenta_count == 0:
+        # No undistort borders detected, return full image
+        log_debug("_crop_black_borders: no magenta borders found, using full image", "ALIGN")
+        return img, (0, 0, w, h)
+
+    # Valid pixels are NOT invalid
+    valid_mask = ~invalid_mask
 
     # Find the largest inscribed rectangle by shrinking from all sides
     # Start with full image bounds
@@ -458,28 +715,28 @@ def _crop_black_borders(img: Any) -> Tuple[Any, Tuple[int, int, int, int]]:
 
     # Shrink from top: find first row with >95% valid pixels
     for row in range(h):
-        row_valid = np.sum(valid_mask[row, :] > 0)
+        row_valid = np.sum(valid_mask[row, :])
         if row_valid > 0.95 * w:
             top = row
             break
 
     # Shrink from bottom
     for row in range(h - 1, top, -1):
-        row_valid = np.sum(valid_mask[row, :] > 0)
+        row_valid = np.sum(valid_mask[row, :])
         if row_valid > 0.95 * w:
             bottom = row + 1
             break
 
     # Shrink from left
     for col in range(w):
-        col_valid = np.sum(valid_mask[top:bottom, col] > 0)
+        col_valid = np.sum(valid_mask[top:bottom, col])
         if col_valid > 0.95 * (bottom - top):
             left = col
             break
 
     # Shrink from right
     for col in range(w - 1, left, -1):
-        col_valid = np.sum(valid_mask[top:bottom, col] > 0)
+        col_valid = np.sum(valid_mask[top:bottom, col])
         if col_valid > 0.95 * (bottom - top):
             right = col + 1
             break
@@ -926,13 +1183,17 @@ def align_fov_with_padding(
         )
 
         # Create transformation object
+        # NOTE: In full mode, we display the FULL LWIR image (with magenta borders),
+        # NOT the cropped version. Therefore lwir_crop_offset should be (0,0)
+        # because the transformation is: output = orig_coord * scale + offset
+        # The crop_rect is only used for FOV calculation, not for the displayed image.
         transform = AlignmentTransform(
             vis_matrix=M_adjusted,
             lwir_offset=(lwir_x, lwir_y),
             lwir_scale=lwir_scale,
             output_size=(out_w, out_h),
             fov_corners_out=fov_corners_out,
-            lwir_crop_offset=(crop_rect[0], crop_rect[1]),
+            lwir_crop_offset=(0, 0),  # Full image shown, no crop offset needed
         )
 
         # Convert back to pixmaps
@@ -1267,21 +1528,71 @@ def align_max_overlap(
         crop_x2 = min(vis_w, fov_x2)
         crop_y2 = min(vis_h, fov_y2)
 
-        out_w = crop_x2 - crop_x1
-        out_h = crop_y2 - crop_y1
+        overlap_w = crop_x2 - crop_x1
+        overlap_h = crop_y2 - crop_y1
 
-        if out_w <= 0 or out_h <= 0:
+        if overlap_w <= 0 or overlap_h <= 0:
             log_warning("align_max_overlap: no valid overlap region", "ALIGN")
             return (lwir_pixmap, vis_pixmap, None)
 
+        # FOV dimensions in visible display space
+        fov_w = fov_x2 - fov_x1
+        fov_h = fov_y2 - fov_y1
+
+        if fov_w <= 0 or fov_h <= 0:
+            log_warning("align_max_overlap: invalid FOV dimensions", "ALIGN")
+            return (lwir_pixmap, vis_pixmap, None)
+
+        # Calculate how much of the FOV is clipped by image bounds
+        # These are fractions (0.0 = no clip, 1.0 = fully clipped)
+        clip_left = (crop_x1 - fov_x1) / fov_w  # How much is clipped on left
+        clip_top = (crop_y1 - fov_y1) / fov_h   # How much is clipped on top
+        clip_right = (fov_x2 - crop_x2) / fov_w  # How much is clipped on right
+        clip_bottom = (fov_y2 - crop_y2) / fov_h  # How much is clipped on bottom
+
+        # Calculate the corresponding crop region in LWIR
+        # The FOV represents the full lwir_cropped, so we need to crop the same fractions
+        lwir_crop_x1 = int(clip_left * lwir_w)
+        lwir_crop_y1 = int(clip_top * lwir_h)
+        lwir_crop_x2 = int(lwir_w - clip_right * lwir_w)
+        lwir_crop_y2 = int(lwir_h - clip_bottom * lwir_h)
+
+        # Ensure valid bounds
+        lwir_crop_x1 = max(0, lwir_crop_x1)
+        lwir_crop_y1 = max(0, lwir_crop_y1)
+        lwir_crop_x2 = min(lwir_w, lwir_crop_x2)
+        lwir_crop_y2 = min(lwir_h, lwir_crop_y2)
+
+        lwir_visible_w = lwir_crop_x2 - lwir_crop_x1
+        lwir_visible_h = lwir_crop_y2 - lwir_crop_y1
+
+        if lwir_visible_w <= 0 or lwir_visible_h <= 0:
+            log_warning("align_max_overlap: no visible LWIR region after crop", "ALIGN")
+            return (lwir_pixmap, vis_pixmap, None)
+
+        # Crop LWIR to only the visible portion
+        lwir_visible = lwir_cropped[lwir_crop_y1:lwir_crop_y2, lwir_crop_x1:lwir_crop_x2]
+
+        # Now calculate uniform scale to preserve aspect ratio
+        lwir_aspect = lwir_visible_w / lwir_visible_h if lwir_visible_h > 0 else 1.0
+        vis_aspect = overlap_w / overlap_h if overlap_h > 0 else 1.0
+
+        # Output size: use the visible overlap dimensions, both images will match
+        out_w = overlap_w
+        out_h = overlap_h
+
         log_debug(f"align_max_overlap: FOV ({fov_x1},{fov_y1})-({fov_x2},{fov_y2})", "ALIGN")
+        log_debug(f"align_max_overlap: LWIR visible crop ({lwir_crop_x1},{lwir_crop_y1})-({lwir_crop_x2},{lwir_crop_y2})", "ALIGN")
         log_debug(f"align_max_overlap: Max Overlap ({crop_x1},{crop_y1}) {out_w}x{out_h}", "ALIGN")
 
         # === VISIBLE: Crop to max overlap region ===
         vis_result = vis_arr[crop_y1:crop_y2, crop_x1:crop_x2].copy()
 
-        # === LWIR: Scale cropped image to match output size ===
-        lwir_result = cv2.resize(lwir_cropped, (out_w, out_h), interpolation=cv2.INTER_AREA)
+        # === LWIR: Scale the cropped visible portion to match visible output size ===
+        lwir_result = cv2.resize(lwir_visible, (out_w, out_h), interpolation=cv2.INTER_AREA)
+
+        # Calculate effective scale for transform
+        uniform_scale = out_w / lwir_visible_w if lwir_visible_w > 0 else 1.0
 
         # Draw "Max Overlap" text on both images
         cv2.putText(
@@ -1295,16 +1606,19 @@ def align_max_overlap(
             cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2
         )
 
-        # Create transform object
+        # Create transform object with uniform scale
+        # lwir_crop_offset now includes both the black border crop AND the visible crop
+        total_lwir_offset_x = crop_rect[0] + lwir_crop_x1
+        total_lwir_offset_y = crop_rect[1] + lwir_crop_y1
         transform = AlignmentTransform(
             vis_matrix=np.array([[1, 0, -crop_x1], [0, 1, -crop_y1]], dtype=np.float32),
             lwir_offset=(0, 0),
-            lwir_scale=out_w / lwir_w,
+            lwir_scale=uniform_scale,
             output_size=(out_w, out_h),
             fov_corners_out=np.array([
                 [0, 0], [out_w, 0], [out_w, out_h], [0, out_h]
             ], dtype=np.float32),
-            lwir_crop_offset=(crop_rect[0], crop_rect[1]),
+            lwir_crop_offset=(total_lwir_offset_x, total_lwir_offset_y),
         )
 
         # Convert back to pixmaps

@@ -196,11 +196,7 @@ class CalibrationWorkflow(QObject):
         if was_unmarked:
             if has_detection:
                 # Auto-mark this image as calibration candidate
-                calib_dict = self.state.cache_data.setdefault("calibration", {})
-                if base not in calib_dict:
-                    calib_dict[base] = {}
-                calib_dict[base]["marked"] = True
-                calib_dict[base]["auto"] = True  # Track that this was auto-detected
+                self.state.set_calibration_mark(base, marked=True, auto=True)
                 log_debug(f"Auto-marked {base} as calibration candidate (pattern detected)", "CALIB_WORKFLOW")
             else:
                 # No pattern detected and not marked - emit signal and skip storing
@@ -280,21 +276,25 @@ class CalibrationWorkflow(QObject):
             if base not in self.state.calibration_marked:
                 continue
             bucket = self.session.get_corners(base) or {}  # Lazy load corners
+            # Get image_size from corners file
+            image_sizes = bucket.get("image_size", {})
             for channel in ("lwir", "visible"):
                 if base in out_intrinsic.get(channel, set()):
                     continue
                 points = bucket.get(channel)
                 if not points:
                     continue
-                image_path = self.session.get_image_path(base, channel)
-                if not image_path or not image_path.exists():
+                # Get image_size for this channel
+                size = image_sizes.get(channel)
+                if not size:
+                    # Skip if no image_size available (need to re-run chessboard detection)
                     continue
                 samples.append(
                     CalibrationSample(
                         base=base,
                         channel=channel,
-                        image_path=image_path,
                         corners=points,
+                        image_size=tuple(size),  # type: ignore[arg-type]
                     )
                 )
         return samples

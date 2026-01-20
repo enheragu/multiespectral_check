@@ -3,31 +3,26 @@ from __future__ import annotations
 
 import os
 import time
-from dataclasses import dataclass
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
-import yaml
-
-from backend.utils.cache import (
-    CacheData,
-    DatasetCache,
-    ensure_dataset_entry,
-    load_cache,
-    save_cache,
-    serialize_dataset_entry,
-    deserialize_dataset_entry,
-    touch_dataset,
-    trim_cache,
-)
-from common.log_utils import log_debug, log_info, log_warning, log_perf
+from backend.services.handler_registry import get_handler_registry
+from backend.utils.cache import (CacheData, DatasetCache,
+                                 deserialize_dataset_entry,
+                                 ensure_dataset_entry, load_cache, save_cache,
+                                 serialize_dataset_entry, touch_dataset,
+                                 trim_cache)
+from common.log_utils import log_debug, log_info, log_perf, log_warning
+from common.yaml_utils import load_yaml, save_yaml
+from config import get_config
 
 if TYPE_CHECKING:
     from backend.services.viewer_state import ViewerState
 
 
-# Image labels cache (marks, auto_marks, reason_counts, overrides, archived)
+# Image labels cache (marks in unified format, reason_counts, overrides, archived)
 DATASET_CACHE_FILENAME = ".image_labels.yaml"  # Hidden file
 
 
@@ -50,44 +45,30 @@ def _distribute_collection_marks(dataset_path: Path, entry: DatasetCache) -> Non
 
     Collection marks have prefixed bases like "child_name/base".
     This extracts them and saves to the appropriate child's cache.
+
+    Marks are in unified format: {base: {reason: str, auto: bool}}
     """
     marks = entry.get("marks", {})
-    auto_marks_dict = entry.get("auto_marks", {})
 
-    if not marks and not auto_marks_dict:
+    if not marks:
         return
 
     debug = os.environ.get("DEBUG_CACHE", "").lower() in {"1", "true", "on"}
 
-    # Group marks by child dataset
-    child_marks: Dict[str, Dict[str, str]] = {}
-    child_auto_marks: Dict[str, Dict[str, Set[str]]] = {}
+    # Group marks by child dataset (unified format: base -> {reason, auto})
+    child_marks: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
-    # Process regular marks
-    for base, reason in marks.items():
+    # Process marks
+    for base, mark_entry in marks.items():
         if "/" not in base:
             continue  # Not a prefixed mark, skip
         child_name, local_base = base.split("/", 1)
         if child_name not in child_marks:
             child_marks[child_name] = {}
-        child_marks[child_name][local_base] = reason
-
-    # Process auto_marks
-    for reason, bases in auto_marks_dict.items():
-        if not isinstance(bases, (list, set)):
-            continue
-        for base in bases:
-            if "/" not in base:
-                continue
-            child_name, local_base = base.split("/", 1)
-            if child_name not in child_auto_marks:
-                child_auto_marks[child_name] = {}
-            if reason not in child_auto_marks[child_name]:
-                child_auto_marks[child_name][reason] = set()
-            child_auto_marks[child_name][reason].add(local_base)
+        child_marks[child_name][local_base] = mark_entry
 
     # Save to each child's cache
-    for child_name in set(child_marks.keys()) | set(child_auto_marks.keys()):
+    for child_name in child_marks.keys():
         child_path = dataset_path / child_name
         if not child_path.exists():
             if debug:
@@ -100,7 +81,7 @@ def _distribute_collection_marks(dataset_path: Path, entry: DatasetCache) -> Non
         # Track if we actually make changes
         has_changes = False
 
-        # Merge marks (collection marks override child marks for same base)
+        # Merge marks (unified format: base -> {reason, auto})
         existing_marks = child_entry.get("marks", {})
         if isinstance(existing_marks, dict):
             existing_marks = dict(existing_marks)
@@ -109,8 +90,8 @@ def _distribute_collection_marks(dataset_path: Path, entry: DatasetCache) -> Non
 
         marks_to_add = child_marks.get(child_name, {})
         # Check if marks would actually add something new
-        for base, reason in marks_to_add.items():
-            if base not in existing_marks or existing_marks[base] != reason:
+        for base, mark_entry in marks_to_add.items():
+            if base not in existing_marks or existing_marks[base] != mark_entry:
                 has_changes = True
                 break
 
@@ -118,34 +99,9 @@ def _distribute_collection_marks(dataset_path: Path, entry: DatasetCache) -> Non
             existing_marks.update(marks_to_add)
             child_entry["marks"] = existing_marks
 
-        # Merge auto_marks
-        existing_auto = child_entry.get("auto_marks", {})
-        if not isinstance(existing_auto, dict):
-            existing_auto = {}
-        else:
-            # Deserialize if needed
-            existing_auto = {
-                r: set(b) if isinstance(b, list) else b
-                for r, b in existing_auto.items()
-            }
-
-        auto_to_add = child_auto_marks.get(child_name, {})
-        # Check if auto_marks would add something new
-        for reason, bases in auto_to_add.items():
-            if reason not in existing_auto:
-                has_changes = True
-            elif not bases.issubset(existing_auto[reason]):
-                has_changes = True
-            if has_changes:
-                break
-
-        if has_changes:
-            for reason, bases in auto_to_add.items():
-                if reason in existing_auto:
-                    existing_auto[reason].update(bases)
-                else:
-                    existing_auto[reason] = bases.copy()
-            child_entry["auto_marks"] = serialize_auto_marks(existing_auto)
+            # Remove legacy auto_marks field if present
+            if "auto_marks" in child_entry:
+                del child_entry["auto_marks"]
 
         # Only save and notify if there were actual changes
         if not has_changes:
@@ -153,15 +109,15 @@ def _distribute_collection_marks(dataset_path: Path, entry: DatasetCache) -> Non
                 log_debug(f"Child {child_name}: no new marks to distribute (already has them)", "CACHE")
             continue
 
-        # Update reason_counts
-        reason_counts = child_entry.get("reason_counts", {})
-        if not isinstance(reason_counts, dict):
-            reason_counts = {}
-
-        for reason in set(marks_to_add.values()):
-            reason_counts[reason] = reason_counts.get(reason, 0) + sum(
-                1 for r in marks_to_add.values() if r == reason
-            )
+        # Update reason_counts (read from unified format)
+        reason_counts: Dict[str, int] = {}
+        for base, mark_entry in existing_marks.items():
+            if isinstance(mark_entry, dict):
+                reason = mark_entry.get("reason", "")
+            else:
+                reason = mark_entry  # Legacy: just string
+            if reason:
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
 
         child_entry["reason_counts"] = reason_counts
 
@@ -169,12 +125,11 @@ def _distribute_collection_marks(dataset_path: Path, entry: DatasetCache) -> Non
         save_dataset_cache_file(child_cache_path, child_entry)
 
         # Notify handler registry that child cache was updated
-        from backend.services.handler_registry import get_handler_registry
         get_handler_registry().notify_cache_changed(child_path)
 
         if debug:
             mark_count = len(marks_to_add)
-            auto_count = sum(len(bases) for bases in auto_to_add.values())
+            auto_count = sum(1 for m in marks_to_add.values() if isinstance(m, dict) and m.get("auto"))
             log_info(f"Distributed to {child_name}: {mark_count} marks ({auto_count} auto)", "CACHE")
 
 
@@ -246,9 +201,9 @@ class CacheService:
             self._dataset_entry = load_dataset_cache_file(self._dataset_cache_path)
 
             # If image_labels.yaml doesn't exist but .summary_cache.yaml does, load sweep_flags from summary cache
+            config = get_config()
             if not self._dataset_entry or not self._dataset_entry.get("sweep_flags"):
-                from backend.services.dataset_handler import SUMMARY_CACHE_FILENAME
-                summary_cache_path = Path(self._dataset_path) / SUMMARY_CACHE_FILENAME
+                summary_cache_path = Path(self._dataset_path) / config.summary_cache_filename
                 if summary_cache_path.exists():
                     summary_data = load_dataset_cache_file(summary_cache_path)
                     if summary_data and isinstance(summary_data, dict):
@@ -379,11 +334,10 @@ class CacheService:
         """Snapshot state to cache. Uses ViewerState.cache_data as single source of truth."""
         cd = state.cache_data
 
-        # Build active_cache for runtime access
+        # Build active_cache for runtime access (marks now in unified format)
         self.active_cache = {
             "marks": cd["marks"],
             "reason_counts": cd["reason_counts"],
-            "auto_marks": {k: list(v) for k, v in cd["auto_marks"].items()},
             "calibration_marked": list(state.calibration_marked),
             "calibration_results": state.calibration_results,
             "calibration_corners": state.calibration_corners,
@@ -422,31 +376,39 @@ class CacheService:
         """Write state to entry dict. Extracts data from ViewerState.cache_data."""
         cd = state.cache_data
 
-        # Marks
-        entry["marks"] = {k: v.strip() for k, v in cd["marks"].items()
-                          if isinstance(k, str) and isinstance(v, str) and v.strip()}
+        # Marks (unified format: base -> {reason, auto})
+        entry["marks"] = cd["marks"]
         entry["reason_counts"] = {k: int(v) for k, v in cd["reason_counts"].items()
                                   if isinstance(k, str) and isinstance(v, (int, float))}
-        entry["auto_counts"] = {k: len(v) for k, v in cd["auto_marks"].items()
-                                if isinstance(k, str) and isinstance(v, set)}
-        entry["auto_marks"] = serialize_auto_marks(cd["auto_marks"])
 
-        # Log manual vs auto breakdown for debugging
-        manual_count = len(cd["marks"]) - sum(len(bases) for bases in cd["auto_marks"].values())
-        auto_count = sum(len(bases) for bases in cd["auto_marks"].values())
+        # Log manual vs auto breakdown for debugging (count from unified format)
+        total_marks = len(cd["marks"])
+        auto_count = sum(1 for m in cd["marks"].values() if isinstance(m, dict) and m.get("auto", False))
+        manual_count = total_marks - auto_count
         if manual_count > 0 or auto_count > 0:
-            log_info(f"Saving marks: {len(cd['marks'])} total ({manual_count} manual, {auto_count} auto)", "CACHE")
+            log_info(f"Saving marks: {total_marks} total ({manual_count} manual, {auto_count} auto)", "CACHE")
 
         # Calibration (serialize the whole calibration dict, preserving auto flag)
-        entry["calibration"] = serialize_calibration(cd.get("calibration", {}))
+        calib_raw = cd.get("calibration", {})
+        serialized_calib = serialize_calibration(calib_raw)
+        entry["calibration"] = serialized_calib
 
-        # Errors (direct dict access)
-        entry["reproj_errors"] = {
-            ch: {b: float(e) for b, e in bucket.items()
-                 if isinstance(b, str) and isinstance(e, (int, float))}
-            for ch in ("lwir", "visible")
-            if (bucket := cd["reproj_errors"].get(ch, {})) and isinstance(bucket, dict)
-        }
+        # Log calibration outliers for debugging
+        outlier_counts = {"lwir": 0, "visible": 0, "stereo": 0}
+        for base_entry in serialized_calib.values():
+            if isinstance(base_entry, dict):
+                outlier_dict = base_entry.get("outlier", {})
+                if isinstance(outlier_dict, dict):
+                    for ch in ("lwir", "visible", "stereo"):
+                        if outlier_dict.get(ch):
+                            outlier_counts[ch] += 1
+        total_calib = len(serialized_calib)
+        if total_calib > 0:
+            log_info(f"Saving calibration: {total_calib} entries, outliers: lwir={outlier_counts['lwir']} visible={outlier_counts['visible']} stereo={outlier_counts['stereo']}", "CACHE")
+
+        # NOTE: reproj_errors NOT persisted - regenerated from calibration_intrinsic.yaml on load
+
+        # Extrinsic errors (persisted for archived entries restoration)
         entry["extrinsic_errors"] = {b: float(e) for b, e in cd["extrinsic_errors"].items()
                                       if isinstance(b, str) and isinstance(e, (int, float))}
 
@@ -545,24 +507,6 @@ def deserialize_signatures(raw: Any) -> Dict[str, Dict[str, Optional[bytes]]]:
     return cache
 
 
-def serialize_auto_marks(auto_marks: Dict[str, Set[str]]) -> Dict[str, List[str]]:
-    """⚠️ SEMI-NECESSARY: Set -> List for YAML compatibility (trivial conversion)."""
-    if not isinstance(auto_marks, dict):
-        return {}
-    return {k: list(v) for k, v in auto_marks.items() if isinstance(k, str) and isinstance(v, set)}
-
-
-def deserialize_auto_marks(raw: Any) -> Dict[str, Set[str]]:
-    """⚠️ SEMI-NECESSARY: List -> Set for YAML compatibility (trivial conversion)."""
-    if not isinstance(raw, dict):
-        return {}
-    result: Dict[str, Set[str]] = {}
-    for reason, bases in raw.items():
-        if isinstance(reason, str) and isinstance(bases, list):
-            result[reason] = {b for b in bases if isinstance(b, str)}
-    return result
-
-
 def serialize_archived_entries(entries: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     """Serialize archived entries. Only corners need conversion (numpy arrays), rest passes through."""
     payload: Dict[str, Any] = {}
@@ -598,8 +542,9 @@ def serialize_calibration(
 ) -> Dict[str, Any]:
     """Convert ViewerState calibration dict to YAML per-base dict structure.
 
-    Preserves: marked, auto, outlier_*, results
+    Preserves: auto, outlier (nested dict), results
     NOTE: Corners deliberately excluded - stored in calibration/*.yaml files separately.
+    NOTE: 'marked' field removed - presence in dict implies marked.
     """
     payload: Dict[str, Any] = {}
 
@@ -609,15 +554,29 @@ def serialize_calibration(
     for base, entry in calibration_dict.items():
         if not isinstance(base, str) or not isinstance(entry, dict):
             continue
-        # Only serialize if there's meaningful data
-        if not entry.get("marked") and not entry.get("results"):
+        # Presence in dict = marked, so all entries should be serialized
+        # Only skip if it's an empty dict somehow
+        if not entry:
             continue
+
+        # Extract outlier from nested dict format
+        outlier_dict = entry.get("outlier", {})
+        if isinstance(outlier_dict, dict):
+            outlier_lwir = bool(outlier_dict.get("lwir", False))
+            outlier_visible = bool(outlier_dict.get("visible", False))
+            outlier_stereo = bool(outlier_dict.get("stereo", False))
+        else:
+            outlier_lwir = False
+            outlier_visible = False
+            outlier_stereo = False
+
         payload[base] = {
-            "marked": bool(entry.get("marked", False)),
-            "auto": bool(entry.get("auto", False)),  # Preserve auto flag
-            "outlier_lwir": bool(entry.get("outlier_lwir", False)),
-            "outlier_visible": bool(entry.get("outlier_visible", False)),
-            "outlier_stereo": bool(entry.get("outlier_stereo", False)),
+            "auto": bool(entry.get("auto", False)),
+            "outlier": {
+                "lwir": outlier_lwir,
+                "visible": outlier_visible,
+                "stereo": outlier_stereo,
+            },
             "results": entry.get("results", {}),
         }
     return payload
@@ -626,8 +585,9 @@ def serialize_calibration(
 def deserialize_calibration(raw: Any) -> Dict[str, Dict[str, Any]]:
     """Convert YAML per-base dict structure to ViewerState calibration dict.
 
-    Returns dict with structure: {base: {marked, auto, outlier_*, results}}
+    Returns dict with structure: {base: {marked, auto, outlier: {...}, results}}
     NOTE: Corners always loaded on-demand from calibration/*.yaml files.
+    NOTE: 'marked' is inferred from presence in dict (always True when entry exists).
     """
     calibration: Dict[str, Dict[str, Any]] = {}
 
@@ -647,14 +607,34 @@ def deserialize_calibration(raw: Any) -> Dict[str, Dict[str, Any]]:
                 if k in ("lwir", "visible") and (isinstance(v, bool) or v is None)
             }
 
+        # Extract outlier from nested dict format (new format only)
+        outlier_dict = entry.get("outlier", {})
+        if isinstance(outlier_dict, dict):
+            outlier = {
+                "lwir": bool(outlier_dict.get("lwir", False)),
+                "visible": bool(outlier_dict.get("visible", False)),
+                "stereo": bool(outlier_dict.get("stereo", False)),
+            }
+        else:
+            # Legacy format not supported - use defaults
+            outlier = {"lwir": False, "visible": False, "stereo": False}
+
+        # Presence in dict = marked (no explicit 'marked' field stored)
         calibration[base] = {
-            "marked": bool(entry.get("marked", False)),
-            "auto": bool(entry.get("auto", False)),  # Preserve auto flag (default False for legacy)
-            "outlier_lwir": bool(entry.get("outlier_lwir", False)),
-            "outlier_visible": bool(entry.get("outlier_visible", False)),
-            "outlier_stereo": bool(entry.get("outlier_stereo", False)),
+            "auto": bool(entry.get("auto", False)),
+            "outlier": outlier,
             "results": results,
         }
+
+    # Log loaded calibration outliers for debugging
+    outlier_counts = {"lwir": 0, "visible": 0, "stereo": 0}
+    for base_entry in calibration.values():
+        outlier_dict = base_entry.get("outlier", {})
+        for ch in ("lwir", "visible", "stereo"):
+            if outlier_dict.get(ch):
+                outlier_counts[ch] += 1
+    if calibration:
+        log_debug(f"Loaded calibration: {len(calibration)} entries, outliers: lwir={outlier_counts['lwir']} visible={outlier_counts['visible']} stereo={outlier_counts['stereo']}", "CACHE")
 
     return calibration
 
@@ -779,15 +759,12 @@ def is_vector3(value: Any) -> bool:
 
 def empty_dataset_entry() -> DatasetCache:
     return {
-        "marks": {},
+        "marks": {},  # Unified format: {base: {reason: str, auto: bool}}
         "reason_counts": {},
-        "auto_counts": {},
-        "auto_marks": {},
         "signatures": {},
         "calibration": {},
         "matrices": {},
         "extrinsic": {},
-        "reproj_errors": {},
         "extrinsic_errors": {},
         "overrides": [],
         "note": "",
@@ -804,10 +781,8 @@ def empty_dataset_entry() -> DatasetCache:
 
 def load_dataset_cache_file(cache_path: Path) -> DatasetCache:
     """Load dataset cache file."""
-    try:
-        with open(cache_path, "r", encoding="utf-8") as handle:
-            raw = yaml.safe_load(handle)
-    except (OSError, yaml.YAMLError):  # noqa: PERF203
+    raw = load_yaml(cache_path)
+    if raw=={} or raw is None:
         return empty_dataset_entry()
     return deserialize_dataset_entry(raw)
 
@@ -819,8 +794,7 @@ def save_dataset_cache_file(cache_path: Path, entry: DatasetCache) -> None:
     except OSError:
         return
     try:
-        with open(cache_path, "w", encoding="utf-8") as handle:
-            yaml.safe_dump(payload, handle, allow_unicode=False, sort_keys=True)
+        save_yaml(cache_path, payload, sort_keys=True)
     except OSError:
         return
 

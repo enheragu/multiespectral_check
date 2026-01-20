@@ -58,6 +58,10 @@ class ProgressTracker:
             self._tasks.pop(task_id, None)
             self._emit()
 
+    def is_busy(self, task_id: str) -> bool:
+        """Check if a specific task is currently running."""
+        return task_id in self._tasks
+
     def clear(self) -> None:
         if not self._tasks:
             return

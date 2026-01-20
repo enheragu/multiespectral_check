@@ -49,6 +49,7 @@ class ViewStateController(QObject):
 
         self._grid_mode = "off"  # "off", "thirds", "detailed"
         self._show_labels = False
+        self._show_overlays = True  # Info overlay (status text, calibration markers)
         self._view_rectified = False
 
     @property
@@ -94,6 +95,30 @@ class ViewStateController(QObject):
             if self.session.has_images():
                 self._load_current()
             self.viewStateChanged.emit()
+
+    @property
+    def show_overlays(self) -> bool:
+        """Get info overlay display state (status text, calibration markers, corners)."""
+        return self._show_overlays
+
+    @show_overlays.setter
+    def show_overlays(self, value: bool) -> None:
+        """Set info overlay display state."""
+        if self._show_overlays != value:
+            self._show_overlays = value
+            self._persist_preferences(show_overlays=value)
+            self._invalidate_overlay_cache()
+            if self.session.has_images():
+                self._load_current()
+            self.viewStateChanged.emit()
+
+    def toggle_overlays(self, enabled: bool) -> None:
+        """Toggle info overlay display.
+
+        Args:
+            enabled: True to show info overlays
+        """
+        self.show_overlays = enabled
 
     @property
     def view_rectified(self) -> bool:
@@ -150,6 +175,7 @@ class ViewStateController(QObject):
         self,
         show_grid: bool = False,
         show_labels: bool = False,
+        show_overlays: bool = True,
         grid_mode: str = "",
     ) -> None:
         """Load view preferences without triggering cache invalidation.
@@ -157,6 +183,7 @@ class ViewStateController(QObject):
         Args:
             show_grid: Initial grid display state (legacy, overridden by grid_mode)
             show_labels: Initial label display state
+            show_overlays: Initial info overlay display state (default True)
             grid_mode: Grid display mode ("off", "thirds", "detailed")
         """
         # Use grid_mode if provided, otherwise fall back to legacy show_grid
@@ -165,3 +192,4 @@ class ViewStateController(QObject):
         else:
             self._grid_mode = "thirds" if show_grid else "off"
         self._show_labels = show_labels
+        self._show_overlays = show_overlays

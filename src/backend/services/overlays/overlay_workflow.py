@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
+import cv2
+import numpy as np
 from PyQt6.QtCore import QPoint
 from PyQt6.QtGui import QColor, QPainter, QPixmap
 
@@ -16,6 +18,7 @@ from backend.utils.overlays import (
     paint_rule_of_thirds,
 )
 from common.reasons import REASON_STYLES
+from common.log_utils import log_debug
 
 if TYPE_CHECKING:
     from backend.utils.stereo_alignment import AlignmentTransform
@@ -24,6 +27,7 @@ LabelOverlay = Tuple[str, float, float, float, float, QColor]
 CALIBRATION_BORDER_COLOR = QColor("#00ffea")
 CALIBRATION_ERROR_COLOR = QColor("#dc3545")
 WARNING_LABEL_COLOR = QColor("#ffb347")
+SUBPIXEL_CORNER_COLOR = QColor("#ff8c00")  # Dark orange for subpixel corners
 
 
 @dataclass
@@ -71,6 +75,7 @@ class OverlayWorkflow:
         calibration_auto: bool,
         calibration_detected: Optional[bool],
         corner_points: Optional[List[List[float]]],
+        corner_points_secondary: Optional[List[List[float]]] = None,
         corners_refined: bool = False,
         warning_text: Optional[str] = None,
         calibration_errors: Optional[Dict[str, Optional[float]]] = None,
@@ -103,6 +108,7 @@ class OverlayWorkflow:
             calibration_auto,
             calibration_detected,
             self._corner_signature(corner_points),
+            self._corner_signature(corner_points_secondary),
             corners_refined,
             (warning_text or "")[:64],
             _rounded_errors(calibration_errors),
@@ -159,6 +165,7 @@ class OverlayWorkflow:
         calibration_auto: bool,
         calibration_detected: Optional[bool],
         corner_points: Optional[List[List[float]]],
+        corner_points_secondary: Optional[List[List[float]]] = None,
         corners_refined: bool = False,
         warning_text: Optional[str],
         calibration_errors: Optional[Dict[str, Optional[float]]],
@@ -168,6 +175,8 @@ class OverlayWorkflow:
         label_sig: Optional[Tuple[Any, ...]],
         alignment_transform: Optional["AlignmentTransform"] = None,
         original_size: Optional[Tuple[int, int]] = None,
+        camera_matrix: Optional[Any] = None,
+        distortion: Optional[Any] = None,
     ) -> Optional[QPixmap]:
         if not pixmap or pixmap.isNull():
             return None
@@ -180,6 +189,7 @@ class OverlayWorkflow:
             calibration_auto,
             calibration_detected,
             corner_points,
+            corner_points_secondary,
             corners_refined,
             warning_text,
             calibration_errors,
@@ -238,28 +248,89 @@ class OverlayWorkflow:
             draw_overlay_labels(painter, base_pix.width(), base_pix.height(), label_entries)
         if label_boxes:
             draw_label_boxes(painter, base_pix.width(), base_pix.height(), label_boxes)
-        if corner_points:
-            dot_color = WARNING_LABEL_COLOR if warning_text else CALIBRATION_BORDER_COLOR
-            painter.setPen(dot_color)
-            painter.setBrush(dot_color)
-            radius = max(3, overlay_pen_width)
-            for u, v in corner_points:
-                # Convert normalized coords to original image coords
-                if original_size and alignment_transform:
-                    orig_w, orig_h = original_size
-                    orig_x = u * orig_w
-                    orig_y = v * orig_h
-                    # Transform to aligned output coords
-                    if channel == "visible":
-                        transformed = alignment_transform.transform_vis_points([[orig_x, orig_y]])
-                    else:  # lwir
-                        transformed = alignment_transform.transform_lwir_points([[orig_x, orig_y]])
-                    x = int(transformed[0, 0])
-                    y = int(transformed[0, 1])
+
+        # Draw corners - helper function for rendering a set of corners
+        def draw_corner_set(
+            points: List[List[float]],
+            color: QColor,
+            shape: str = "circle",  # "circle" or "cross"
+        ) -> None:
+            painter.setPen(color)
+            painter.setBrush(color)
+            r = max(3, overlay_pen_width)
+            orig_w, orig_h = original_size  # type: ignore[misc]
+
+            if alignment_transform:
+                corners_array = np.array(points, dtype=np.float32)
+                if channel == "visible":
+                    output_coords = alignment_transform.transform_vis_corners_complete(
+                        corners_array, original_size, view_rectified, camera_matrix, distortion,
+                    )
                 else:
-                    x = int(u * base_w)
-                    y = int(v * base_h)
-                painter.drawEllipse(QPoint(x, y), radius, radius)
+                    output_coords = alignment_transform.transform_lwir_corners_complete(
+                        corners_array, original_size, view_rectified, camera_matrix, distortion,
+                    )
+                for i in range(len(points)):
+                    x, y = int(output_coords[i, 0]), int(output_coords[i, 1])
+                    if shape == "circle":
+                        painter.drawEllipse(QPoint(x, y), r, r)
+                    else:  # cross
+                        painter.drawLine(x - r, y, x + r, y)
+                        painter.drawLine(x, y - r, x, y + r)
+            else:
+                # No alignment - batch process all corners
+                scale_x = base_w / orig_w if orig_w > 0 else 1.0
+                scale_y = base_h / orig_h if orig_h > 0 else 1.0
+
+                # Denormalize all points at once
+                coords = np.array([[u * orig_w, v * orig_h] for u, v in points], dtype=np.float32)
+
+                # Apply undistort if needed (vectorized)
+                if view_rectified and camera_matrix is not None and distortion is not None:
+                    try:
+                        cam = np.array(camera_matrix, dtype=np.float32)
+                        dist = np.array(distortion, dtype=np.float32).reshape(-1)
+                        new_cam, _ = cv2.getOptimalNewCameraMatrix(
+                            cam, dist, (orig_w, orig_h), 1, (orig_w, orig_h)
+                        )
+                        # Reshape for undistortPoints: (N, 1, 2)
+                        pts_reshaped = coords.reshape(-1, 1, 2)
+                        undistorted = cv2.undistortPoints(pts_reshaped, cam, dist, P=new_cam)
+                        coords = undistorted.reshape(-1, 2)
+                    except Exception:
+                        pass
+
+                # Scale and draw
+                for orig_x, orig_y in coords:
+                    x, y = int(orig_x * scale_x), int(orig_y * scale_y)
+                    if shape == "circle":
+                        painter.drawEllipse(QPoint(x, y), r, r)
+                    else:  # cross
+                        painter.drawLine(x - r, y, x + r, y)
+                        painter.drawLine(x, y - r, x, y + r)
+
+        # Draw secondary corners first (original) so primary (subpixel) draws on top
+        if corner_points_secondary and original_size:
+            # Secondary corners: blue circles (original detection)
+            draw_corner_set(corner_points_secondary, QColor("#4a90d9"), "circle")
+
+        if corner_points and original_size:
+            # Primary corners: use orange for subpixel (crosses), cyan for original (circles)
+            if corners_refined:
+                dot_color = SUBPIXEL_CORNER_COLOR  # Orange for subpixel
+                shape = "cross"
+            else:
+                dot_color = WARNING_LABEL_COLOR if warning_text else CALIBRATION_BORDER_COLOR
+                shape = "circle"
+            # Log diagnostic info for first corner only
+            u0, v0 = corner_points[0]
+            log_debug(
+                f"Corner transform [{channel}]: orig_size={original_size}, base={base_w}x{base_h}, "
+                f"has_align={alignment_transform is not None}, view_rectified={view_rectified}, "
+                f"corner0=({u0:.4f},{v0:.4f}), refined={corners_refined}",
+                "OVERLAY"
+            )
+            draw_corner_set(corner_points, dot_color, shape)
 
         painter.end()
         bucket = self._overlay_cache.setdefault(base, {})

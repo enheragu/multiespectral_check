@@ -255,6 +255,9 @@ class Ui_MainWindow(object):
         self.action_toggle_rectified.setCheckable(True)
         self.action_show_labels = QtGui.QAction("Show labels", MainWindow)
         self.action_show_labels.setCheckable(True)
+        self.action_show_overlays = QtGui.QAction("Show image info overlay", MainWindow)
+        self.action_show_overlays.setCheckable(True)
+        self.action_show_overlays.setChecked(True)  # Default: overlays visible
 
         # Grid submenu
         self.menu_grid = QtWidgets.QMenu("Show Grid", MainWindow)
@@ -286,6 +289,26 @@ class Ui_MainWindow(object):
         self.align_action_group.addAction(self.action_align_fov_focus)
         self.align_action_group.addAction(self.action_align_max_overlap)
         self.align_action_group.setExclusive(True)
+
+        # Corner Display submenu
+        self.menu_corner_display = QtWidgets.QMenu("Corner Display", MainWindow)
+        self.action_corners_original = QtGui.QAction("Original Only", MainWindow)
+        self.action_corners_original.setCheckable(True)
+        self.action_corners_subpixel = QtGui.QAction("Subpixel Only", MainWindow)
+        self.action_corners_subpixel.setCheckable(True)
+        self.action_corners_both = QtGui.QAction("Both (Debug)", MainWindow)
+        self.action_corners_both.setCheckable(True)
+        self.corner_action_group = QtGui.QActionGroup(MainWindow)
+        self.corner_action_group.addAction(self.action_corners_original)
+        self.corner_action_group.addAction(self.action_corners_subpixel)
+        self.corner_action_group.addAction(self.action_corners_both)
+        self.corner_action_group.setExclusive(True)
+        self.action_corners_subpixel.setChecked(True)  # Default to subpixel
+
+        # Use Subpixel Corners toggle for calibration computation
+        self.action_use_subpixel_corners = QtGui.QAction("Use Subpixel Corners", MainWindow)
+        self.action_use_subpixel_corners.setCheckable(True)
+        self.action_use_subpixel_corners.setChecked(False)  # Default off (use original)
 
         self.action_calibration_debug = QtGui.QAction("Export calibration debug overlays", MainWindow)
         self.action_auto_calibration_search = QtGui.QAction("Auto search calibration candidates…", MainWindow)
@@ -445,8 +468,15 @@ class Ui_MainWindow(object):
         self.menu_stereo_alignment.addAction(self.action_align_max_overlap)
         self.menu_view.addMenu(self.menu_stereo_alignment)
 
+        # Corner Display submenu
+        self.menu_corner_display.addAction(self.action_corners_original)
+        self.menu_corner_display.addAction(self.action_corners_subpixel)
+        self.menu_corner_display.addAction(self.action_corners_both)
+        self.menu_view.addMenu(self.menu_corner_display)
+
         self.menu_view.addSeparator()
         self.menu_view.addAction(self.action_show_labels)
+        self.menu_view.addAction(self.action_show_overlays)
         self.menu_view.addSeparator()
         self.menu_filter.addAction(self.action_filter_all)
         self.menu_filter.addSeparator()
@@ -466,6 +496,9 @@ class Ui_MainWindow(object):
         self.menu_calibration.addAction(self.action_auto_calibration_search)
         self.menu_calibration.addAction(self.action_run_calibration)
         self.menu_calibration.addAction(self.action_calibration_refine)
+        self.menu_calibration.addSeparator()
+        self.menu_calibration.addAction(self.action_use_subpixel_corners)
+        self.menu_calibration.addSeparator()
         self.menu_calibration.addAction(self.action_calibration_compute)
         self.menu_calibration.addAction(self.action_calibration_extrinsic)
         self.menu_calibration.addSeparator()

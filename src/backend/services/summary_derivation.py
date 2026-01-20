@@ -7,11 +7,12 @@ duplication.
 Principle: Summary is DERIVED, not independent. It's a cache for fast workspace
 scanning, not a source of truth.
 """
-from typing import Dict, Any, Set
 import time
+from typing import Any, Dict
 
-from common.dict_helpers import get_dict_path, set_dict_path
+from backend.services.stats_manager import empty_stats_dict
 from backend.utils.cache import DatasetCache
+from common.yaml_utils import get_timestamp_fields
 
 
 def derive_summary_from_entry(entry: DatasetCache) -> Dict[str, Any]:
@@ -26,77 +27,92 @@ def derive_summary_from_entry(entry: DatasetCache) -> Dict[str, Any]:
     Returns:
         Complete summary dict ready for .summary_cache.yaml
 
-    Example:
-        >>> entry = load_dataset_cache_file(dataset_path / ".image_labels.yaml")
-        >>> summary = derive_summary_from_entry(entry)
-        >>> save_summary_cache(dataset_path / ".summary_cache.yaml", summary)
+    The returned dict has this structure (simplified - no redundant totals):
+        dataset_info:
+            note: str
+            last_updated: float
+            last_updated_str: str
+        stats:
+            img: {total, removed}
+            tagged: {user: {reason: count}, auto: {reason: count}}
+            removed: {user: {reason: count}, auto: {reason: count}}
+            calibration: {user: {both, partial, none}, auto: {...}, outlier: {...}}
+            sweep: {duplicates, quality, patterns}
     """
     marks = entry.get("marks", {})
-    auto_marks = entry.get("auto_marks", {})
     archived = entry.get("archived", {})
     calibration = entry.get("calibration", {})
     sweep_flags = entry.get("sweep_flags", {})
     total_pairs = entry.get("total_pairs", 0)
     note = entry.get("note", "")
 
-    # Separate user vs auto marks
-    user_marks: Dict[str, Set[str]] = {}
-    auto_marks_sets: Dict[str, Set[str]] = {}
+    # Build stats dict using the canonical structure
+    stats = empty_stats_dict()
 
-    # Deserialize auto_marks if needed (might be List[str] from YAML)
-    if isinstance(auto_marks, dict):
-        for reason, bases in auto_marks.items():
-            if isinstance(bases, list):
-                auto_marks_sets[reason] = set(bases)
-            elif isinstance(bases, set):
-                auto_marks_sets[reason] = bases
+    # =========================================================================
+    # Image counts
+    # =========================================================================
+    stats["img"]["total"] = int(total_pairs)
+    stats["img"]["removed"] = len(archived)
 
-    # Build auto_marks flat set for quick lookup
-    all_auto_bases = set()
-    for bases in auto_marks_sets.values():
-        all_auto_bases.update(bases)
+    # =========================================================================
+    # Tagged marks (user vs auto)
+    # =========================================================================
+    user_reasons: Dict[str, int] = {}
+    auto_reasons: Dict[str, int] = {}
 
-    # Separate marks into user vs auto
-    for base, reason in marks.items():
-        if base in all_auto_bases:
-            continue  # Skip auto marks
-        if reason not in user_marks:
-            user_marks[reason] = set()
-        user_marks[reason].add(base)
+    for base, mark_entry in marks.items():
+        if isinstance(mark_entry, dict):
+            reason = mark_entry.get("reason", "")
+            is_auto = mark_entry.get("auto", False)
+        else:
+            # Legacy format fallback
+            reason = str(mark_entry) if mark_entry else ""
+            is_auto = False
 
-    # Count marks by type
-    user_mark_count = sum(len(bases) for bases in user_marks.values())
-    auto_mark_count = sum(len(bases) for bases in auto_marks_sets.values())
-    archived_count = len(archived)
+        if not reason:
+            continue
 
-    # Count removed (archived images)
-    removed_count = archived_count
+        if is_auto:
+            auto_reasons[reason] = auto_reasons.get(reason, 0) + 1
+        else:
+            user_reasons[reason] = user_reasons.get(reason, 0) + 1
 
-    # Build reason counts
-    removed_reasons: Dict[str, int] = {}
-    removed_user_reasons: Dict[str, int] = {}
-    removed_auto_reasons: Dict[str, int] = {}
+    # Store reasons directly (no wrapper, no total - calculated at read time)
+    stats["tagged"]["user"] = user_reasons
+    stats["tagged"]["auto"] = auto_reasons
+
+    # =========================================================================
+    # Removed (archived) - separate by user vs auto if available
+    # =========================================================================
+    removed_user: Dict[str, int] = {}
+    removed_auto: Dict[str, int] = {}
 
     for base, arch_entry in archived.items():
         if isinstance(arch_entry, dict):
-            reason = arch_entry.get("mark_reason")
-            if reason:
-                removed_reasons[reason] = removed_reasons.get(reason, 0) + 1
+            reason = arch_entry.get("mark_reason", "unknown")
+            is_auto = arch_entry.get("auto", False)
+            if is_auto:
+                removed_auto[reason] = removed_auto.get(reason, 0) + 1
+            else:
+                removed_user[reason] = removed_user.get(reason, 0) + 1
 
-    tagged_user_to_delete_reasons: Dict[str, int] = {
-        reason: len(bases) for reason, bases in user_marks.items()
-    }
+    # Store reasons directly (no wrapper)
+    stats["removed"]["user"] = removed_user
+    stats["removed"]["auto"] = removed_auto
 
-    tagged_auto_to_delete_reasons: Dict[str, int] = {
-        reason: len(bases) for reason, bases in auto_marks_sets.items()
-    }
+    # =========================================================================
+    # Calibration (user vs auto, with detection breakdown)
+    # No totals stored - only breakdown (both/partial/none), totals calculated at read time
+    # =========================================================================
+    calib_user_both = 0
+    calib_user_partial = 0
+    calib_user_none = 0
 
-    # Calibration stats (derive from calibration dict)
-    calib_marked = 0
-    found_both = 0
-    found_only_lwir = 0
-    found_only_visible = 0
-    found_none = 0
+    calib_auto_both = 0
+    calib_auto_partial = 0
+    calib_auto_none = 0
+
     outlier_lwir = 0
     outlier_visible = 0
     outlier_stereo = 0
@@ -105,67 +121,73 @@ def derive_summary_from_entry(entry: DatasetCache) -> Dict[str, Any]:
         if not isinstance(calib_entry, dict):
             continue
 
-        if calib_entry.get("marked"):
-            calib_marked += 1
+        is_auto = calib_entry.get("auto", False)
 
+        # Detection type from results
         results = calib_entry.get("results", {})
+        detection_type = "none"
         if isinstance(results, dict):
-            lwir_detected = results.get("lwir")
-            vis_detected = results.get("visible")
+            lwir_ok = results.get("lwir") is True
+            vis_ok = results.get("visible") is True
+            if lwir_ok and vis_ok:
+                detection_type = "both"
+            elif lwir_ok or vis_ok:
+                detection_type = "partial"
 
-            if lwir_detected and vis_detected:
-                found_both += 1
-            elif lwir_detected:
-                found_only_lwir += 1
-            elif vis_detected:
-                found_only_visible += 1
-            elif lwir_detected is False and vis_detected is False:
-                found_none += 1
+        # Count by auto/user (only breakdown, no totals)
+        if is_auto:
+            if detection_type == "both":
+                calib_auto_both += 1
+            elif detection_type == "partial":
+                calib_auto_partial += 1
+            else:
+                calib_auto_none += 1
+        else:
+            if detection_type == "both":
+                calib_user_both += 1
+            elif detection_type == "partial":
+                calib_user_partial += 1
+            else:
+                calib_user_none += 1
 
-        if calib_entry.get("outlier_lwir"):
-            outlier_lwir += 1
-        if calib_entry.get("outlier_visible"):
-            outlier_visible += 1
-        if calib_entry.get("outlier_stereo"):
-            outlier_stereo += 1
+        # Outliers (nested format)
+        outlier_dict = calib_entry.get("outlier", {})
+        if isinstance(outlier_dict, dict):
+            if outlier_dict.get("lwir"):
+                outlier_lwir += 1
+            if outlier_dict.get("visible"):
+                outlier_visible += 1
+            if outlier_dict.get("stereo"):
+                outlier_stereo += 1
 
-    # Pattern matches (future feature, empty for now)
-    pattern_matches: Dict[str, int] = {}
+    # No totals stored - calculated at read time from breakdown
+    stats["calibration"]["user"]["both"] = calib_user_both
+    stats["calibration"]["user"]["partial"] = calib_user_partial
+    stats["calibration"]["user"]["none"] = calib_user_none
+    stats["calibration"]["auto"]["both"] = calib_auto_both
+    stats["calibration"]["auto"]["partial"] = calib_auto_partial
+    stats["calibration"]["auto"]["none"] = calib_auto_none
+    stats["calibration"]["outlier"]["lwir"] = outlier_lwir
+    stats["calibration"]["outlier"]["visible"] = outlier_visible
+    stats["calibration"]["outlier"]["stereo"] = outlier_stereo
 
-    # Build summary structure
+    # =========================================================================
+    # Sweep flags
+    # =========================================================================
+    stats["sweep"]["duplicates"] = bool(sweep_flags.get("duplicates", False))
+    stats["sweep"]["quality"] = bool(sweep_flags.get("quality", False))
+    stats["sweep"]["patterns"] = bool(sweep_flags.get("patterns", False))
+
+    # =========================================================================
+    # Build final summary structure
+    # =========================================================================
+    timestamps = get_timestamp_fields()
     summary = {
         "dataset_info": {
             "note": note,
-            "last_updated": time.time(),
-            "sweep_flags": {
-                "missing": bool(sweep_flags.get("missing", False)),
-                "duplicates": bool(sweep_flags.get("duplicates", False)),
-                "patterns": bool(sweep_flags.get("patterns", False)),
-                "quality": bool(sweep_flags.get("quality", False)),
-            },
+            **timestamps,
         },
-        "img_number": {
-            "num_pairs": int(total_pairs),
-            "removed_pairs": removed_count,
-            "tagged_user_to_delete": user_mark_count,
-            "tagged_auto_to_delete": auto_mark_count,
-        },
-        "removed_reasons": removed_reasons,
-        "removed_user_reasons": removed_user_reasons,
-        "removed_auto_reasons": removed_auto_reasons,
-        "tagged_user_to_delete_reasons": tagged_user_to_delete_reasons,
-        "tagged_auto_to_delete_reasons": tagged_auto_to_delete_reasons,
-        "calibration": {
-            "marked": calib_marked,
-            "found_both_chessboard": found_both,
-            "found_only_lwir_chessboard": found_only_lwir,
-            "found_only_visible_chessboard": found_only_visible,
-            "found_none_chessboard": found_none,
-            "outlier_discarded_lwir": outlier_lwir,
-            "outlier_discarded_visible": outlier_visible,
-            "outlier_discarded_stereo": outlier_stereo,
-        },
-        "pattern_matches": pattern_matches,
+        "stats": stats,
     }
 
     return summary
@@ -178,12 +200,12 @@ def update_summary_sweep_flags(summary: Dict[str, Any], sweep_flags: Dict[str, b
         summary: Summary dict to update (modified in place)
         sweep_flags: Sweep flags from image_labels.yaml
     """
-    set_dict_path(summary, "dataset_info.sweep_flags", {
-        "missing": bool(sweep_flags.get("missing", False)),
-        "duplicates": bool(sweep_flags.get("duplicates", False)),
-        "patterns": bool(sweep_flags.get("patterns", False)),
-        "quality": bool(sweep_flags.get("quality", False)),
-    })
+    if "stats" not in summary:
+        summary["stats"] = empty_stats_dict()
+
+    summary["stats"]["sweep"]["duplicates"] = bool(sweep_flags.get("duplicates", False))
+    summary["stats"]["sweep"]["quality"] = bool(sweep_flags.get("quality", False))
+    summary["stats"]["sweep"]["patterns"] = bool(sweep_flags.get("patterns", False))
 
 
 def update_summary_note(summary: Dict[str, Any], note: str) -> None:
@@ -193,8 +215,10 @@ def update_summary_note(summary: Dict[str, Any], note: str) -> None:
         summary: Summary dict to update (modified in place)
         note: Note text from image_labels.yaml
     """
-    set_dict_path(summary, "dataset_info.note", note)
-    set_dict_path(summary, "dataset_info.last_updated", time.time())
+    if "dataset_info" not in summary:
+        summary["dataset_info"] = {}
+    summary["dataset_info"]["note"] = note
+    summary["dataset_info"]["last_updated"] = time.time()
 
 
 __all__ = [

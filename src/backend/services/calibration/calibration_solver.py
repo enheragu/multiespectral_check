@@ -1,16 +1,17 @@
 """Camera calibration solver and persistence."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from threading import Event
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-import yaml
 from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal
 
 from backend.services.dataset_session import DatasetSession
+from common.yaml_utils import load_yaml, save_yaml
 from config import get_config
 
 try:  # Optional import to keep tests lightweight
@@ -24,8 +25,8 @@ except ImportError:  # pragma: no cover - handled at runtime
 class CalibrationSample:
     base: str
     channel: str
-    image_path: Path
     corners: Sequence[List[float]]
+    image_size: Tuple[int, int]  # (width, height)
 
 
 class _SolverTaskSignals(QObject):
@@ -64,6 +65,7 @@ class _CalibrationSolverTask(QRunnable):
         return objp
 
     def _channel_payload(self, channel_samples: List[CalibrationSample]) -> Optional[dict]:
+        """Compute calibration for a single channel using pre-loaded corners and sizes."""
         self._ensure_not_cancelled()
         if len(channel_samples) < 3:
             return None
@@ -73,16 +75,18 @@ class _CalibrationSolverTask(QRunnable):
         image_size: Optional[Tuple[int, int]] = None
         obj_pattern = self._object_points()
         expected = obj_pattern.shape[0]
+
         for sample in channel_samples:
             self._ensure_not_cancelled()
-            image = cv2.imread(str(sample.image_path), cv2.IMREAD_GRAYSCALE)
-            if image is None:
-                continue
-            height, width = image.shape[:2]
+            # Use image_size from sample (no image loading needed!)
+            width, height = sample.image_size
             if len(sample.corners) != expected:
                 continue
             if image_size is None:
                 image_size = (width, height)
+            elif image_size != (width, height):
+                # Skip samples with different image sizes
+                continue
             obj_points.append(obj_pattern.copy())
             pts = np.array(
                 [[float(u) * width, float(v) * height] for (u, v) in sample.corners],
@@ -90,6 +94,7 @@ class _CalibrationSolverTask(QRunnable):
             )
             img_points.append(pts)
             view_ids.append(sample.base)
+
         if not obj_points or not img_points or image_size is None:
             return None
         self._ensure_not_cancelled()
@@ -114,12 +119,16 @@ class _CalibrationSolverTask(QRunnable):
             reproj = np.linalg.norm(projected.reshape(-1, 2) - img_points[idx], axis=1)
             if reproj.size:
                 per_view_errors[base] = float(np.sqrt(np.mean(reproj ** 2)))
+
+        # Return clean calibration data + errors separately
         return {
-            "camera_matrix": camera_matrix.tolist(),
-            "distortion": distortion.reshape(-1).tolist(),
-            "image_size": list(image_size),
-            "samples": len(obj_points),
-            "reprojection_error": float(retval),
+            "calibration": {
+                "camera_matrix": camera_matrix.tolist(),
+                "distortion": distortion.reshape(-1).tolist(),
+                "image_size": list(image_size),
+                "samples": len(obj_points),
+                "reprojection_error": float(retval),
+            },
             "per_view_errors": per_view_errors,
         }
 
@@ -130,37 +139,90 @@ class _CalibrationSolverTask(QRunnable):
             for sample in self.samples:
                 self._ensure_not_cancelled()
                 channel_map.setdefault(sample.channel, []).append(sample)
-            payload = {
+
+            calibration_payload: Dict[str, Any] = {
+                "# source": f"Calibration computed for {self.dataset_path.name}",
+                "dataset": self.dataset_path.name,
+                "dataset_path": str(self.dataset_path),
                 "pattern_size": list(self.pattern_size),
                 "updated_at": datetime.utcnow().isoformat() + "Z",
                 "channels": {},
             }
-            for channel, channel_samples in channel_map.items():
-                self._ensure_not_cancelled()
-                solved = self._channel_payload(channel_samples)
-                if solved:
-                    payload["channels"][channel] = solved
-            if not payload["channels"]:
+            errors_payload: Dict[str, Any] = {
+                "# source": f"Calibration errors cache for {self.dataset_path.name}",
+                "dataset": self.dataset_path.name,
+                "updated_at": datetime.utcnow().isoformat() + "Z",
+                "channels": {},
+            }
+
+            # Parallelize LWIR and Visible calibration (they are independent)
+            channels_to_solve = [(ch, samples) for ch, samples in channel_map.items() if samples]
+            if len(channels_to_solve) >= 2:
+                # Run both channels in parallel
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    futures = {
+                        executor.submit(self._channel_payload, samples): channel
+                        for channel, samples in channels_to_solve
+                    }
+                    for future in as_completed(futures):
+                        self._ensure_not_cancelled()
+                        channel = futures[future]
+                        try:
+                            solved = future.result()
+                            if solved:
+                                calibration_payload["channels"][channel] = solved["calibration"]
+                                errors_payload["channels"][channel] = {
+                                    "per_view_errors": solved["per_view_errors"],
+                                    "reprojection_error": solved["calibration"]["reprojection_error"],
+                                }
+                        except Exception:
+                            # Channel failed, continue with other
+                            pass
+            else:
+                # Single channel - run sequentially
+                for channel, channel_samples in channels_to_solve:
+                    self._ensure_not_cancelled()
+                    solved = self._channel_payload(channel_samples)
+                    if solved:
+                        calibration_payload["channels"][channel] = solved["calibration"]
+                        errors_payload["channels"][channel] = {
+                            "per_view_errors": solved["per_view_errors"],
+                            "reprojection_error": solved["calibration"]["reprojection_error"],
+                        }
+
+            if not calibration_payload["channels"]:
                 raise RuntimeError("Not enough samples to solve calibration")
+
             config = get_config()
+
+            # Save clean calibration file (exportable)
             output_path = self.dataset_path / config.calibration_intrinsic_filename
             final_payload: Dict[str, Any] = {}
             if output_path.exists():
-                try:
-                    with open(output_path, "r", encoding="utf-8") as handle:
-                        self._ensure_not_cancelled()
-                        final_payload = yaml.safe_load(handle) or {}
-                except (OSError, yaml.YAMLError):  # noqa: PERF203
-                    final_payload = {}
-            final_payload["channels"] = payload["channels"]
-            final_payload["pattern_size"] = payload["pattern_size"]
-            final_payload["updated_at"] = payload["updated_at"]
+                self._ensure_not_cancelled()
+                final_payload = load_yaml(output_path) or {}
+                self._ensure_not_cancelled()
+            final_payload["channels"] = calibration_payload["channels"]
+            final_payload["pattern_size"] = calibration_payload["pattern_size"]
+            final_payload["updated_at"] = calibration_payload["updated_at"]
             self._ensure_not_cancelled()
-            with open(output_path, "w", encoding="utf-8") as handle:
-                yaml.safe_dump(final_payload, handle, sort_keys=False)
-            final_payload["file_path"] = str(output_path)
+            save_yaml(output_path, final_payload, sort_keys=False)
+
+            # Save errors to separate cache file (hidden)
+            errors_path = self.dataset_path / config.calibration_errors_filename
+            self._ensure_not_cancelled()
+            save_yaml(errors_path, errors_payload, sort_keys=False)
+
+            # Return combined payload for GUI with per_view_errors for reproj display
+            result_payload = dict(final_payload)
+            result_payload["file_path"] = str(output_path)
+            # Inject per_view_errors back into channels for GUI consumption
+            for channel, err_data in errors_payload["channels"].items():
+                if channel in result_payload["channels"]:
+                    result_payload["channels"][channel]["per_view_errors"] = err_data["per_view_errors"]
+
             try:
-                self.signals.completed.emit(final_payload)
+                self.signals.completed.emit(result_payload)
             except RuntimeError:
                 # Signals object may be deleted if GUI closed
                 pass

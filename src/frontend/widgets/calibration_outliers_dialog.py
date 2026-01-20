@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QDialog,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QPushButton,
     QTableWidget,
@@ -19,7 +20,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from backend.services.progress_tracker import ProgressSnapshot
 from frontend.widgets import style
+from frontend.widgets.progress_panel import ProgressPanel
 
 
 # Table color config (adjust here if you want a different palette)
@@ -28,6 +31,58 @@ VALID_BG = QColor(252, 253, 254)    # near-white for valid numeric values
 OUTLIER_BG = QColor(220, 53, 69)    # red for outliers
 TEXT_DEFAULT = QColor(36, 40, 44)   # dark gray text
 TEXT_INVERT = Qt.GlobalColor.white
+
+# Sentinel value for non-numeric items (always sorted last)
+_NON_NUMERIC_SENTINEL = float("inf")
+
+
+class NumericTableItem(QTableWidgetItem):
+    """QTableWidgetItem that sorts numerically using UserRole data.
+
+    Non-numeric items (no UserRole set or inf) are always placed at the end,
+    regardless of ascending/descending sort order.
+
+    We achieve this by storing float('inf') for non-numeric values in UserRole.
+    This way they naturally sort to the end in ascending order.
+    For descending order, we need to detect the sort order and adjust.
+    """
+
+    def __lt__(self, other: QTableWidgetItem) -> bool:
+        self_val = self.data(Qt.ItemDataRole.UserRole)
+        other_val = other.data(Qt.ItemDataRole.UserRole)
+
+        # Get numeric values - None or inf means "invalid/no data"
+        self_num = float(self_val) if isinstance(self_val, (int, float)) else float("inf")
+        other_num = float(other_val) if isinstance(other_val, (int, float)) else float("inf")
+
+        self_is_invalid = self_num == float("inf")
+        other_is_invalid = other_num == float("inf")
+
+        # Check if we're sorting descending by looking at header
+        table = self.tableWidget()
+        descending = False
+        if table:
+            header = table.horizontalHeader()
+            if header:
+                sort_col = header.sortIndicatorSection()
+                if sort_col == self.column():
+                    descending = header.sortIndicatorOrder() == Qt.SortOrder.DescendingOrder
+
+        # Invalid values always go to the end regardless of sort direction
+        if self_is_invalid and other_is_invalid:
+            # Both invalid: compare by text
+            return (self.text() or "") < (other.text() or "")
+        if self_is_invalid:
+            # self is invalid, other is valid
+            # In ascending: invalid goes last (return False = self > other)
+            # In descending: invalid still goes last (return True = self < other, but Qt inverts it)
+            return descending
+        if other_is_invalid:
+            # other is invalid, self is valid
+            return not descending
+
+        # Both valid: normal numeric comparison
+        return self_num < other_num
 
 
 def _safe_median(values: List[float]) -> float:
@@ -96,10 +151,20 @@ class CalibrationOutliersDialog(QDialog):
             v_header.setVisible(False)
         if h_header is not None:
             h_header.setStretchLastSection(True)
+            # Set minimum widths for columns to fit header text
+            h_header.setMinimumSectionSize(40)
+            # Resize mode: fit content but allow user resize
+            h_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
 
         self.table.setAlternatingRowColors(False)
         self.table.setSortingEnabled(True)
         card_layout.addWidget(self.table)
+
+        # Add progress panel (hidden by default, shown during calibration)
+        self.progress_panel = ProgressPanel(card)
+        self.progress_panel.hide()
+        card_layout.addWidget(self.progress_panel)
+
         self.stats_title = QLabel("Reprojection error summary:")
         self.stats_title.setStyleSheet(style.heading_style())
         self.stats_title.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard)
@@ -213,7 +278,8 @@ class CalibrationOutliersDialog(QDialog):
                 detect_val = row.get(detect_key) if detect_key else None
                 detect_flag = bool(detect_val) if detect_val is not None else None
                 text = self._format_error_value(value, detect_flag, key)
-                item = QTableWidgetItem(text)
+                # Use NumericTableItem for proper numeric sorting
+                item = NumericTableItem(text)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if isinstance(value, (int, float)) and value is not None:
                     item.setData(Qt.ItemDataRole.UserRole, float(value))
@@ -235,6 +301,17 @@ class CalibrationOutliersDialog(QDialog):
                 )
                 self.table.setItem(row_idx, col, include_item)
         self.table.resizeColumnsToContents()
+        # Ensure minimum widths for header text visibility
+        h_header = self.table.horizontalHeader()
+        if h_header:
+            for col in range(self.table.columnCount()):
+                header_text = self.table.horizontalHeaderItem(col)
+                if header_text:
+                    # Measure header text width + padding
+                    fm = self.table.fontMetrics()
+                    text_width = fm.horizontalAdvance(header_text.text()) + 20
+                    if h_header.sectionSize(col) < text_width:
+                        h_header.resizeSection(col, text_width)
         self.table.setSortingEnabled(prev_sort)
         self._updating_table = False
         self._update_stats_and_styles()
@@ -326,17 +403,21 @@ class CalibrationOutliersDialog(QDialog):
     ) -> None:
         def _mean_or_dash(values: List[float]) -> str:
             return f"{mean(values):.3f} px" if values else "—"
+        def _max_or_dash(values: List[float]) -> str:
+            return f"{max(values):.3f} px" if values else "—"
+        def _min_or_dash(values: List[float]) -> str:
+            return f"{min(values):.3f} px" if values else "—"
 
         lwir_count = len(lwir_vals)
         vis_count = len(vis_vals)
         stereo_count = len(stereo_vals)
         parts = [
-            f"<b>• LWIR: </b> {_mean_or_dash(lwir_vals)} (threshold {thresholds.get('lwir', 0.0):.3f} px, n={lwir_count})",
-            f"<br><b>• Visible:</b> {_mean_or_dash(vis_vals)} (threshold {thresholds.get('visible', 0.0):.3f} px, n={vis_count})",
-            f"<br><b>• Stereo:</b> {_mean_or_dash(stereo_vals)} (threshold {thresholds.get('stereo', 0.0):.3f} px, n={stereo_count})",
+            f"<b>• LWIR: </b> mean: {_mean_or_dash(lwir_vals)} (min,max): ({_min_or_dash(lwir_vals)},{_max_or_dash(lwir_vals)}) (threshold {thresholds.get('lwir', 0.0):.3f} px, n={lwir_count})",
+            f"<br><b>• Visible:</b> mean: {_mean_or_dash(vis_vals)} (min,max): ({_min_or_dash(vis_vals)},{_max_or_dash(vis_vals)}) (threshold {thresholds.get('visible', 0.0):.3f} px, n={vis_count})",
+            f"<br><b>• Stereo:</b> mean: {_mean_or_dash(stereo_vals)} (min,max): ({_min_or_dash(stereo_vals)},{_max_or_dash(stereo_vals)}) (threshold {thresholds.get('stereo', 0.0):.3f} px, n={stereo_count})",
         ]
         note = (
-            "<br><br><b>Note:</b>Thresholds use median + 2.5·MAD when dispersion exists; otherwise 1.5×median. "
+            "<br><br><b>Note:</b>Thresholds use median + 3,5·MAD when dispersion exists; otherwise 1.5×median. "
             "LWIR/Visible thresholds are floored at 0.5 px so tiny errors never flag as outliers. "
             "Red cells exceed their channel threshold and will be unchecked by Auto-outliers."
         )
@@ -437,3 +518,18 @@ class CalibrationOutliersDialog(QDialog):
             return
         state = self._include_state.setdefault(base_item.text(), {"lwir": True, "visible": True, "stereo": True})
         state[channel] = item.checkState() == Qt.CheckState.Checked
+
+    # ----------------------------------------------------------------
+    # Progress panel interface
+    # ----------------------------------------------------------------
+    def set_progress(self, snapshot: Optional[ProgressSnapshot]) -> None:
+        """Update progress panel with a snapshot (or hide if None)."""
+        self.progress_panel.set_snapshot(snapshot)
+
+    def set_cancel_state(self, enabled: bool, tooltip: str = "") -> None:
+        """Enable/disable the cancel button in the progress panel."""
+        self.progress_panel.set_cancel_state(enabled, tooltip)
+
+    def connect_cancel(self, slot: Callable[[], None]) -> None:
+        """Connect a slot to the cancel button."""
+        self.progress_panel.cancelRequested.connect(slot)

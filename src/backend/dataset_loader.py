@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-import yaml
+from common.yaml_utils import load_yaml, save_yaml
 
 
 IMAGE_EXTS = ('.jpg', '.jpeg', '.png')
@@ -115,8 +115,7 @@ class DatasetLoader:
 
         if yaml_path.exists():
             try:
-                with open(yaml_path, 'r', encoding='utf-8') as f:
-                    data = yaml.safe_load(f)
+                data = load_yaml(yaml_path)
                 self.metadata_cache[cache_key] = data
                 return data  # type: ignore[return-value]
             except Exception as exc:  # noqa: BLE001
@@ -226,8 +225,7 @@ class DatasetLoader:
         reason_path = reasons_dir / f"{base}.yaml"
         reason_path = self._unique_destination(reason_path)
         try:
-            with open(reason_path, "w", encoding="utf-8") as handle:
-                yaml.safe_dump(payload, handle, allow_unicode=False)
+            save_yaml(reason_path, payload)
         except OSError as exc:
             logger.error("Failed to write delete reason %s: %s", reason_path, exc)
 

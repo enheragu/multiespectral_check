@@ -213,6 +213,7 @@ class ImageViewer(QMainWindow):
         self._view_prefs = {
             "show_grid": bool(preferences.get("show_grid", True)),
             "show_labels": bool(preferences.get("show_labels", False)),
+            "show_overlays": bool(preferences.get("show_overlays", True)),  # Default: show info overlays
             "grid_mode": preferences.get("grid_mode") or "thirds",  # Default to thirds
         }
 
@@ -226,6 +227,14 @@ class ImageViewer(QMainWindow):
         else:
             # Migrate from legacy or use default
             self._align_mode = "full" if legacy_view_aligned else "disabled"
+
+        # Corner display mode: "original", "subpixel", "both"
+        saved_corner_mode = preferences.get("corner_display_mode", "")
+        valid_corner_modes = ("original", "subpixel", "both")
+        if saved_corner_mode in valid_corner_modes:
+            self._corner_display_mode = saved_corner_mode
+        else:
+            self._corner_display_mode = "subpixel"  # Default to subpixel
 
     def _init_controllers(self) -> None:
         """Initialize state management controllers (view, filter, navigation, calibration)."""
@@ -474,6 +483,7 @@ class ImageViewer(QMainWindow):
             toggles = [
                 (getattr(self.ui, "action_toggle_rectified", None), self.view_rectified),
                 (getattr(self.ui, "action_show_labels", None), self.view_state.show_labels),
+                (getattr(self.ui, "action_show_overlays", None), self.view_state.show_overlays),
                 (getattr(self.ui, "action_label_manual_mode", None), self._manual_label_mode),
             ]
             for action, state in toggles:
@@ -505,6 +515,26 @@ class ImageViewer(QMainWindow):
             target_align = align_actions.get(align_mode)
             if target_align and not target_align.isChecked():
                 target_align.setChecked(True)  # QActionGroup will uncheck others
+
+            # Sync corner display action group
+            corner_actions = {
+                "original": getattr(self.ui, "action_corners_original", None),
+                "subpixel": getattr(self.ui, "action_corners_subpixel", None),
+                "both": getattr(self.ui, "action_corners_both", None),
+            }
+            corner_mode = getattr(self, "_corner_display_mode", "subpixel")
+            target_corner = corner_actions.get(corner_mode)
+            if target_corner and not target_corner.isChecked():
+                target_corner.setChecked(True)  # QActionGroup will uncheck others
+
+            # Sync use_subpixel_corners toggle
+            use_subpixel_action = getattr(self.ui, "action_use_subpixel_corners", None)
+            if use_subpixel_action:
+                use_subpixel = self.session.cache_service.get_preference("use_subpixel_corners", False)
+                if use_subpixel_action.isChecked() != use_subpixel:
+                    use_subpixel_action.blockSignals(True)
+                    use_subpixel_action.setChecked(use_subpixel)
+                    use_subpixel_action.blockSignals(False)
 
             self.filter_controller.update_filter_checks()
         finally:
@@ -615,8 +645,18 @@ class ImageViewer(QMainWindow):
         if hasattr(self.ui, "action_align_max_overlap"):
             self.ui.action_align_max_overlap.triggered.connect(lambda: self._set_align_mode("max_overlap"))
 
+        # Corner display submenu actions - use triggered (QActionGroup handles exclusivity)
+        if hasattr(self.ui, "action_corners_original"):
+            self.ui.action_corners_original.triggered.connect(lambda: self._set_corner_display_mode("original"))
+        if hasattr(self.ui, "action_corners_subpixel"):
+            self.ui.action_corners_subpixel.triggered.connect(lambda: self._set_corner_display_mode("subpixel"))
+        if hasattr(self.ui, "action_corners_both"):
+            self.ui.action_corners_both.triggered.connect(lambda: self._set_corner_display_mode("both"))
+
         if hasattr(self.ui, "action_show_labels"):
             self.ui.action_show_labels.toggled.connect(self._handle_show_labels_toggle)
+        if hasattr(self.ui, "action_show_overlays"):
+            self.ui.action_show_overlays.toggled.connect(self._handle_show_overlays_toggle)
         if hasattr(self.ui, "action_calibration_debug"):
             self.ui.action_calibration_debug.triggered.connect(self.export_calibration_debug)
         if hasattr(self.ui, "action_run_calibration"):
@@ -627,6 +667,8 @@ class ImageViewer(QMainWindow):
             self.ui.action_auto_calibration_search.triggered.connect(self._handle_auto_calibration_search)
         if hasattr(self.ui, "action_calibration_refine"):
             self.ui.action_calibration_refine.triggered.connect(self._handle_refine_calibration_action)
+        if hasattr(self.ui, "action_use_subpixel_corners"):
+            self.ui.action_use_subpixel_corners.toggled.connect(self._handle_use_subpixel_toggle)
         if hasattr(self.ui, "action_calibration_compute"):
             self.ui.action_calibration_compute.triggered.connect(self._handle_compute_calibration_action)
         if hasattr(self.ui, "action_calibration_extrinsic"):
@@ -1463,19 +1505,17 @@ class ImageViewer(QMainWindow):
                 count = len(marks)
                 if count > 0:
                     session.state.cache_data["marks"] = {}
-                    session.state.cache_data["auto_marks"] = {}
                     session.state.rebuild_reason_counts()
                     session.mark_cache_dirty()
                     total_untagged += count
             else:
-                # Untag specific reason - only affects that specific reason
-                to_untag = [base for base, r in marks.items() if r == reason]
+                # Untag specific reason - only affects that specific reason (new unified format)
+                to_untag = [
+                    base for base, entry in marks.items()
+                    if isinstance(entry, dict) and entry.get("reason") == reason
+                ]
                 for base in to_untag:
                     marks.pop(base, None)
-                # Remove from the specific reason's auto_marks bucket (always Set)
-                auto_bucket = session.state.cache_data["auto_marks"].get(reason, set())
-                for base in to_untag:
-                    auto_bucket.discard(base)
                 if to_untag:
                     session.state.rebuild_reason_counts()
                     session.mark_cache_dirty()
@@ -1850,6 +1890,13 @@ class ImageViewer(QMainWindow):
 
     def _load_dataset(self, dir_path: Path) -> None:
         log_debug(f"_load_dataset called: {dir_path}", "VIEWER")
+
+        # CRITICAL: Flush pending cache before switching datasets
+        # This ensures outliers and other changes are saved before state.reset() clears them
+        if self.session.cache_dirty:
+            log_debug("Flushing cache before dataset switch", "VIEWER")
+            self._flush_cache(wait=True)
+
         self.current_index = 0
         if not self.session.load(dir_path):
             log_warning(f"_load_dataset failed for: {dir_path}", "VIEWER")
@@ -1898,7 +1945,6 @@ class ImageViewer(QMainWindow):
         else:
             log_info("Skipping duplicate sweep (signatures already exist)", "VIEWER")
         self.invalidate_overlay_cache()
-        self.load_current()
         self.ui.btn_prev.setEnabled(True)
         self.ui.btn_next.setEnabled(True)
         self._update_dataset_window_title(force=True)
@@ -1907,8 +1953,15 @@ class ImageViewer(QMainWindow):
         self._update_restore_menu()
         self._update_stats_panel()
         self._mark_cache_dirty()
+
+        # Apply saved filter mode - navigate to first matching image if needed
         if self.filter_controller.filter_mode != FILTER_ALL:
-            self.filter_controller.reconcile_filter_state(show_warning=False)
+            first_match = self.filter_controller.reconcile_filter_state(show_warning=False)
+            if first_match is not None:
+                current_base = self.session.get_base(self.current_index)
+                if not current_base or not self.filter_controller.filter_accepts_base(current_base):
+                    self.current_index = first_match
+        self.load_current()
 
     def _on_save_status_changed(self, status: str) -> None:
         """Show save status in status bar."""
@@ -1926,6 +1979,13 @@ class ImageViewer(QMainWindow):
 
     def _load_collection(self, dir_path: Path) -> None:
         log_debug(f"_load_collection called: {dir_path}", "VIEWER")
+
+        # CRITICAL: Flush pending cache before switching to collection
+        # This ensures outliers and other changes are saved before state.reset() clears them
+        if self.session.cache_dirty:
+            log_debug("Flushing cache before collection switch", "VIEWER")
+            self._flush_cache(wait=True)
+
         self.current_index = 0
         if not self.session.load_collection(dir_path):
             log_debug(f"_load_collection failed for: {dir_path}", "VIEWER")
@@ -2031,6 +2091,8 @@ class ImageViewer(QMainWindow):
         self.overlay_orchestrator.set_align_mode(self._align_mode)
         self.overlay_orchestrator.set_grid_mode(self.view_state.grid_mode)
         self.overlay_orchestrator.set_show_labels(self.view_state.show_labels)
+        self.overlay_orchestrator.set_show_overlays(self.view_state.show_overlays)
+        self.overlay_orchestrator.set_corner_display_mode(self._corner_display_mode)
 
         return self.overlay_orchestrator.render_pair(base)
 
@@ -2423,9 +2485,11 @@ class ImageViewer(QMainWindow):
             self.session._evict_pixmap_cache_entry(base)
 
     def _handle_progress_snapshot(self, snapshot) -> None:
-        if not self.progress_panel:
-            return
-        self.progress_panel.set_snapshot(snapshot)
+        if self.progress_panel:
+            self.progress_panel.set_snapshot(snapshot)
+        # Also update outlier dialog if open
+        if self._outlier_dialog and self._outlier_dialog.isVisible():
+            self._outlier_dialog.set_progress(snapshot)
 
     def _handle_calibration_activity_changed(self, pending: int) -> None:
         self.queue_manager.update(
@@ -2648,17 +2712,15 @@ class ImageViewer(QMainWindow):
         # Load existing corners or create new bucket
         bucket = self.session.get_corners(base) or {}
         updated = False
-        refined_flags: Dict[str, bool] = bucket.get("refined", {}) if isinstance(bucket.get("refined"), dict) else {}  # type: ignore[assignment]
         for channel, points in refined.items():
             if not points:
                 continue
-            bucket[channel] = points
-            refined_flags[channel] = True  # Mark as subpixel refined
+            # Store refined corners in *_subpixel keys (preserve originals)
+            subpixel_key = f"{channel}_subpixel"
+            bucket[subpixel_key] = points
             updated = True
         if not updated:
             return
-        # Store refined flags in bucket
-        bucket["refined"] = refined_flags  # type: ignore[assignment]
         # Save corners immediately to disk (triggers flush_dirty_corners on next snapshot)
         self.session.set_corners(base, bucket)
         self.invalidate_overlay_cache(base)
@@ -2740,14 +2802,14 @@ class ImageViewer(QMainWindow):
                             "threshold": 0.0,  # Will be computed globally
                         })
 
-            # Compute thresholds per channel (median + 2.5*MAD)
+            # Compute thresholds per channel (median + 3.5*MAD)
             for channel, channel_outliers in outliers_data.items():
                 if not channel_outliers:
                     continue
                 errors = [o["error"] for o in channel_outliers]
                 median_err = median(errors) if errors else 0.0
                 mad = median([abs(e - median_err) for e in errors]) if errors else 0.0
-                threshold = median_err + 2.5 * 1.4826 * mad
+                threshold = median_err + 3.5* 1.4826 * mad
                 threshold = max(threshold, 0.5)  # Floor at 0.5px
 
                 # Update threshold for all entries in this channel
@@ -2817,17 +2879,42 @@ class ImageViewer(QMainWindow):
         *,
         show_status: bool,
     ) -> None:
-        if not self.session.loader:  # Keep original - silent check
+        # Support both datasets (loader) and collections
+        if self.session.loader:
+            valid = set(self.session.loader.image_bases)
+        elif self.session.collection:
+            valid = set(self.session.collection.image_bases)
+        else:
+            log_debug("No loader or collection available for outlier selection", "OUTLIERS")
             return
-        valid = set(self.session.loader.image_bases)
+
         include = {k: {b for b in include.get(k, set()) if b in valid} for k in ("lwir", "visible", "stereo")}
         exclude = {k: {b for b in exclude.get(k, set()) if b in valid} for k in ("lwir", "visible", "stereo")}
-        for channel in ("lwir", "visible"):
-            bucket = self.state.calibration_outliers_intrinsic.setdefault(channel, set())
-            bucket.difference_update(include[channel])
-            bucket.update(exclude[channel])
-        self.state.calibration_outliers_extrinsic.difference_update(include["stereo"])
-        self.state.calibration_outliers_extrinsic.update(exclude["stereo"])
+
+        # Log outlier changes for debugging
+        total_include = sum(len(v) for v in include.values())
+        total_exclude = sum(len(v) for v in exclude.values())
+        log_debug(f"Applying outlier selection: include={total_include} exclude={total_exclude}", "OUTLIERS")
+
+        # Directly modify cache_data to persist outlier flags (new nested format)
+        calib = self.state.cache_data.setdefault("calibration", {})
+
+        for channel in ("lwir", "visible", "stereo"):
+            # Include = remove outlier flag (include in calibration)
+            for base in include.get(channel, set()):
+                if base in calib and isinstance(calib[base], dict):
+                    if "outlier" not in calib[base]:
+                        calib[base]["outlier"] = {"lwir": False, "visible": False, "stereo": False}
+                    calib[base]["outlier"][channel] = False
+            # Exclude = set outlier flag (exclude from calibration)
+            for base in exclude.get(channel, set()):
+                if base not in calib:
+                    calib[base] = {"auto": False, "outlier": {"lwir": False, "visible": False, "stereo": False}, "results": {}}
+                if isinstance(calib[base], dict):
+                    if "outlier" not in calib[base]:
+                        calib[base]["outlier"] = {"lwir": False, "visible": False, "stereo": False}
+                    calib[base]["outlier"][channel] = True
+
         self.state.rebuild_calibration_summary()
         self._mark_cache_dirty()
         self._update_stats_panel()
@@ -3083,8 +3170,9 @@ class ImageViewer(QMainWindow):
             if base in marks:
                 continue
             # Skip if already marked as calibration (user or auto)
-            calib_entry = calibration.get(base, {})
-            if isinstance(calib_entry, dict) and calib_entry.get("marked"):
+            # Presence in dict = marked
+            calib_entry = calibration.get(base)
+            if isinstance(calib_entry, dict):
                 continue
             candidates.append(base)
 
@@ -3201,6 +3289,17 @@ class ImageViewer(QMainWindow):
 
     def _handle_compute_extrinsic_action(self) -> None:
         if not require_dataset(self, "Calibration"):
+            return
+
+        # Check if intrinsic calibration is in progress
+        if self.progress_tracker.is_busy(config.progress_task_solver):
+            QMessageBox.warning(
+                self,
+                "Calibration in Progress",
+                "Intrinsic calibration is currently running.\n\n"
+                "Please wait for it to complete before computing extrinsic calibration, "
+                "otherwise the extrinsic solver might use outdated intrinsic data.",
+            )
             return
 
         # Quick count WITHOUT loading corners
@@ -3375,8 +3474,107 @@ class ImageViewer(QMainWindow):
                 if action:
                     action.blockSignals(False)
 
+    def _set_corner_display_mode(self, mode: str) -> None:
+        """Set corner display mode.
+
+        Args:
+            mode: One of:
+                - 'original': Show only original detected corners (blue circles)
+                - 'subpixel': Show subpixel-refined corners (cyan crosses)
+                - 'both': Show both for comparison (debug mode)
+        """
+        # Skip if we're syncing action states (avoid recursion)
+        if getattr(self, "_syncing_actions", False):
+            return
+
+        # Check if subpixel corners exist when switching to subpixel/both mode
+        if mode in ("subpixel", "both"):
+            has_any_subpixel = self._check_has_subpixel_corners()
+            if not has_any_subpixel:
+                QMessageBox.information(
+                    self,
+                    "No Subpixel Corners",
+                    "No subpixel-refined corners found.\n\n"
+                    "Run 'Calibration → Refine chessboard corners' first to generate "
+                    "subpixel-accurate corner positions.\n\n"
+                    "Falling back to original corners.",
+                )
+                # Revert to original mode
+                mode = "original"
+                self._force_corner_action("original")
+
+        self._corner_display_mode = mode
+        self.overlay_orchestrator.set_corner_display_mode(mode)
+        self.session.cache_service.set_preference("corner_display_mode", mode)
+        self.invalidate_overlay_cache()
+
+        base = self._current_base()
+        if base:
+            self.load_image_pair(base)
+
+        mode_labels = {
+            "original": "Original Only",
+            "subpixel": "Subpixel Only",
+            "both": "Both (Debug)",
+        }
+        self._safe_status_message(f"Corner display: {mode_labels.get(mode, mode)}", 2000)
+
+    def _check_has_subpixel_corners(self) -> bool:
+        """Check if any calibration image has subpixel-refined corners."""
+        for base in self.state.calibration_marked:
+            corners = self.session.get_corners(base)
+            if corners:
+                if corners.get("lwir_subpixel") or corners.get("visible_subpixel"):
+                    return True
+        return False
+
+    def _force_corner_action(self, mode: str) -> None:
+        """Force a specific corner display action to be checked."""
+        corner_actions = {
+            "original": getattr(self.ui, "action_corners_original", None),
+            "subpixel": getattr(self.ui, "action_corners_subpixel", None),
+            "both": getattr(self.ui, "action_corners_both", None),
+        }
+        target = corner_actions.get(mode)
+        if target:
+            for action in corner_actions.values():
+                if action:
+                    action.blockSignals(True)
+            target.setChecked(True)
+            for action in corner_actions.values():
+                if action:
+                    action.blockSignals(False)
+
     def _handle_show_labels_toggle(self, enabled: bool) -> None:
         self.view_state.toggle_labels(enabled)
+
+    def _handle_show_overlays_toggle(self, enabled: bool) -> None:
+        """Toggle visibility of image info overlays (status text, calibration markers, etc.)."""
+        self.view_state.toggle_overlays(enabled)
+        self._safe_status_message(f"Image info overlay: {'visible' if enabled else 'hidden'}", 2000)
+
+    def _handle_use_subpixel_toggle(self, enabled: bool) -> None:
+        """Toggle whether calibration uses subpixel-refined corners."""
+        # Check if subpixel corners exist when enabling
+        if enabled and not self._check_has_subpixel_corners():
+            QMessageBox.information(
+                self,
+                "No Subpixel Corners",
+                "No subpixel-refined corners found.\n\n"
+                "Run 'Calibration → Refine chessboard corners' first to generate "
+                "subpixel-accurate corner positions.",
+            )
+            # Revert toggle
+            action = getattr(self.ui, "action_use_subpixel_corners", None)
+            if action:
+                action.blockSignals(True)
+                action.setChecked(False)
+                action.blockSignals(False)
+            return
+
+        self.session.cache_service.set_preference("use_subpixel_corners", enabled)
+        status = "enabled" if enabled else "disabled"
+        self._safe_status_message(f"Use subpixel corners for calibration: {status}", 3000)
 
     def clear_empty_datasets(self) -> None:
         self.dataset_actions.clear_empty_datasets()
@@ -3413,20 +3611,18 @@ class ImageViewer(QMainWindow):
                 self._safe_status_message("No images tagged for deletion", 3000)
                 return
             self.state.cache_data["marks"] = {}
-            self.state.cache_data["auto_marks"] = {}
         else:
-            # Untag specific reason - only affects that specific reason
-            to_untag = [base for base, r in marks.items() if r == reason]
+            # Untag specific reason - only affects that specific reason (new unified format)
+            to_untag = [
+                base for base, entry in marks.items()
+                if isinstance(entry, dict) and entry.get("reason") == reason
+            ]
             if not to_untag:
                 self._safe_status_message(f"No images tagged as {reason_label}", 3000)
                 return
             count = len(to_untag)
             for base in to_untag:
                 marks.pop(base, None)
-            # Remove from the specific reason's auto_marks bucket (always Set)
-            auto_bucket = self.state.cache_data["auto_marks"].get(reason, set())
-            for base in to_untag:
-                auto_bucket.discard(base)
 
         self.state.rebuild_reason_counts()
         self.session.mark_cache_dirty()

@@ -324,15 +324,22 @@ def _array_from_path(image_path: Optional[Path]) -> Optional[Any]:
 def detect_chessboard_from_path(
     image_path: Optional[Path],
     pattern_size: Tuple[int, int],
-) -> Tuple[Optional[bool], Optional[List[List[float]]]]:
-    """Detect chessboard corners loading the image directly from disk."""
+) -> Tuple[Optional[bool], Optional[List[List[float]]], Optional[Tuple[int, int]]]:
+    """Detect chessboard corners loading the image directly from disk.
+
+    Returns:
+        Tuple of (found, corners, image_size) where image_size is (width, height)
+    """
     array = _array_from_path(image_path)
     if array is None:
-        return None, None
+        return None, None, None
+    # Get original image size before downscaling (height, width in numpy)
+    h, w = array.shape[:2]
+    image_size = (w, h)  # (width, height)
     config = get_config()
     array = _downscale_for_detection(array, config.calibration_detection_max_edge)
     found, corners, _ = _detect_chessboard_from_array(array, pattern_size, debug=False)
-    return found, corners
+    return found, corners, image_size
 
 
 def _apply_clahe(array: Any, cache: Optional[_ColorSpaceCache] = None) -> Optional[Any]:
@@ -623,7 +630,19 @@ def analyze_pair(
         if not status_parts:
             status_parts.append("Chessboard detection skipped")
     status_msg = f"Calibration tagged for {base} ({'; '.join(status_parts)})"
+
+    # Build corners dict with image sizes for calibration solver
     corners: CalibrationCorners = {"lwir": lwir_corners, "visible": vis_corners}
+
+    # Add image sizes from pixmaps (needed for calibration solver)
+    image_sizes: Dict[str, Tuple[int, int]] = {}
+    if lwir_pixmap and not lwir_pixmap.isNull():
+        image_sizes["lwir"] = (lwir_pixmap.width(), lwir_pixmap.height())
+    if vis_pixmap and not vis_pixmap.isNull():
+        image_sizes["visible"] = (vis_pixmap.width(), vis_pixmap.height())
+    if image_sizes:
+        corners["image_size"] = image_sizes  # type: ignore[typeddict-item]
+
     debug_bundle: CalibrationDebugBundle = {"lwir": lwir_debug, "visible": vis_debug}
     return {"lwir": lwir_result, "visible": vis_result}, corners, status_msg, debug_bundle
 
@@ -635,11 +654,24 @@ def analyze_pair_from_paths(
     pattern_size: Tuple[int, int],
 ) -> Tuple[CalibrationResult, CalibrationCorners]:
     """Detect chessboards directly from image files (no QPixmap dependency)."""
-    lwir_result, lwir_corners = detect_chessboard_from_path(lwir_path, pattern_size)
-    vis_result, vis_corners = detect_chessboard_from_path(vis_path, pattern_size)
+    lwir_result, lwir_corners, lwir_size = detect_chessboard_from_path(lwir_path, pattern_size)
+    vis_result, vis_corners, vis_size = detect_chessboard_from_path(vis_path, pattern_size)
+
+    # Build corners dict with image sizes
+    corners: CalibrationCorners = {"lwir": lwir_corners, "visible": vis_corners}
+
+    # Add image sizes (needed for calibration solver to avoid imread)
+    image_sizes: Dict[str, Tuple[int, int]] = {}
+    if lwir_size:
+        image_sizes["lwir"] = lwir_size
+    if vis_size:
+        image_sizes["visible"] = vis_size
+    if image_sizes:
+        corners["image_size"] = image_sizes  # type: ignore[typeddict-item]
+
     return (
         {"lwir": lwir_result, "visible": vis_result},
-        {"lwir": lwir_corners, "visible": vis_corners},
+        corners,
     )
 
 
@@ -647,8 +679,18 @@ def undistort_pixmap(
     pixmap: Optional[QPixmap],
     camera_matrix: Optional[Any],
     distortion: Optional[Any],
+    border_color: Tuple[int, int, int] = (255, 0, 255),  # Magenta - easy to detect
 ) -> Optional[QPixmap]:
-    """Return an undistorted pixmap using the provided calibration parameters."""
+    """Return an undistorted pixmap using the provided calibration parameters.
+
+    Args:
+        pixmap: Input pixmap to undistort
+        camera_matrix: 3x3 camera matrix
+        distortion: Distortion coefficients
+        border_color: RGB color to use for areas outside the original image.
+                     Default is magenta (255, 0, 255) which is easy to detect
+                     and unlikely to appear in real thermal/visible images.
+    """
     if not pixmap or pixmap.isNull() or camera_matrix is None or distortion is None:
         return pixmap
     if cv2 is None or np is None:
@@ -658,6 +700,70 @@ def undistort_pixmap(
         return pixmap
     camera = np.array(camera_matrix, dtype=np.float32)
     dist = np.array(distortion, dtype=np.float32).reshape(-1)
-    corrected = cv2.undistort(array, camera, dist)
+
+    # Use initUndistortRectifyMap + remap instead of undistort
+    # This allows us to specify a custom border color
+    h, w = array.shape[:2]
+    new_camera, roi = cv2.getOptimalNewCameraMatrix(camera, dist, (w, h), 1, (w, h))
+    map1, map2 = cv2.initUndistortRectifyMap(camera, dist, None, new_camera, (w, h), cv2.CV_32FC1)
+
+    # Convert RGB border_color to BGR for cv2
+    border_bgr = (border_color[2], border_color[1], border_color[0])
+
+    # Remap with custom border color
+    corrected = cv2.remap(
+        array, map1, map2,
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=border_bgr,
+    )
+
     result = _array_to_pixmap(corrected)
     return result or pixmap
+
+
+def undistort_points(
+    points: List[Tuple[float, float]],
+    camera_matrix: Optional[Any],
+    distortion: Optional[Any],
+    image_size: Tuple[int, int],
+) -> List[Tuple[float, float]]:
+    """Transform points from distorted (raw) to undistorted coordinates.
+
+    This function takes points detected in the raw (distorted) image and
+    transforms them to the coordinates they would have in the undistorted image.
+
+    Args:
+        points: List of (x, y) points in raw image coordinates
+        camera_matrix: 3x3 camera matrix
+        distortion: Distortion coefficients
+        image_size: (width, height) of the image
+
+    Returns:
+        List of (x, y) points in undistorted image coordinates
+    """
+    if cv2 is None or np is None:
+        return points
+    if camera_matrix is None or distortion is None:
+        return points
+    if not points:
+        return points
+
+    camera = np.array(camera_matrix, dtype=np.float32)
+    dist = np.array(distortion, dtype=np.float32).reshape(-1)
+
+    # Get new camera matrix (same as used in undistort_pixmap)
+    w, h = image_size
+    new_camera, _ = cv2.getOptimalNewCameraMatrix(camera, dist, (w, h), 1, (w, h))
+
+    # Convert points to the format expected by undistortPoints
+    # Shape: (N, 1, 2) for cv2.undistortPoints
+    pts = np.array(points, dtype=np.float32).reshape(-1, 1, 2)
+
+    # undistortPoints returns normalized coordinates
+    # We need to project back to pixel coordinates using new_camera
+    undistorted = cv2.undistortPoints(pts, camera, dist, P=new_camera)
+
+    # Convert back to list of tuples
+    result = [(float(p[0, 0]), float(p[0, 1])) for p in undistorted]
+    return result

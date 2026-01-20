@@ -6,15 +6,15 @@ results back into the dataset calibration file with detailed per-pair errors.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-import yaml
 from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal
 
 from backend.services.dataset_session import DatasetSession
+from common.yaml_utils import load_yaml, save_yaml
 from config import get_config
 
 try:  # pragma: no cover - optional dependency
@@ -73,52 +73,56 @@ class _CalibrationExtrinsicTask(QRunnable):
         objp[:, :2] = np.mgrid[0:cols, 0:rows].T.reshape(-1, 2)
         return objp
 
-    def _load_gray(self, path: Path) -> Optional[Any]:
-        self._ensure_not_cancelled()
-        image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
-        if image is None:
-            return None
-        return image
-
     def _normalized_to_pixels(self, corners: Sequence[List[float]], width: int, height: int) -> Any:
         return np.array(
             [[float(pt[0]) * width, float(pt[1]) * height] for pt in corners],
             dtype=np.float32,
         )
 
+    def _extract_image_size(self, intrinsic: dict) -> Optional[Tuple[int, int]]:
+        """Extract image size from intrinsic calibration dict."""
+        size = intrinsic.get("image_size")
+        if isinstance(size, (list, tuple)) and len(size) >= 2:
+            return (int(size[0]), int(size[1]))
+        return None
+
     def _prepare_samples(self) -> Tuple[List[Any], List[Any], List[Any], Tuple[int, int]]:
+        """Prepare calibration samples using corners from cache (no image loading needed)."""
         self._ensure_not_cancelled()
+        obj_pattern = self._object_points()
+        expected = obj_pattern.shape[0]
+
+        # Get image sizes from intrinsic calibration (no need to load images!)
+        lwir_size = self._extract_image_size(self.lwir_intrinsic)
+        visible_size = self._extract_image_size(self.visible_intrinsic)
+        if not lwir_size or not visible_size:
+            raise RuntimeError(
+                "Could not determine image sizes from intrinsic calibration. "
+                "Ensure calibration files contain 'image_size' field."
+            )
+
         obj_points: List[Any] = []
         lwir_points: List[Any] = []
         visible_points: List[Any] = []
-        obj_pattern = self._object_points()
-        expected = obj_pattern.shape[0]
-        lwir_size: Optional[Tuple[int, int]] = None
-        visible_size: Optional[Tuple[int, int]] = None
+
         for sample in self.samples:
             self._ensure_not_cancelled()
-            lwir = self._load_gray(sample.lwir_path)
-            visible = self._load_gray(sample.visible_path)
-            if lwir is None or visible is None:
-                continue
-            lwir_height, lwir_width = lwir.shape[:2]
-            vis_height, vis_width = visible.shape[:2]
+            # Validate corner counts
             if len(sample.lwir_corners) != expected or len(sample.visible_corners) != expected:
                 continue
-            if lwir_size and lwir_size != (lwir_width, lwir_height):
-                continue
-            if visible_size and visible_size != (vis_width, vis_height):
-                continue
             obj_points.append(obj_pattern.copy())
-            lwir_points.append(self._normalized_to_pixels(sample.lwir_corners, lwir_width, lwir_height))
-            visible_points.append(self._normalized_to_pixels(sample.visible_corners, vis_width, vis_height))
-            lwir_size = lwir_size or (lwir_width, lwir_height)
-            visible_size = visible_size or (vis_width, vis_height)
-        image_size = visible_size or lwir_size
-        if len(obj_points) < 3 or image_size is None:
+            lwir_points.append(
+                self._normalized_to_pixels(sample.lwir_corners, lwir_size[0], lwir_size[1])
+            )
+            visible_points.append(
+                self._normalized_to_pixels(sample.visible_corners, visible_size[0], visible_size[1])
+            )
+
+        image_size = visible_size
+        if len(obj_points) < 3:
             raise RuntimeError(
                 f"Could not prepare enough valid samples for extrinsic calibration ({len(obj_points)} usable). "
-                "Ensure both channels have detections with consistent resolutions."
+                "Ensure both channels have detections with consistent corner counts."
             )
         return obj_points, lwir_points, visible_points, image_size
 
@@ -134,8 +138,7 @@ class _CalibrationExtrinsicTask(QRunnable):
         output_path = self.dataset_path / config.calibration_extrinsic_filename
         try:
             self._ensure_not_cancelled()
-            with open(output_path, "w", encoding="utf-8") as handle:
-                yaml.safe_dump(payload, handle, sort_keys=False)
+            save_yaml(output_path, payload, sort_keys=False)
         except OSError as exc:  # noqa: BLE001
             raise RuntimeError(f"Could not write extrinsic calibration file: {exc}") from exc
         payload_with_path = dict(payload)
@@ -203,7 +206,12 @@ class _CalibrationExtrinsicTask(QRunnable):
                     )
                 except Exception:
                     continue
-            payload = {
+
+            # Clean calibration payload (exportable)
+            calibration_payload = {
+                "# source": f"Stereo calibration computed for {self.dataset_path.name}",
+                "dataset": self.dataset_path.name,
+                "dataset_path": str(self.dataset_path),
                 "rotation": rotation.tolist(),
                 "translation": translation.reshape(-1).tolist(),
                 "essential_matrix": essential.tolist(),
@@ -211,10 +219,28 @@ class _CalibrationExtrinsicTask(QRunnable):
                 "baseline": float(np.linalg.norm(translation)),
                 "samples": len(obj_points),
                 "reprojection_error": float(retval),
-                "per_pair_errors": per_pair_errors,
-                "updated_at": datetime.utcnow().isoformat() + "Z",
+                "updated_at": datetime.now(timezone.utc).isoformat() + "Z",
             }
-            enriched = self._persist_results(payload)
+
+            # Save clean extrinsic file
+            enriched = self._persist_results(calibration_payload)
+
+            # Save errors to cache file
+            config = get_config()
+            errors_path = self.dataset_path / config.calibration_errors_filename
+            errors_data: Dict[str, Any] = {}
+            if errors_path.exists():
+                errors_data = load_yaml(errors_path) or {}
+            errors_data["stereo"] = {
+                "per_pair_errors": per_pair_errors,
+                "reprojection_error": float(retval),
+                "updated_at": datetime.now(timezone.utc).isoformat() + "Z",
+            }
+            save_yaml(errors_path, errors_data, sort_keys=False)
+
+            # Add per_pair_errors to result for GUI consumption
+            enriched["per_pair_errors"] = per_pair_errors
+
             try:
                 self.signals.completed.emit(enriched)
             except RuntimeError:

@@ -15,6 +15,7 @@ from PyQt6.QtGui import QColor, QPixmap
 from common.dict_helpers import get_dict_path
 from common.reasons import format_reason_label
 from common.log_utils import log_debug
+from backend.utils.calibration import undistort_points
 
 if TYPE_CHECKING:
     from backend.services.dataset_session import DatasetSession
@@ -69,6 +70,8 @@ class OverlayOrchestrator(QObject):
         self.align_mode = "disabled"  # "disabled", "full", "fov_focus"
         self.grid_mode = "thirds"  # "off", "thirds", "detailed"
         self.show_labels = False
+        self.show_overlays = True  # Info overlay (status text, calibration markers, corners)
+        self.corner_display_mode = "subpixel"  # "original", "subpixel", "both"
 
         # Cached homography for stereo alignment (computed once per calibration)
         self._cached_homography: Optional[Any] = None
@@ -91,11 +94,15 @@ class OverlayOrchestrator(QObject):
         Returns:
             Tuple of (lwir_pixmap, vis_pixmap), either can be None
         """
-        # Extract mark/reason data
+        # Extract mark/reason data (unified format: base -> {reason, auto})
         cd = self.state.cache_data
-        reason = cd["marks"].get(base)
-        auto_bucket = cd["auto_marks"].get(reason, set()) if reason else set()
-        auto_reason = bool(reason and base in auto_bucket)
+        mark_entry = cd["marks"].get(base)
+        if isinstance(mark_entry, dict):
+            reason = mark_entry.get("reason")
+            auto_reason = mark_entry.get("auto", False)
+        else:
+            reason = mark_entry  # Legacy string format
+            auto_reason = False
 
         reason_label = format_reason_label(reason, auto=auto_reason) if reason else None
 
@@ -105,13 +112,34 @@ class OverlayOrchestrator(QObject):
         calib_results = self.state.calibration_results.get(base, {})
         # Only load corners if we need to show them (calibration marked AND has detection)
         calib_corners: Dict[str, Any] = {}
-        corners_refined: Dict[str, bool] = {}
         if calibration_flag and (calib_results.get("lwir") or calib_results.get("visible")):
             calib_corners = self.session.get_corners(base) or {}
-            # Extract refined flags from corners dict
-            refined_data = calib_corners.get("refined")
-            if isinstance(refined_data, dict):
-                corners_refined = refined_data
+
+        # Determine which corners to show based on corner_display_mode
+        # For each channel, we may have "original", "subpixel", or "both"
+        def get_corners_for_channel(channel: str) -> Tuple[
+            Optional[List[List[float]]],  # primary corners
+            Optional[List[List[float]]],  # secondary corners (only in "both" mode)
+            bool,  # primary is subpixel?
+        ]:
+            original = calib_corners.get(channel)
+            subpixel = calib_corners.get(f"{channel}_subpixel")
+
+            if self.corner_display_mode == "original":
+                return original, None, False
+            elif self.corner_display_mode == "subpixel":
+                # Prefer subpixel if available, fallback to original
+                if subpixel:
+                    return subpixel, None, True
+                return original, None, False
+            else:  # "both"
+                # Primary = subpixel (if available), secondary = original
+                if subpixel:
+                    return subpixel, original, True
+                return original, None, False
+
+        lwir_corners_primary, lwir_corners_secondary, lwir_is_subpixel = get_corners_for_channel("lwir")
+        vis_corners_primary, vis_corners_secondary, vis_is_subpixel = get_corners_for_channel("visible")
 
         # Error data
         thresholds = self._get_error_thresholds()
@@ -136,9 +164,10 @@ class OverlayOrchestrator(QObject):
         # Get base pixmaps from session
         display_lwir, display_vis = self.session.prepare_display_pair(base, self.view_rectified)
 
-        # Store original sizes for coordinate transformation
-        lwir_original_size = (display_lwir.width(), display_lwir.height()) if display_lwir else None
-        vis_original_size = (display_vis.width(), display_vis.height()) if display_vis else None
+        # Get ORIGINAL image sizes from disk for corner coordinate transformation
+        # Corners are normalized relative to the original image file, not the display pixmap
+        lwir_original_size = self.session.get_original_image_size(base, "lwir")
+        vis_original_size = self.session.get_original_image_size(base, "visible")
 
         # Apply stereo alignment if enabled (any mode except "disabled")
         alignment_transform = None
@@ -169,7 +198,26 @@ class OverlayOrchestrator(QObject):
                 )
                 log_debug(f"Alignment cache miss for {base}, cached", "ALIGN")
 
+        # Get calibration matrices for corner transformation
+        cd = self.state.cache_data
+        lwir_matrices = cd.get("_matrices", {}).get("lwir", {})
+        vis_matrices = cd.get("_matrices", {}).get("visible", {})
+
+        # When show_overlays is False, suppress info overlays (but keep grid and labels)
+        if not self.show_overlays:
+            reason = None
+            reason_label = None
+            calibration_flag = False
+            calibration_auto = False
+            calibration_errors = None
+            stereo_error = None
+            lwir_corners_primary = None
+            lwir_corners_secondary = None
+            vis_corners_primary = None
+            vis_corners_secondary = None
+
         # Render LWIR with overlays
+        # Pass corners based on display mode - transformation happens inside render
         display_lwir = self.workflow.render(
             base,
             "lwir",
@@ -180,9 +228,10 @@ class OverlayOrchestrator(QObject):
             reason_label=reason_label,
             calibration=calibration_flag,
             calibration_auto=calibration_auto,
-            calibration_detected=calib_results.get("lwir"),
-            corner_points=calib_corners.get("lwir"),
-            corners_refined=corners_refined.get("lwir", False),
+            calibration_detected=calib_results.get("lwir") if self.show_overlays else None,
+            corner_points=lwir_corners_primary,
+            corner_points_secondary=lwir_corners_secondary,
+            corners_refined=lwir_is_subpixel if self.show_overlays else False,
             warning_text=None,
             calibration_errors=calibration_errors,
             stereo_error=stereo_error,
@@ -191,9 +240,12 @@ class OverlayOrchestrator(QObject):
             label_sig=label_sig_lwir,
             alignment_transform=alignment_transform,
             original_size=lwir_original_size,
+            camera_matrix=lwir_matrices.get("camera_matrix"),
+            distortion=lwir_matrices.get("distortion"),
         )
 
         # Render Visible with overlays
+        # Pass corners based on display mode - transformation happens inside render
         display_vis = self.workflow.render(
             base,
             "visible",
@@ -204,9 +256,10 @@ class OverlayOrchestrator(QObject):
             reason_label=reason_label,
             calibration=calibration_flag,
             calibration_auto=calibration_auto,
-            calibration_detected=calib_results.get("visible"),
-            corner_points=calib_corners.get("visible"),
-            corners_refined=corners_refined.get("visible", False),
+            calibration_detected=calib_results.get("visible") if self.show_overlays else None,
+            corner_points=vis_corners_primary,
+            corner_points_secondary=vis_corners_secondary,
+            corners_refined=vis_is_subpixel if self.show_overlays else False,
             warning_text=None,
             calibration_errors=calibration_errors,
             stereo_error=stereo_error,
@@ -215,6 +268,8 @@ class OverlayOrchestrator(QObject):
             label_sig=label_sig_vis,
             alignment_transform=alignment_transform,
             original_size=vis_original_size,
+            camera_matrix=vis_matrices.get("camera_matrix"),
+            distortion=vis_matrices.get("distortion"),
         )
 
         return display_lwir, display_vis
@@ -299,6 +354,88 @@ class OverlayOrchestrator(QObject):
             self.show_labels = show
             self.invalidate()
 
+    def set_show_overlays(self, show: bool) -> None:
+        """Set whether to show info overlays (status text, calibration markers, corners)."""
+        if show != self.show_overlays:
+            self.show_overlays = show
+            self.invalidate()
+
+    def set_corner_display_mode(self, mode: str) -> None:
+        """Set corner display mode.
+
+        Args:
+            mode: One of:
+                - 'original': Show only original detected corners
+                - 'subpixel': Show subpixel-refined corners (if available)
+                - 'both': Show both original and subpixel for comparison
+        """
+        if mode not in ("original", "subpixel", "both"):
+            mode = "subpixel"
+        if mode != self.corner_display_mode:
+            self.corner_display_mode = mode
+            self.invalidate()
+
+    def _transform_corners_for_rectified(
+        self,
+        corners: Optional[List[Tuple[float, float]]],
+        channel: str,
+        original_size: Optional[Tuple[int, int]],
+    ) -> Optional[List[Tuple[float, float]]]:
+        """Transform corner points if view_rectified is enabled.
+
+        Corners are detected on the RAW (distorted) image but displayed on
+        the undistorted image. This function transforms them using undistortPoints.
+
+        Args:
+            corners: Normalized corner coordinates (0-1 relative to original image)
+            channel: "lwir" or "visible"
+            original_size: (width, height) of original image
+
+        Returns:
+            Transformed corners (still normalized) or original if no transform needed
+        """
+        if not corners or not self.view_rectified or not original_size:
+            return corners
+
+        # Get calibration matrices for this channel
+        cd = self.state.cache_data
+        matrices = cd.get("_matrices", {}).get(channel)
+        if not matrices:
+            log_debug(f"_transform_corners_for_rectified [{channel}]: no matrices, skipping", "OVERLAY")
+            return corners
+
+        camera_matrix = matrices.get("camera_matrix")
+        distortion = matrices.get("distortion")
+        if camera_matrix is None or distortion is None:
+            log_debug(f"_transform_corners_for_rectified [{channel}]: no camera/distortion, skipping", "OVERLAY")
+            return corners
+
+        orig_w, orig_h = original_size
+
+        # Denormalize corners to pixel coordinates
+        pixel_corners = [(u * orig_w, v * orig_h) for u, v in corners]
+
+        # Transform through undistort
+        transformed = undistort_points(
+            pixel_corners, camera_matrix, distortion, original_size
+        )
+
+        # Re-normalize to 0-1 range
+        # Note: after undistort, coordinates might be slightly outside 0-1
+        result = [(x / orig_w, y / orig_h) for x, y in transformed]
+
+        # Log sample transformation
+        if corners:
+            u0, v0 = corners[0]
+            u1, v1 = result[0]
+            log_debug(
+                f"_transform_corners_for_rectified [{channel}]: "
+                f"({u0:.4f},{v0:.4f}) -> ({u1:.4f},{v1:.4f})",
+                "OVERLAY"
+            )
+
+        return result
+
     def _apply_stereo_alignment(
         self,
         lwir_pixmap: QPixmap,
@@ -324,7 +461,6 @@ class OverlayOrchestrator(QObject):
             align_fov_crop,
             align_max_overlap,
         )
-        from common.log_utils import log_debug
 
         log_debug(f"_apply_stereo_alignment called with mode={mode}", "ALIGN")
 
