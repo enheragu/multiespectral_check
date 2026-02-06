@@ -28,11 +28,10 @@ try:
 except ImportError:
     get_thread_pool_manager = None  # type: ignore
 
-WORKSPACE_INDEX_FILENAME = ".workspace_index.json"
-
-# Bump this version whenever workspace aggregation logic changes
-# to force cache regeneration
-WORKSPACE_LOGIC_VERSION = 3
+# NOTE: We intentionally DON'T cache workspace index to disk.
+# Reason: Workspace scanning is fast (reads .summary_cache.yaml from each dataset)
+# and a disk cache would duplicate data, causing synchronization issues.
+# See DESIGN_PHILOSOPHY.md: "Don't duplicate data"
 
 
 @dataclass
@@ -52,7 +51,6 @@ def scan_workspace(workspace_dir: Path) -> List[WorkspaceDatasetInfo]:
         return []
     cached = _workspace_cache.get(workspace_dir)
     sig = _workspace_signature(workspace_dir)
-    index = _load_workspace_index(workspace_dir)
     if cached and cached.get("sig") == sig:
         log_perf(f"scan_workspace cache hit: {workspace_dir}", "perf:workspace")
         entries_obj = cached.get("entries", [])
@@ -62,7 +60,6 @@ def scan_workspace(workspace_dir: Path) -> List[WorkspaceDatasetInfo]:
     start = time.perf_counter()
     entries: List[WorkspaceDatasetInfo] = []
     dataset_infos: Dict[str, WorkspaceDatasetInfo] = {}
-    new_index: Dict[str, Dict[str, object]] = {}
     futures: List[Tuple] = []
 
     dataset_meta: List[Tuple[Path, str, Optional[str]]] = []
@@ -79,8 +76,6 @@ def scan_workspace(workspace_dir: Path) -> List[WorkspaceDatasetInfo]:
             dataset_meta.append((entry, str(entry.relative_to(workspace_dir)), None))
             log_debug(f"Added standalone {entry.name} with parent=None", "WORKSPACE_MGR")
 
-    prev_datasets = index.get("datasets", {}) if isinstance(index, dict) else {}
-
     # Use ThreadPoolManager for coordinated resource usage if available
     if get_thread_pool_manager is not None:
         pool_manager = get_thread_pool_manager()
@@ -90,24 +85,13 @@ def scan_workspace(workspace_dir: Path) -> List[WorkspaceDatasetInfo]:
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         for path, rel, parent in dataset_meta:
-            sig_rel = _quick_signature(path)
-            cached_summary = prev_datasets.get(rel) if isinstance(prev_datasets, dict) else None
-            cached_sig = cached_summary.get("sig") if isinstance(cached_summary, dict) else None
-            summary = cached_summary.get("summary") if isinstance(cached_summary, dict) else None
-            if cached_sig and abs(float(cached_sig) - sig_rel) < 1e-6 and isinstance(summary, dict):
-                info = _summary_to_info(summary, workspace_dir, parent)
-                if info:
-                    dataset_infos[rel] = info
-                    new_index[rel] = {"sig": sig_rel, "summary": _info_to_summary(info, workspace_dir)}
-                    continue
-            futures.append((executor.submit(collect_dataset_info, path, parent), rel, sig_rel))
+            futures.append((executor.submit(collect_dataset_info, path, parent), rel))
 
-        for future, rel, sig_rel in futures:
+        for future, rel in futures:
             info = future.result()
             if not info:
                 continue
             dataset_infos[rel] = info
-            new_index[rel] = {"sig": sig_rel, "summary": _info_to_summary(info, workspace_dir)}
 
     # Build collections from dataset infos
     collections: Dict[str, List[WorkspaceDatasetInfo]] = {}
@@ -138,12 +122,6 @@ def scan_workspace(workspace_dir: Path) -> List[WorkspaceDatasetInfo]:
             collection_info = _aggregate_collection(entry, children)
             entries.append(collection_info)
             entries.extend(children)
-            # Save collection summary to index so it can be restored
-            collection_rel = str(entry.relative_to(workspace_dir))
-            new_index[collection_rel] = {
-                "sig": _quick_signature(entry),
-                "summary": _info_to_summary(collection_info, workspace_dir)
-            }
             continue
         # If not a collection and not a dataset dir, skip
         if not _is_dataset_dir(entry):
@@ -153,7 +131,6 @@ def scan_workspace(workspace_dir: Path) -> List[WorkspaceDatasetInfo]:
     entries.extend(sorted(standalone_datasets, key=lambda x: x.name))
 
     _workspace_cache[workspace_dir] = {"sig": sig, "entries": entries}
-    _save_workspace_index(workspace_dir, sig, new_index)
     log_perf(f"scan_workspace built {len(entries)} entries in {time.perf_counter() - start:.3f}s","perf:workspace")
     return entries
 
@@ -315,14 +292,37 @@ def _count_deleted_pairs(dataset_dir: Path) -> int:
     return min(counts)
 
 
+# Folders that should NOT be treated as datasets even if they have lwir/visible structure
+_EXCLUDED_DATASET_NAMES = frozenset({
+    "labels",
+    "corners",
+    "calibration",
+    "calibration_corners",
+    "annotations",
+    "masks",
+    "output",
+    "outputs",
+    "results",
+    "trash",
+    ".trash",
+})
+
+
 def _is_dataset_dir(path: Path) -> bool:
+    """Check if path is a valid dataset directory (has lwir/ and visible/ subdirs).
+
+    Excludes special folders like 'labels', 'corners', 'calibration' etc.
+    """
+    # Exclude special folder names
+    if path.name.lower() in _EXCLUDED_DATASET_NAMES:
+        return False
     return (path / "lwir").is_dir() and (path / "visible").is_dir()
 
 
 def _workspace_signature(workspace_dir: Path) -> float:
+    """Compute signature for workspace based on directory mtimes."""
     try:
-        # Include logic version so cache invalidates when processing logic changes
-        mtimes = [workspace_dir.stat().st_mtime, float(WORKSPACE_LOGIC_VERSION)]
+        mtimes = [workspace_dir.stat().st_mtime]
         for entry in workspace_dir.iterdir():
             if not entry.is_dir():
                 continue
@@ -380,14 +380,6 @@ def invalidate_workspace_cache(workspace_dir: Path) -> None:
     if workspace_dir in _workspace_cache:
         log_debug(f"Removing workspace from memory cache: {workspace_dir.name}", "CacheInvalidate")
         del _workspace_cache[workspace_dir]
-    # Also delete workspace index file to force full rescan
-    index_path = workspace_dir / WORKSPACE_INDEX_FILENAME
-    if index_path.exists():
-        log_debug(f"Deleting workspace index: {index_path.name}", "CacheInvalidate")
-        try:
-            index_path.unlink()
-        except OSError:
-            pass
 
 
 def _quick_signature(dataset_dir: Path) -> float:
@@ -545,26 +537,9 @@ def _summary_to_info(summary: Dict[str, object], workspace_dir: Path, parent_hin
     )
 
 
-def _load_workspace_index(workspace_dir: Path) -> Dict[str, object]:
-    index_path = workspace_dir / WORKSPACE_INDEX_FILENAME
-    try:
-        with open(index_path, "r", encoding="utf-8") as handle:
-            data = json.load(handle)
-            return data if isinstance(data, dict) else {}
-    except OSError:
-        return {}
-    except json.JSONDecodeError:
-        return {}
-
-
-def _save_workspace_index(workspace_dir: Path, workspace_sig: float, datasets: Dict[str, Dict[str, object]]) -> None:
-    index_path = workspace_dir / WORKSPACE_INDEX_FILENAME
-    payload = {"sig": workspace_sig, "datasets": datasets}
-    try:
-        with open(index_path, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle)
-    except OSError:
-        return
+# NOTE: _load_workspace_index and _save_workspace_index removed.
+# We no longer cache workspace index to disk - scanning is fast enough
+# and the disk cache was causing synchronization issues.
 
 
 def _scan_workers() -> int:

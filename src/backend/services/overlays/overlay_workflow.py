@@ -23,7 +23,9 @@ from common.log_utils import log_debug
 if TYPE_CHECKING:
     from backend.utils.stereo_alignment import AlignmentTransform
 
-LabelOverlay = Tuple[str, float, float, float, float, QColor]
+# LabelOverlay: (display_name, x_center, y_center, width, height, color, is_projected)
+# is_projected=True means label was computed from other channel, shown with dashed line
+LabelOverlay = Tuple[str, float, float, float, float, QColor, bool]
 CALIBRATION_BORDER_COLOR = QColor("#00ffea")
 CALIBRATION_ERROR_COLOR = QColor("#dc3545")
 WARNING_LABEL_COLOR = QColor("#ffb347")
@@ -151,6 +153,131 @@ class OverlayWorkflow:
             if evicted in self._overlay_cache:
                 del self._overlay_cache[evicted]
 
+    def _transform_label_boxes(
+        self,
+        label_boxes: List[LabelOverlay],
+        channel: str,
+        alignment_transform: Optional["AlignmentTransform"],
+        original_size: Optional[Tuple[int, int]],
+        view_rectified: bool,
+        camera_matrix: Optional[Any],
+        distortion: Optional[Any],
+        display_size: Tuple[int, int],
+    ) -> List[LabelOverlay]:
+        """Transform label box coordinates for alignment and undistort.
+
+        Labels are stored in normalized coordinates relative to the ORIGINAL image.
+        When alignment or undistort is active, we need to transform these coordinates
+        to match the displayed image.
+
+        Args:
+            label_boxes: List of (display_name, x_c, y_c, w, h, color, is_projected)
+            channel: 'lwir' or 'visible'
+            alignment_transform: Transform for stereo alignment (or None)
+            original_size: (width, height) of original image
+            view_rectified: Whether undistort is applied
+            camera_matrix: Camera matrix for undistort
+            distortion: Distortion coefficients
+            display_size: (width, height) of display image
+
+        Returns:
+            Transformed label boxes with coordinates in display space
+        """
+        if not label_boxes:
+            return []
+
+        # If no transform needed, just return as-is
+        if not alignment_transform and not view_rectified:
+            return label_boxes
+
+        if not original_size:
+            return label_boxes
+
+        orig_w, orig_h = original_size
+        disp_w, disp_h = display_size
+
+        transformed: List[LabelOverlay] = []
+
+        for display_name, xc, yc, w, h, color, is_projected in label_boxes:
+            # Convert center-format bbox corners to pixel coords
+            # We transform all 4 corners and recompute the bbox
+            half_w, half_h = w / 2, h / 2
+            corners_norm = [
+                (xc - half_w, yc - half_h),  # top-left
+                (xc + half_w, yc - half_h),  # top-right
+                (xc + half_w, yc + half_h),  # bottom-right
+                (xc - half_w, yc + half_h),  # bottom-left
+            ]
+
+            # Denormalize to original pixel coords
+            corners_px = np.array([
+                [cx * orig_w, cy * orig_h] for cx, cy in corners_norm
+            ], dtype=np.float32)
+
+            if alignment_transform:
+                # Transform through alignment
+                if channel == "visible":
+                    transformed_corners = alignment_transform.transform_vis_corners_complete(
+                        corners_px / np.array([orig_w, orig_h]),  # Re-normalize for the API
+                        original_size,
+                        view_rectified,
+                        camera_matrix,
+                        distortion,
+                    )
+                else:
+                    transformed_corners = alignment_transform.transform_lwir_corners_complete(
+                        corners_px / np.array([orig_w, orig_h]),  # Re-normalize for the API
+                        original_size,
+                        view_rectified,
+                        camera_matrix,
+                        distortion,
+                    )
+                # transformed_corners are now in output pixel coords
+            elif view_rectified and camera_matrix is not None and distortion is not None:
+                # Only undistort, no alignment
+                try:
+                    cam = np.array(camera_matrix, dtype=np.float32)
+                    dist = np.array(distortion, dtype=np.float32).reshape(-1)
+                    new_cam, _ = cv2.getOptimalNewCameraMatrix(
+                        cam, dist, (orig_w, orig_h), 1, (orig_w, orig_h)
+                    )
+                    pts_reshaped = corners_px.reshape(-1, 1, 2)
+                    undistorted = cv2.undistortPoints(pts_reshaped, cam, dist, P=new_cam)
+                    transformed_corners = undistorted.reshape(-1, 2)
+                except Exception:
+                    transformed_corners = corners_px
+            else:
+                transformed_corners = corners_px
+
+            # Convert to normalized display coords
+            # Find the bounding box of transformed corners
+            min_x = float(transformed_corners[:, 0].min())
+            max_x = float(transformed_corners[:, 0].max())
+            min_y = float(transformed_corners[:, 1].min())
+            max_y = float(transformed_corners[:, 1].max())
+
+            # Clamp to display bounds
+            min_x = max(0.0, min_x)
+            max_x = min(float(disp_w), max_x)
+            min_y = max(0.0, min_y)
+            max_y = min(float(disp_h), max_y)
+
+            new_w = max_x - min_x
+            new_h = max_y - min_y
+
+            if new_w <= 0 or new_h <= 0:
+                continue  # Skip if box became invalid
+
+            # Normalize to display size
+            new_xc = (min_x + max_x) / 2 / disp_w
+            new_yc = (min_y + max_y) / 2 / disp_h
+            new_w_norm = new_w / disp_w
+            new_h_norm = new_h / disp_h
+
+            transformed.append((display_name, new_xc, new_yc, new_w_norm, new_h_norm, color, is_projected))
+
+        return transformed
+
     def render(
         self,
         base: str,
@@ -246,8 +373,20 @@ class OverlayWorkflow:
             label_entries.append((f"Stereo {float(stereo_error):.3f} px", color))
         if label_entries:
             draw_overlay_labels(painter, base_pix.width(), base_pix.height(), label_entries)
+
+        # Transform and draw label boxes
         if label_boxes:
-            draw_label_boxes(painter, base_pix.width(), base_pix.height(), label_boxes)
+            transformed_boxes = self._transform_label_boxes(
+                label_boxes,
+                channel,
+                alignment_transform,
+                original_size,
+                view_rectified,
+                camera_matrix,
+                distortion,
+                (base_w, base_h),
+            )
+            draw_label_boxes(painter, base_w, base_h, transformed_boxes)
 
         # Draw corners - helper function for rendering a set of corners
         def draw_corner_set(

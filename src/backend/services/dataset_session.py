@@ -535,6 +535,7 @@ class DatasetSession:
                     self.state.cache_data["marks"],
                     self.state.calibration_marked,
                     self.state.cache_data.get("calibration", {}),  # Include full calibration data
+                    self.state.cache_data.get("sweep_flags", {}),  # Include sweep flags
                 )
             return None
 
@@ -847,8 +848,9 @@ class DatasetSession:
         else:
             return
 
-        if missing_counts:
-            self.state.missing_counts = missing_counts
+        # Always assign missing_counts (even if both are 0)
+        self.state.missing_counts = missing_counts
+        log_debug(f"_auto_mark_missing_pairs: missing_counts={missing_counts}", "SESSION")
 
         if not channel_map:
             return

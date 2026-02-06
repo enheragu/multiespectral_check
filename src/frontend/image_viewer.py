@@ -23,7 +23,7 @@ from tqdm import tqdm
 from backend.services import (CalibrationController, CalibrationDebugger,
                               CalibrationExtrinsicSolver, CalibrationRefiner,
                               CalibrationSolver, DeferredCalibrationQueue,
-                              LabelWorkflow, OverlayPrefetcher,
+                              OverlayPrefetcher,
                               OverlayWorkflow, SignatureController,
                               SignatureScanManager)
 from backend.services.cache_flush_coordinator import CacheFlushCoordinator
@@ -41,7 +41,7 @@ from backend.services.filter_modes import (FILTER_ACTION_NAMES, FILTER_ALL,
                                            FILTER_MESSAGE_LABELS,
                                            FILTER_STATUS_TITLES)
 from backend.services.handler_registry import get_handler_registry
-from backend.services.labels.labeling_controller import LabelingController
+from backend.services.labels import LabelService
 from backend.services.marking_controller import MarkingController
 from backend.services.navigation_controller import NavigationController
 from backend.services.overlay_orchestrator import OverlayOrchestrator
@@ -87,6 +87,10 @@ class ImageViewer(QMainWindow):
     def __init__(self) -> None:
 
         super().__init__()
+
+        # Initialize dialog references early to avoid AttributeError in callbacks
+        self._outlier_dialog = None
+
         t0 = time.perf_counter()
         self._init_ui()
         log_perf(f"_init_ui {time.perf_counter() - t0:.3f}s")
@@ -171,8 +175,19 @@ class ImageViewer(QMainWindow):
 
         self.workspace_dir = preferences.get("workspace_dir") or str(config.default_dataset_dir)
         self._workspace_counts: Tuple[int, int] = (0, 0)
+
+        # Validate workspace exists - if not, just use home directory as fallback
+        workspace_path = Path(self.workspace_dir)
+        if not workspace_path.exists():
+            log_warning(f"Configured workspace does not exist: {self.workspace_dir}", "VIEWER")
+            # Use home directory as fallback
+            fallback = Path.home()
+            log_info(f"Using fallback workspace: {fallback}", "VIEWER")
+            self.workspace_dir = str(fallback)
+            workspace_path = fallback
+
         try:
-            get_cache_coordinator().set_workspace(Path(self.workspace_dir))
+            get_cache_coordinator().set_workspace(workspace_path)
         except Exception:
             pass
 
@@ -192,7 +207,8 @@ class ImageViewer(QMainWindow):
         self._setup_recent_menu()
         self._update_workspace_label()
         log_debug(f"workspace setup {time.perf_counter() - t:.3f}s", "PERF")
-        self._default_label_yaml_path = Path(__file__).resolve().parent.parent / "config" / "labels_coco.yaml"
+        # Default: use our multiespectral schema (12 classes with attributes)
+        self._default_label_yaml_path = Path(__file__).resolve().parent.parent / "config" / "labels_multiespectral_dataset.yaml"
 
         self.label_model_path = preferences.get("label_model")
         self.label_yaml_path = preferences.get("label_yaml") or (
@@ -376,12 +392,13 @@ class ImageViewer(QMainWindow):
             ),
             reconcile_filter_state=lambda: self.filter_controller.reconcile_filter_state(show_warning=True),
             calibration_shortcut=config.calibration_toggle_shortcut,
+            get_image_path=lambda base, channel: str(p) if (p := self.session.get_image_path(base, channel)) else None,
+            enter_labelling_mode=lambda: self._toggle_manual_label_mode(True),
         )
 
         self._setup_calibration_outlier_action()
 
-        self.labeling_controller: Optional[LabelingController] = None
-        self.label_workflow: Optional[LabelWorkflow] = None
+        self.label_service: Optional[LabelService] = None
         self._manual_label_mode = False
 
     def _init_calibration_pipeline(self) -> None:
@@ -466,9 +483,12 @@ class ImageViewer(QMainWindow):
             self.ui.tab_widget.setCurrentIndex(0)
             self._update_workspace_title()
 
-        self._auto_load_last_dataset()
+        try:
+            self._auto_load_last_dataset()
+        except Exception as e:
+            log_warning(f"Failed to auto-load last dataset: {e}", "VIEWER")
+            self._show_empty_state()
         self._update_cancel_button()
-        self._outlier_dialog = None
 
     # ============================================================================\n    # UI SETUP & CONFIGURATION\n    # ============================================================================
 
@@ -681,6 +701,8 @@ class ImageViewer(QMainWindow):
             self.ui.action_label_config_model.triggered.connect(self._handle_configure_label_model)
         if hasattr(self.ui, "action_label_config_labels"):
             self.ui.action_label_config_labels.triggered.connect(self._handle_configure_label_yaml)
+        if hasattr(self.ui, "action_label_reload_config"):
+            self.ui.action_label_reload_config.triggered.connect(self._handle_reload_label_config)
         if hasattr(self.ui, "action_label_current"):
             self.ui.action_label_current.triggered.connect(self._handle_label_current)
         if hasattr(self.ui, "action_label_dataset"):
@@ -1730,8 +1752,8 @@ class ImageViewer(QMainWindow):
         self.signature_manager.reset_progress()
         self.quality_manager.reset()
         self._clear_pending_calibration_marks()
-        if self.label_workflow:
-            self.label_workflow.clear_cache()
+        if self.label_service:
+            self.label_service.clear_cache()
         self._manual_label_mode = False
         self._update_labeling_views()
         self._sync_action_states()
@@ -1830,15 +1852,22 @@ class ImageViewer(QMainWindow):
         ]
 
         started_on = str(self.session.dataset_path)
+        total = len(items)
+        task_id = config.progress_task_patterns
         runnable = PatternSweepRunnable(items, patterns_dir=patterns_dir, threshold=threshold)
 
+        # Start progress bar
+        self.progress_tracker.start(task_id, "Pattern sweep", total)
+
         def _on_progress(idx: int, total: int, base: str) -> None:
-            self._safe_status_message(f"Pattern sweep: {idx}/{total} ({base})…", 1500)
+            self.progress_tracker.update(task_id, idx, total)
 
         def _on_failed(message: str) -> None:
+            self.progress_tracker.finish(task_id)
             self._safe_status_message(f"Pattern sweep failed: {message}", 6000)
 
         def _on_finished(matched: Dict[str, str], scanned: int) -> None:
+            self.progress_tracker.finish(task_id)
             if str(self.session.dataset_path) != started_on:
                 return
             changed = False
@@ -1865,6 +1894,9 @@ class ImageViewer(QMainWindow):
             if pattern_summary:
                 msg += f" — {pattern_summary}"
             self._safe_status_message(msg, 8000)
+
+            # Mark pattern sweep as completed
+            self.session.mark_sweep_done('patterns')
 
         runnable.signals.progress.connect(_on_progress)
         runnable.signals.failed.connect(_on_failed)
@@ -1922,13 +1954,21 @@ class ImageViewer(QMainWindow):
             self.session.state.cache_data["sweep_flags"]["missing"] = True
             handler.mark_dirty()
 
-        prefs = self.session.cache_service.get_preferences()
-        self.label_workflow = LabelWorkflow(dir_path, self._default_label_yaml_path, prefs)
-        self.label_yaml_path = str(self.label_workflow.yaml_path) if self.label_workflow and self.label_workflow.yaml_path else None
-        if self.label_workflow:
-            self.label_workflow.ensure_controller()
-            self.labeling_controller = self.label_workflow.controller
+        # Initialize LabelService for this dataset
+        self.label_service = LabelService(dataset_path=dir_path)
+        # Try to load config from: 1) dataset local, 2) user preference, 3) default
+        config_path = dir_path / "labels" / "labels.yaml"
+        if not config_path.exists() and self.label_yaml_path:
+            config_path = Path(self.label_yaml_path)
+        if not config_path.exists() and self._default_label_yaml_path.exists():
+            config_path = self._default_label_yaml_path
+        if config_path.exists():
+            self.label_service.load_config(config_path)
+            self.label_yaml_path = str(config_path)
             self._on_class_map_updated()
+        else:
+            self.label_yaml_path = None
+
         self.signature_manager.reset_epoch()
         self._reset_calibration_jobs()
         self.progress_tracker.clear()
@@ -1953,6 +1993,9 @@ class ImageViewer(QMainWindow):
         self._update_restore_menu()
         self._update_stats_panel()
         self._mark_cache_dirty()
+
+        # Disable rectified view if no calibration available
+        self._validate_rectified_after_load()
 
         # Apply saved filter mode - navigate to first matching image if needed
         if self.filter_controller.filter_mode != FILTER_ALL:
@@ -2000,8 +2043,22 @@ class ImageViewer(QMainWindow):
 
         self.filter_controller.filter_mode = FILTER_ALL
         self.filter_controller.reconcile_filter_state(show_warning=False)
-        self.label_workflow = None
-        self.labeling_controller = None
+
+        # Initialize LabelService for collection with default config
+        # Collections can have labels stored per-child-dataset, but we need a service
+        # to read/write them and to know the class definitions
+        self.label_service = LabelService(dataset_path=dir_path)
+        # Try to load config from collection, then user preference, then default
+        config_path = dir_path / "labels" / "labels.yaml"
+        if not config_path.exists() and self.label_yaml_path:
+            config_path = Path(self.label_yaml_path)
+        if not config_path.exists() and self._default_label_yaml_path.exists():
+            config_path = self._default_label_yaml_path
+        if config_path.exists():
+            self.label_service.load_config(config_path)
+            log_debug(f"Loaded label config for collection: {config_path}", "VIEWER")
+            self._on_class_map_updated()
+
         self.signature_manager.reset_epoch()
         self._reset_calibration_jobs()
         self.progress_tracker.clear()
@@ -2010,6 +2067,8 @@ class ImageViewer(QMainWindow):
         # Collections: NO automatic sweeps - they are done via workspace sweep dialog
         log_debug("Collection loaded - sweeps must be done via workspace sweep dialog", "VIEWER")
         self.invalidate_overlay_cache()
+        # Disable rectified view if no calibration available
+        self._validate_rectified_after_load()
         self.load_current()
         self.ui.btn_prev.setEnabled(True)
         self.ui.btn_next.setEnabled(True)
@@ -2118,7 +2177,24 @@ class ImageViewer(QMainWindow):
         self.ui_helper.update_metadata_panel(base, type_dir, widget)
 
     def _has_calibration_data(self) -> bool:
-        return any(data for data in self.state.cache_data["_matrices"].values())
+        matrices = self.state.cache_data.get("_matrices") or {}
+        return any(data for data in matrices.values() if data)
+
+    def _validate_rectified_after_load(self) -> None:
+        """Disable rectified view if no calibration is available for the loaded dataset."""
+        if self.view_rectified and not self._has_calibration_data():
+            self.view_rectified = False
+            self.overlay_orchestrator.set_view_rectified(False)
+            # Sync UI toggle
+            action = getattr(self.ui, "action_toggle_rectified", None)
+            if action:
+                action.blockSignals(True)
+                action.setChecked(False)
+                action.blockSignals(False)
+            self._safe_status_message(
+                "Undistort disabled: no calibration data available for this dataset", 4000
+            )
+            log_info("Disabled rectified view: no calibration data in loaded dataset", "VIEWER")
 
     def _calibration_error_thresholds(self) -> Dict[str, float]:
         def _mad(values: List[float], center: float) -> float:
@@ -2169,10 +2245,15 @@ class ImageViewer(QMainWindow):
             return
         self.label_model_path = path
         self._persist_preferences(label_model=path)
-        if self.label_workflow:
-            self.label_workflow.update_prefs(label_model=path)
-            self.labeling_controller = self.label_workflow.controller
-        self._safe_status_message("Label model configured.", 3000)
+        if self.label_service:
+            # Configure YOLOv8 detector with the selected model
+            try:
+                self.label_service.load_yolov8_detector(model_path=path)
+                self._safe_status_message("Label model configured.", 3000)
+            except Exception as e:
+                QMessageBox.warning(self, "Model Error", f"Failed to load model: {e}")
+        else:
+            self._safe_status_message("Label model path saved.", 3000)
 
     def _handle_configure_label_yaml(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Select labels YAML", self._workspace_root(), "YAML (*.yaml *.yml)")
@@ -2180,23 +2261,64 @@ class ImageViewer(QMainWindow):
             return
         self.label_yaml_path = path
         self._persist_preferences(label_yaml=path)
-        if not self.label_workflow and self.session.dataset_path:
-            self.label_workflow = LabelWorkflow(Path(self.session.dataset_path), self._default_label_yaml_path, self.session.cache_service.get_preferences())
-        if self.label_workflow:
-            self.label_workflow.set_label_yaml(Path(path))
-            self.label_workflow.copy_yaml_to_dataset(Path(path))
+        if not self.label_service and self.session.dataset_path:
+            self.label_service = LabelService(dataset_path=Path(self.session.dataset_path))
+        if self.label_service:
+            self.label_service.load_config(Path(path))
+            self.label_service.copy_config_to_dataset(Path(path))
             self._on_class_map_updated()
-        self._safe_status_message("Label classes loaded.", 3000)
+        self._safe_status_message("Label classes loaded and copied to dataset.", 3000)
 
-    def _ensure_label_controller(self) -> bool:
-        if self.labeling_controller:
-            return True
-        if not self.label_workflow:
+    def _handle_reload_label_config(self) -> None:
+        """Reload label config from source, overwriting dataset's local copy."""
+        if not self.label_yaml_path:
+            QMessageBox.information(
+                self, "Reload Config",
+                "No source label config configured.\n\n"
+                "Use 'Configure labels YAML…' first to set a source config."
+            )
+            return
+
+        source_path = Path(self.label_yaml_path)
+        if not source_path.exists():
+            QMessageBox.warning(
+                self, "Reload Config",
+                f"Source config not found:\n{source_path}\n\n"
+                "Use 'Configure labels YAML…' to select a new source."
+            )
+            return
+
+        if not self.label_service:
+            QMessageBox.information(self, "Reload Config", "No dataset loaded.")
+            return
+
+        # Confirm overwrite
+        dataset_config = self.label_service._dataset_path / "labels" / "labels.yaml" if self.label_service._dataset_path else None
+        if dataset_config and dataset_config.exists():
+            reply = QMessageBox.question(
+                self, "Reload Config",
+                f"This will overwrite the dataset's label config with:\n{source_path}\n\n"
+                "Any local changes to the dataset's config will be lost.\n\n"
+                "Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        # Force reload and copy
+        self.label_service.load_config(source_path)
+        self.label_service.copy_config_to_dataset(source_path)
+        self._on_class_map_updated()
+        self._safe_status_message("Label config reloaded from source.", 3000)
+
+    def _ensure_label_service(self) -> bool:
+        """Ensure label service is ready for detection operations."""
+        if not self.label_service:
             return False
-        if self.label_workflow.ensure_controller():
-            self.labeling_controller = self.label_workflow.controller
-            return True
-        return False
+        if not self.label_service.is_ready:
+            return False
+        return True
 
     def _label_channel(self) -> str:
         return "lwir" if self.label_input_mode == "lwir" else "visible"
@@ -2234,68 +2356,427 @@ class ImageViewer(QMainWindow):
         if self._manual_label_mode:
             self._safe_status_message("Label selection cancelled.", 2000)
 
-    def _prompt_label_class(self) -> Optional[str]:
-        # Ensure class map is loaded (fallback to default YAML if present)
-        if self.label_workflow and not self.label_workflow.class_map and self._default_label_yaml_path.exists():
-            self.label_workflow.set_label_yaml(self._default_label_yaml_path)
-            self._on_class_map_updated()
-        choices = self.label_workflow.class_choices() if self.label_workflow else []
-        dialog = QInputDialog(self)
-        dialog.setWindowTitle("Label class")
-        dialog.setLabelText("Class name or id:")
-        dialog.setComboBoxItems(choices)
-        dialog.setComboBoxEditable(True)
-        combo = dialog.findChild(QComboBox)
-        if combo:
-            combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-            completer = combo.completer()
-            if completer is not None:
-                completer.setFilterMode(Qt.MatchFlag.MatchContains)
-                completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-                completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
-        ok = dialog.exec() == QDialog.DialogCode.Accepted
-        if not ok:
-            return None
-        text = dialog.textValue().strip()
-        if combo:
-            completer = combo.completer()
-            if completer is not None:
-                completion = completer.currentCompletion()
-                if completion:
-                    text = completion
-        return text or None
+    def _transform_display_to_original_coords(
+        self,
+        channel: str,
+        base: str,
+        left: float,
+        top: float,
+        right: float,
+        bottom: float,
+    ) -> Tuple[float, float, float, float]:
+        """Transform bbox from display coordinates back to original image coordinates.
+
+        When stereo alignment or undistort is active, the displayed image is transformed.
+        Annotations are always stored relative to the ORIGINAL image, so we need
+        to apply the inverse transform when saving manually-drawn boxes.
+
+        IMPORTANT: This must be the inverse of _transform_original_to_display_coords
+        and must reverse the transformation done by overlay_workflow._transform_label_boxes.
+
+        Args:
+            channel: 'lwir' or 'visible'
+            base: Image base name
+            left, top, right, bottom: Normalized coordinates in display space [0,1]
+
+        Returns:
+            (left, top, right, bottom) in original image normalized coords [0,1]
+        """
+        import numpy as np
+
+        # Check if any transform is active
+        if self._align_mode == "disabled" and not self.view_rectified:
+            return (left, top, right, bottom)
+
+        # Get alignment transform from state
+        alignment_transform = self.state.cache_data.get("_alignment_transform")
+
+        if alignment_transform is None and not self.view_rectified:
+            return (left, top, right, bottom)
+
+        # Get sizes
+        original_size = self.session.get_original_image_size(base, channel)
+        if not original_size:
+            log_debug("No original size available for inverse transform", "MANUAL_LABEL")
+            return (left, top, right, bottom)
+
+        orig_w, orig_h = original_size
+
+        # Get display size from alignment transform
+        if alignment_transform and alignment_transform.output_size:
+            disp_w, disp_h = alignment_transform.output_size
+        else:
+            disp_w, disp_h = orig_w, orig_h
+
+        # Get camera matrices if available (for undistort)
+        cd = self.state.cache_data
+        matrices = cd.get("_matrices") or {}
+        chan_matrices = matrices.get(channel) or {}
+        camera_matrix = chan_matrices.get("camera_matrix")
+        distortion = chan_matrices.get("distortion")
+
+        # Convert normalized display coords to display pixels
+        corners_disp = np.array([
+            [left * disp_w, top * disp_h],
+            [right * disp_w, top * disp_h],
+            [right * disp_w, bottom * disp_h],
+            [left * disp_w, bottom * disp_h],
+        ], dtype=np.float32)
+
+        # Apply inverse transform (reverse order of forward: alignment^-1 then redistort)
+        if alignment_transform:
+            # Step 1: Inverse alignment matrix
+            if channel == "visible":
+                corners_undist = alignment_transform.transform_vis_points_inverse(corners_disp)
+            else:
+                corners_undist = alignment_transform.transform_lwir_points_inverse(corners_disp)
+
+            # Step 2: If undistort was applied, we need to "redistort" the points
+            # This is an approximation - exact inverse undistort requires iteration
+            if self.view_rectified and camera_matrix is not None and distortion is not None:
+                try:
+                    import cv2
+                    cam = np.array(camera_matrix, dtype=np.float32)
+                    dist = np.array(distortion, dtype=np.float32).reshape(-1)
+                    # We have undistorted coords, need to apply distortion back
+                    # Using iterative projectPoints approach
+                    corners_orig = self._redistort_points(corners_undist, cam, dist, (orig_w, orig_h))
+                except Exception as e:
+                    log_debug(f"Redistortion failed, using linear approx: {e}", "MANUAL_LABEL")
+                    corners_orig = corners_undist
+            else:
+                corners_orig = corners_undist
+        elif self.view_rectified and camera_matrix is not None and distortion is not None:
+            # Only undistort active (no alignment) - need to redistort
+            try:
+                import cv2
+                cam = np.array(camera_matrix, dtype=np.float32)
+                dist = np.array(distortion, dtype=np.float32).reshape(-1)
+                corners_orig = self._redistort_points(corners_disp, cam, dist, (orig_w, orig_h))
+            except Exception:
+                corners_orig = corners_disp
+        else:
+            corners_orig = corners_disp
+
+        # Convert back to normalized original coords
+        corners_orig = corners_orig.astype(np.float32)
+        corners_orig[:, 0] /= orig_w
+        corners_orig[:, 1] /= orig_h
+
+        # Clamp to [0, 1]
+        corners_orig = np.clip(corners_orig, 0.0, 1.0)
+
+        # Extract bbox bounds
+        new_left = float(corners_orig[:, 0].min())
+        new_right = float(corners_orig[:, 0].max())
+        new_top = float(corners_orig[:, 1].min())
+        new_bottom = float(corners_orig[:, 1].max())
+
+        log_debug(
+            f"Inverse transform [{channel}]: display ({left:.3f},{top:.3f},{right:.3f},{bottom:.3f}) "
+            f"-> original ({new_left:.3f},{new_top:.3f},{new_right:.3f},{new_bottom:.3f})",
+            "MANUAL_LABEL"
+        )
+
+        return (new_left, new_top, new_right, new_bottom)
+
+    def _redistort_points(
+        self,
+        points: "np.ndarray",
+        camera_matrix: "np.ndarray",
+        distortion: "np.ndarray",
+        image_size: Tuple[int, int],
+    ) -> "np.ndarray":
+        """Apply distortion to undistorted points (inverse of undistortPoints).
+
+        This is an approximation that works well for points near the image center.
+        For exact results, an iterative approach would be needed.
+
+        Args:
+            points: Nx2 array of undistorted pixel coordinates
+            camera_matrix: 3x3 camera intrinsic matrix
+            distortion: Distortion coefficients
+            image_size: (width, height) of original image
+
+        Returns:
+            Nx2 array of distorted (original) pixel coordinates
+        """
+        import numpy as np
+        import cv2
+
+        # Get the new camera matrix that was used for undistortion
+        new_cam, _ = cv2.getOptimalNewCameraMatrix(
+            camera_matrix, distortion, image_size, 1, image_size
+        )
+
+        # Normalize points using the new camera matrix
+        fx, fy = new_cam[0, 0], new_cam[1, 1]
+        cx, cy = new_cam[0, 2], new_cam[1, 2]
+
+        # Convert to normalized coordinates
+        x_norm = (points[:, 0] - cx) / fx
+        y_norm = (points[:, 1] - cy) / fy
+
+        # Apply distortion model
+        k1, k2, p1, p2 = distortion[0], distortion[1], distortion[2], distortion[3]
+        k3 = distortion[4] if len(distortion) > 4 else 0
+
+        r2 = x_norm**2 + y_norm**2
+        r4 = r2**2
+        r6 = r4 * r2
+
+        # Radial distortion
+        radial = 1 + k1*r2 + k2*r4 + k3*r6
+
+        # Tangential distortion
+        x_dist = x_norm * radial + 2*p1*x_norm*y_norm + p2*(r2 + 2*x_norm**2)
+        y_dist = y_norm * radial + p1*(r2 + 2*y_norm**2) + 2*p2*x_norm*y_norm
+
+        # Convert back to pixel coordinates using original camera matrix
+        fx_orig, fy_orig = camera_matrix[0, 0], camera_matrix[1, 1]
+        cx_orig, cy_orig = camera_matrix[0, 2], camera_matrix[1, 2]
+
+        x_pixel = x_dist * fx_orig + cx_orig
+        y_pixel = y_dist * fy_orig + cy_orig
+
+        return np.column_stack([x_pixel, y_pixel])
+
+    def _transform_original_to_display_coords(
+        self,
+        channel: str,
+        base: str,
+        left: float,
+        top: float,
+        right: float,
+        bottom: float,
+    ) -> Tuple[float, float, float, float]:
+        """Transform bbox from original image coordinates to display coordinates.
+
+        When stereo alignment or undistort is active, the displayed image is transformed.
+        This converts annotation coords (stored in original space) to display space.
+
+        IMPORTANT: This method must be the exact inverse of _transform_display_to_original_coords
+        and must match the transformation used by overlay_workflow._transform_label_boxes.
+
+        Args:
+            channel: 'lwir' or 'visible'
+            base: Image base name
+            left, top, right, bottom: Normalized coordinates in original space [0,1]
+
+        Returns:
+            (left, top, right, bottom) in display normalized coords [0,1]
+        """
+        import numpy as np
+
+        # Check if any transform is active
+        if self._align_mode == "disabled" and not self.view_rectified:
+            return (left, top, right, bottom)
+
+        # Get alignment transform from state
+        alignment_transform = self.state.cache_data.get("_alignment_transform")
+
+        if alignment_transform is None and not self.view_rectified:
+            return (left, top, right, bottom)
+
+        # Get sizes
+        original_size = self.session.get_original_image_size(base, channel)
+        if not original_size:
+            return (left, top, right, bottom)
+
+        orig_w, orig_h = original_size
+
+        # Get display size from alignment transform
+        if alignment_transform and alignment_transform.output_size:
+            disp_w, disp_h = alignment_transform.output_size
+        else:
+            disp_w, disp_h = orig_w, orig_h
+
+        # Get camera matrices if available (for undistort)
+        cd = self.state.cache_data
+        matrices = cd.get("_matrices") or {}
+        chan_matrices = matrices.get(channel) or {}
+        camera_matrix = chan_matrices.get("camera_matrix")
+        distortion = chan_matrices.get("distortion")
+
+        # Build normalized corners array (same format as _transform_label_boxes)
+        corners_norm = np.array([
+            [left, top],
+            [right, top],
+            [right, bottom],
+            [left, bottom],
+        ], dtype=np.float32)
+
+        # Use the same complete transformation as overlay_workflow._transform_label_boxes
+        if alignment_transform:
+            if channel == "visible":
+                corners_disp = alignment_transform.transform_vis_corners_complete(
+                    corners_norm,
+                    original_size,
+                    self.view_rectified,
+                    camera_matrix,
+                    distortion,
+                )
+            else:
+                corners_disp = alignment_transform.transform_lwir_corners_complete(
+                    corners_norm,
+                    original_size,
+                    self.view_rectified,
+                    camera_matrix,
+                    distortion,
+                )
+            # corners_disp is now in output pixel coords
+        elif self.view_rectified and camera_matrix is not None and distortion is not None:
+            # Only undistort, no alignment
+            try:
+                import cv2
+                cam = np.array(camera_matrix, dtype=np.float32)
+                dist = np.array(distortion, dtype=np.float32).reshape(-1)
+                new_cam, _ = cv2.getOptimalNewCameraMatrix(
+                    cam, dist, (orig_w, orig_h), 1, (orig_w, orig_h)
+                )
+                # Denormalize to pixel coords first
+                corners_px = corners_norm.copy()
+                corners_px[:, 0] *= orig_w
+                corners_px[:, 1] *= orig_h
+                pts_reshaped = corners_px.reshape(-1, 1, 2)
+                undistorted = cv2.undistortPoints(pts_reshaped, cam, dist, P=new_cam)
+                corners_disp = undistorted.reshape(-1, 2)
+            except Exception:
+                corners_disp = corners_norm.copy()
+                corners_disp[:, 0] *= orig_w
+                corners_disp[:, 1] *= orig_h
+        else:
+            corners_disp = corners_norm.copy()
+            corners_disp[:, 0] *= orig_w
+            corners_disp[:, 1] *= orig_h
+
+        # Convert to normalized display coords
+        corners_disp = corners_disp.astype(np.float32)
+        corners_disp[:, 0] /= disp_w
+        corners_disp[:, 1] /= disp_h
+
+        # Clamp to [0, 1]
+        corners_disp = np.clip(corners_disp, 0.0, 1.0)
+
+        # Extract bbox bounds
+        new_left = float(corners_disp[:, 0].min())
+        new_right = float(corners_disp[:, 0].max())
+        new_top = float(corners_disp[:, 1].min())
+        new_bottom = float(corners_disp[:, 1].max())
+
+        return (new_left, new_top, new_right, new_bottom)
 
     def _handle_manual_box_defined(self, channel: str, left: float, top: float, right: float, bottom: float) -> None:
+        """Handle manual label box definition.
+
+        The coordinates come in DISPLAY space (potentially aligned/undistorted).
+        The dialog works in DISPLAY space for intuitive editing.
+        Transformation to ORIGINAL image coordinates happens only when saving.
+        """
+        log_debug(f"box_defined signal: channel={channel}, display_coords=({left:.3f},{top:.3f},{right:.3f},{bottom:.3f})", "MANUAL_LABEL")
         if not self._manual_label_mode:
+            log_debug("Ignored: manual_label_mode=False", "MANUAL_LABEL")
             return
         base = self._current_base()
         if not base or not self.session.dataset_path:
+            log_debug(f"Ignored: base={base}, dataset_path={self.session.dataset_path}", "MANUAL_LABEL")
             return
-        cls_value = self._prompt_label_class()
-        if not cls_value:
-            self._safe_status_message("Label entry cancelled.", 2000)
-            return
-        coords = [max(0.0, min(1.0, c)) for c in (left, top, right, bottom)]
-        left, top, right, bottom = coords
-        width = right - left
-        height = bottom - top
+
+        # Keep display coordinates for dialog (user edits what they see)
+        display_left, display_top, display_right, display_bottom = left, top, right, bottom
+
+        # Clamp coordinates to [0, 1]
+        coords = [max(0.0, min(1.0, c)) for c in (display_left, display_top, display_right, display_bottom)]
+        display_left, display_top, display_right, display_bottom = coords
+        width = display_right - display_left
+        height = display_bottom - display_top
         if width <= 0 or height <= 0:
             self._safe_status_message("Ignored zero-area box.", 2000)
             return
-        x_center = left + width / 2
-        y_center = top + height / 2
-        path = self._label_path(base, channel)
-        if not path:
+
+        x_center = display_left + width / 2
+        y_center = display_top + height / 2
+
+        if not self.label_service:
+            log_debug("No label_service available", "MANUAL_LABEL")
             return
-        resolved_cls = self.label_workflow.class_id_for_value(cls_value) if self.label_workflow else (cls_value or "")
-        if self.label_workflow and resolved_cls is None:
+
+        log_debug(f"label_service.config present: {self.label_service.config is not None}", "MANUAL_LABEL")
+
+        # Use full edit dialog for new annotations
+        from frontend.widgets.label_edit_dialog import LabelEditDialog
+
+        # Dialog works in DISPLAY coordinates (what user sees)
+        bbox = (x_center, y_center, width, height)
+
+        # Get the view for live preview
+        view = self.lwir_view if channel == "lwir" else self.vis_view
+
+        # Use VIEW size (display), not original image size
+        view_size = view.get_pixmap_size()
+        if not view_size:
+            view_size = self.session.get_original_image_size(base, channel)
+
+        # Callback for live bbox preview (in display coords)
+        def on_bbox_changed(x1: float, y1: float, x2: float, y2: float) -> None:
+            view.set_edit_highlight((x1, y1, x2, y2))
+
+        # Set initial highlight
+        on_bbox_changed(display_left, display_top, display_right, display_bottom)
+
+        try:
+            result = LabelEditDialog.new_annotation(
+                self, self.label_service.config, bbox,
+                image_size=view_size,
+                on_bbox_changed=on_bbox_changed,
+            )
+        finally:
+            # Clear highlight when dialog closes
+            view.clear_edit_highlight()
+
+        if not result:
+            self._safe_status_message("Label entry cancelled.", 2000)
+            return
+
+        cls_value = result.get("class_id")
+        display_bbox = result.get("bbox", bbox)  # In DISPLAY coordinates
+        attributes = result.get("attributes", {})
+
+        resolved_cls = self.label_service.class_id_for_value(cls_value) if cls_value else None
+        log_debug(f"Resolved class: '{cls_value}' -> '{resolved_cls}'", "MANUAL_LABEL")
+
+        if resolved_cls is None:
             QMessageBox.warning(self, "Label class", "Select a class from the list or type a valid name/id.")
             return
-        cls_id = resolved_cls or ""
-        if cls_id == "":
-            return
-        if self.label_workflow:
-            self.label_workflow.append_box(base, channel, cls_id, x_center, y_center, width, height)
+
+        # Transform display bbox to original coordinates for storage
+        dx, dy, dw, dh = display_bbox
+        display_left = dx - dw / 2
+        display_top = dy - dh / 2
+        display_right = dx + dw / 2
+        display_bottom = dy + dh / 2
+
+        orig_left, orig_top, orig_right, orig_bottom = self._transform_display_to_original_coords(
+            channel, base, display_left, display_top, display_right, display_bottom
+        )
+
+        # Convert back to center format
+        orig_width = orig_right - orig_left
+        orig_height = orig_bottom - orig_top
+        orig_x = orig_left + orig_width / 2
+        orig_y = orig_top + orig_height / 2
+
+        log_debug(f"Final original coords: center=({orig_x:.3f},{orig_y:.3f}) size=({orig_width:.3f},{orig_height:.3f})", "MANUAL_LABEL")
+
+        self.label_service.add_manual_box(
+            base, channel, resolved_cls, orig_x, orig_y, orig_width, orig_height, attributes
+        )
+        log_info(
+            f"Added manual label: {channel}/{base} class={resolved_cls} "
+            f"box=({orig_x:.3f},{orig_y:.3f},{orig_width:.3f},{orig_height:.3f}) attrs={attributes}",
+            "MANUAL_LABEL"
+        )
+
         self.invalidate_overlay_cache(base)
         self.load_current()
         self._safe_status_message(f"Added label to {channel}:{base}.", 3000)
@@ -2304,21 +2785,154 @@ class ImageViewer(QMainWindow):
         if not self._manual_label_mode:
             return
         base = self._current_base()
-        if not base or not self.session.dataset_path or not self.label_workflow:
+        if not base or not self.session.dataset_path:
             return
-        target = self.label_workflow.find_label_display_at(base, channel, x_norm, y_norm)
-        if not target:
-            self._safe_status_message("No label near click to delete.", 2000)
-            return
-        cls_display = target
+
+        # Build context menu
         menu = QMenu(self)
-        delete_action = menu.addAction(f"Delete label {cls_display}")
+
+        # Check if there's an annotation near click
+        annotation = None
+        if self.label_service:
+            result = self.label_service.find_annotation_at(base, channel, x_norm, y_norm)
+            if result:
+                _, annotation = result
+
+        if annotation:
+            # Format display name
+            cls_name = annotation.class_id
+            if self.label_service and self.label_service.config:
+                cls_def = self.label_service.config.classes.get(annotation.class_id)
+                if cls_def:
+                    cls_name = cls_def.name
+            cls_display = f"{annotation.class_id}: {cls_name}" if annotation.class_id != cls_name else cls_name
+
+            edit_action = menu.addAction(f"Edit label {cls_display}")
+            delete_action = menu.addAction(f"Delete label {cls_display}")
+            menu.addSeparator()
+        else:
+            edit_action = None
+            delete_action = None
+
+        exit_mode_action = menu.addAction("Exit manual labelling mode")
+        if exit_mode_action:
+            exit_mode_action.setShortcut("Ctrl+L")
+            exit_mode_action.setShortcutVisibleInContextMenu(True)
+        menu.addSeparator()
+        menu.addAction("Cancel")
+
         chosen = menu.exec(global_pos)
-        if chosen is delete_action:
-            removed = self.label_workflow.delete_box_at(base, channel, x_norm, y_norm)
+
+        if chosen is edit_action and annotation:
+            self._edit_annotation(base, channel, annotation)
+        elif chosen is delete_action and annotation and self.label_service:
+            removed = self.label_service.delete_annotation_at(base, channel, x_norm, y_norm)
             if removed:
                 self.invalidate_overlay_cache(base)
                 self.load_current()
+                cls_display = f"{annotation.class_id}"
+                self._safe_status_message(f"Deleted label {cls_display}.", 2000)
+        elif chosen is exit_mode_action:
+            self._toggle_manual_label_mode(False)
+
+    def _edit_annotation(self, base: str, channel: str, annotation) -> None:
+        """Open dialog to edit an existing annotation.
+
+        Annotation bbox is stored in ORIGINAL coords, but we display/edit in DISPLAY coords.
+        """
+        from frontend.widgets.label_edit_dialog import LabelEditDialog
+
+        if not self.label_service:
+            return
+
+        config = self.label_service.config
+
+        # Get the view for the channel being edited
+        view = self.lwir_view if channel == "lwir" else self.vis_view
+
+        # Use VIEW size (display), not original image size
+        view_size = view.get_pixmap_size()
+        if not view_size:
+            view_size = self.session.get_original_image_size(base, channel)
+
+        # Transform annotation bbox from ORIGINAL to DISPLAY coords
+        orig_bbox = annotation.bbox  # (x_center, y_center, width, height) in original coords
+        ox, oy, ow, oh = orig_bbox
+        orig_left = ox - ow / 2
+        orig_top = oy - oh / 2
+        orig_right = ox + ow / 2
+        orig_bottom = oy + oh / 2
+
+        disp_left, disp_top, disp_right, disp_bottom = self._transform_original_to_display_coords(
+            channel, base, orig_left, orig_top, orig_right, orig_bottom
+        )
+
+        # Convert to center format for dialog
+        disp_w = disp_right - disp_left
+        disp_h = disp_bottom - disp_top
+        disp_x = disp_left + disp_w / 2
+        disp_y = disp_top + disp_h / 2
+        display_bbox = (disp_x, disp_y, disp_w, disp_h)
+
+        # Callback for live bbox preview (in display coords)
+        def on_bbox_changed(x1: float, y1: float, x2: float, y2: float) -> None:
+            view.set_edit_highlight((x1, y1, x2, y2))
+
+        # Set initial highlight
+        on_bbox_changed(disp_left, disp_top, disp_right, disp_bottom)
+
+        # Create a modified annotation with display bbox for the dialog
+        import dataclasses
+        display_annotation = dataclasses.replace(annotation, bbox=display_bbox)
+
+        try:
+            result = LabelEditDialog.edit_annotation(
+                self, config, display_annotation,
+                image_size=view_size,
+                on_bbox_changed=on_bbox_changed,
+            )
+        finally:
+            # Clear highlight when dialog closes
+            view.clear_edit_highlight()
+
+        if result:
+            new_class_id = result.get("class_id")
+            new_display_bbox = result.get("bbox")  # In DISPLAY coordinates
+            new_attrs = result.get("attributes", {})
+
+            # Transform display bbox back to original coordinates for storage
+            if new_display_bbox:
+                dx, dy, dw, dh = new_display_bbox
+                disp_left = dx - dw / 2
+                disp_top = dy - dh / 2
+                disp_right = dx + dw / 2
+                disp_bottom = dy + dh / 2
+
+                orig_left, orig_top, orig_right, orig_bottom = self._transform_display_to_original_coords(
+                    channel, base, disp_left, disp_top, disp_right, disp_bottom
+                )
+
+                # Convert back to center format
+                new_orig_w = orig_right - orig_left
+                new_orig_h = orig_bottom - orig_top
+                new_orig_x = orig_left + new_orig_w / 2
+                new_orig_y = orig_top + new_orig_h / 2
+                new_bbox = (new_orig_x, new_orig_y, new_orig_w, new_orig_h)
+            else:
+                new_bbox = None
+
+            # Update the annotation
+            if self.label_service.update_annotation(
+                base, channel, annotation.annotation_id, new_class_id, new_attrs, new_bbox
+            ):
+                self.invalidate_overlay_cache(base)
+                self.load_current()
+                self._safe_status_message(f"Updated label to class {new_class_id}.", 2000)
+
+    def _toggle_manual_label_mode(self, enabled: bool) -> None:
+        """Toggle manual labelling mode programmatically."""
+        if hasattr(self.ui, "action_label_manual_mode"):
+            self.ui.action_label_manual_mode.setChecked(enabled)
 
     def _handle_label_current(self) -> None:
         if not require_images(self, "Labelling"):
@@ -2326,41 +2940,55 @@ class ImageViewer(QMainWindow):
         base = self._current_base()
         if not base:
             return
-        if not self._ensure_label_controller():
+        if not self._ensure_label_service() or not self.label_service:
             QMessageBox.information(self, "Labelling", "Configure a model and labels YAML first.")
+            return
+        if not self.label_service.has_detector:
+            QMessageBox.information(self, "Labelling", "Configure a detection model first.")
             return
         img_path = self._label_image_path(base)
         if not img_path or not img_path.exists():
             QMessageBox.information(self, "Labelling", "No image available for the selected channel.")
             return
-        if self.labeling_controller is None:
-            return
         channel = self._label_channel()
-        boxes = self.labeling_controller.run_single(base, channel, img_path)
-        self._safe_status_message(f"Saved {len(boxes)} labels for {channel}:{base}.", 3000)
+        import cv2
+        image = cv2.imread(str(img_path))
+        if image is None:
+            QMessageBox.warning(self, "Labelling", "Failed to load image.")
+            return
+        annotations = self.label_service.auto_detect(base, channel, image)
+        self._safe_status_message(f"Detected {len(annotations)} objects for {channel}:{base}.", 3000)
         self.invalidate_overlay_cache(base)
         self.load_current()
 
     def _handle_label_dataset(self) -> None:
         if not require_images(self, "Labelling"):
             return
-        if not self._ensure_label_controller():
+        if not self._ensure_label_service() or not self.label_service:
             QMessageBox.information(self, "Labelling", "Configure a model and labels YAML first.")
             return
+        if not self.label_service.has_detector:
+            QMessageBox.information(self, "Labelling", "Configure a detection model first.")
+            return
         loader = self.session.loader
-        if loader is None or self.labeling_controller is None:
+        if loader is None:
             return
         channel = self._label_channel()
         total = self.session.total_pairs()
         done = 0
+        import cv2
         for base in list(loader.image_bases):
             img_path = loader.get_image_path(base, channel)
             if not img_path or not img_path.exists():
                 continue
-            boxes = self.labeling_controller.run_single(base, channel, img_path)
+            image = cv2.imread(str(img_path))
+            if image is None:
+                continue
+            self.label_service.auto_detect(base, channel, image)
             done += 1
             if done % 10 == 0:
                 self._safe_status_message(f"Labelled {done}/{total} images…", 2000)
+        self.label_service.save_all()
         self._safe_status_message(f"Labelling finished for channel {channel} ({done}/{total}).", 4000)
         self.invalidate_overlay_cache()
         self.load_current()
@@ -2371,8 +2999,8 @@ class ImageViewer(QMainWindow):
             return
         if not self.session.dataset_path:
             return
-        if self.label_workflow:
-            self.label_workflow.clear_labels(base)
+        if self.label_service:
+            self.label_service.clear_labels(base)
         self.invalidate_overlay_cache(base)
         self.load_current()
         self._safe_status_message("Labels cleared for current image.", 3000)
@@ -2451,24 +3079,31 @@ class ImageViewer(QMainWindow):
         self.overlay_workflow.invalidate(base)
 
     def _read_label_boxes(self, base: str, channel: str) -> List[Tuple[str, float, float, float, float, QColor]]:
-        if not self.label_workflow:
+        """Get direct labels for a channel (not projected).
+
+        Note: Returns 6-tuple without is_projected flag.
+        The OverlayOrchestrator adds the flag and handles projection.
+        """
+        if not self.label_service:
             return []
-        return self.label_workflow.read_overlay_boxes(base, channel)
+        overlay_boxes = self.label_service.get_overlay_boxes(base, channel)
+        # Convert (r,g,b) tuple to QColor
+        return [(display, x, y, w, h, QColor(r, g, b)) for display, x, y, w, h, (r, g, b) in overlay_boxes]
 
     def _label_signature(
         self,
         base: str,
         channel: str,
-        boxes: List[Tuple[str, float, float, float, float, QColor]],
+        boxes: List[Tuple[str, float, float, float, float, QColor]],  # noqa: ARG002
     ) -> Optional[Tuple[Any, ...]]:
-        if not self.label_workflow:
+        if not self.label_service:
             return None
-        return self.label_workflow.label_signature(base, channel, boxes)
+        return self.label_service.label_signature(base, channel)
 
     def _label_path(self, base: str, channel: str) -> Optional[Path]:
-        if not self.session.dataset_path or not self.label_workflow:
+        if not self.session.dataset_path or not self.label_service:
             return None
-        return self.label_workflow.label_path(base, channel)
+        return self.label_service.label_file_path(base, channel)
 
     # ============================================================================
     # CACHE & STATE MANAGEMENT
@@ -3049,6 +3684,11 @@ class ImageViewer(QMainWindow):
         # Flush any pending handler changes before shutdown
         get_handler_registry().flush_all()
 
+        log_info("Saving label service data...", "VIEWER")
+        # Save any pending label changes
+        if self.label_service:
+            self.label_service.shutdown()
+
         log_info("Shutting down background tasks...", "VIEWER")
         self._shutdown_background_tasks()
 
@@ -3357,6 +3997,19 @@ class ImageViewer(QMainWindow):
         config = get_config()
         return self.session.dataset_path / config.calibration_extrinsic_filename
 
+    def _get_dataset_paths_for_calibration_dialog(self) -> Optional[List[str]]:
+        """Get dataset paths for calibration dialog, showing children for collections."""
+        if not self.session.dataset_path:
+            return None
+        # For collections, show collection name with child datasets
+        if self.session.collection:
+            child_names = sorted(self.session.collection._child_dirs.keys())
+            if child_names:
+                collection_name = self.session.dataset_path.name
+                return [f"{collection_name} ({', '.join(child_names)})"]
+        # For standalone dataset, just show path
+        return [str(self.session.dataset_path)]
+
     def _handle_show_calibration_dialog(self) -> None:
         if not require_dataset(self, "Calibration"):
             return
@@ -3366,7 +4019,7 @@ class ImageViewer(QMainWindow):
             self.state.cache_data["_extrinsic"],
             intrinsic_path=self._calibration_intrinsic_path(),
             extrinsic_path=self._calibration_extrinsic_path(),
-            dataset_paths=[str(self.session.dataset_path)] if self.session.dataset_path else None,
+            dataset_paths=self._get_dataset_paths_for_calibration_dialog(),
         )
         dialog.setModal(False)
         dialog.setWindowModality(Qt.WindowModality.NonModal)
@@ -3385,7 +4038,7 @@ class ImageViewer(QMainWindow):
             self.state.cache_data["_extrinsic"],
             intrinsic_path=self._calibration_intrinsic_path(),
             extrinsic_path=self._calibration_extrinsic_path(),
-            dataset_paths=[str(self.session.dataset_path)] if self.session.dataset_path else None,
+            dataset_paths=self._get_dataset_paths_for_calibration_dialog(),
         )
 
     def _handle_rectified_toggle(self, enabled: bool) -> None:
@@ -3687,8 +4340,8 @@ class ImageViewer(QMainWindow):
         self.invalidate_overlay_cache()
         self.progress_tracker.clear()
         self._reset_queue_progress_state()
-        if self.label_workflow:
-            self.label_workflow.clear_cache()
+        if self.label_service:
+            self.label_service.clear_cache()
         self._manual_label_mode = False
         self._update_labeling_views()
         self._sync_action_states()
@@ -3698,8 +4351,8 @@ class ImageViewer(QMainWindow):
         self.progress_tracker.clear()
 
     def _on_class_map_updated(self) -> None:
-        if self.label_workflow:
-            self.label_workflow.clear_cache()
+        if self.label_service:
+            self.label_service.clear_cache()
         self.invalidate_overlay_cache()
         if self.session.has_images():
             self.load_current()

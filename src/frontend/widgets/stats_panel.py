@@ -51,27 +51,27 @@ class StatsPanel(QWidget):
         grid.setContentsMargins(8, 6, 8, 8)
         grid.setHorizontalSpacing(16)
         grid.setVerticalSpacing(4)
-        # Row 0: Incomplete pairs (spans full width)
-        self.label_missing_pairs = QLabel("Incomplete pairs: LWIR 0 · Visible 0")
-        # Row 1: Manual marks | Manual calibration | Outliers
+        # Row 0: Manual marks | Manual calibration | Outliers
         self.label_marked = QLabel("Manual marks: 0")
         self.label_calibration_manual = QLabel("Manual calibration: 0 (both: 0, partial: 0, none: 0)")
         self.label_outliers_manual = QLabel("Outliers: 0")
-        # Row 2: Auto marks | Auto calibration | Outliers
+        # Row 1: Auto marks | Auto calibration | Outliers
         self.label_detected = QLabel("Auto marks: 0")
         self.label_calibration_auto = QLabel("Auto calibration: 0 (both: 0, partial: 0, none: 0)")
         self.label_outliers_auto = QLabel("Outliers: 0")
-        # Row 3: Intrinsic reprojection | Stereo consistency
-        self.label_intrinsic_errors = QLabel("Intrinsic reprojection: LWIR –; Visible –")
-        self.label_extrinsic_errors = QLabel("Stereo consistency: –")
+        # Row 2: Calibration RMS results
+        self.label_calibration_rms = QLabel("Calibration RMS: LWIR –; Visible –; Stereo –")
+        # Row 3: Intrinsic reprojection | Stereo consistency (per-image max)
+        self.label_intrinsic_errors = QLabel("Max per-image error: LWIR –; Visible –")
+        self.label_extrinsic_errors = QLabel("Stereo max: –")
         for label in (
-            self.label_missing_pairs,
             self.label_marked,
             self.label_calibration_manual,
             self.label_outliers_manual,
             self.label_detected,
             self.label_calibration_auto,
             self.label_outliers_auto,
+            self.label_calibration_rms,
             self.label_intrinsic_errors,
             self.label_extrinsic_errors,
         ):
@@ -80,17 +80,17 @@ class StatsPanel(QWidget):
                 Qt.TextInteractionFlag.TextSelectableByMouse
                 | Qt.TextInteractionFlag.TextSelectableByKeyboard
             )
-        # Row 0: Incomplete pairs (full width)
-        grid.addWidget(self.label_missing_pairs, 0, 0, 1, 3)
-        # Row 1: Manual row
-        grid.addWidget(self.label_marked, 1, 0)
-        grid.addWidget(self.label_calibration_manual, 1, 1)
-        grid.addWidget(self.label_outliers_manual, 1, 2)
-        # Row 2: Auto row
-        grid.addWidget(self.label_detected, 2, 0)
-        grid.addWidget(self.label_calibration_auto, 2, 1)
-        grid.addWidget(self.label_outliers_auto, 2, 2)
-        # Row 3: Errors
+        # Row 0: Manual row
+        grid.addWidget(self.label_marked, 0, 0)
+        grid.addWidget(self.label_calibration_manual, 0, 1)
+        grid.addWidget(self.label_outliers_manual, 0, 2)
+        # Row 1: Auto row
+        grid.addWidget(self.label_detected, 1, 0)
+        grid.addWidget(self.label_calibration_auto, 1, 1)
+        grid.addWidget(self.label_outliers_auto, 1, 2)
+        # Row 2: Calibration RMS (full width)
+        grid.addWidget(self.label_calibration_rms, 2, 0, 1, 3)
+        # Row 3: Per-image errors
         grid.addWidget(self.label_intrinsic_errors, 3, 0, 1, 2)
         grid.addWidget(self.label_extrinsic_errors, 3, 2)
         grid.setColumnStretch(0, 1)
@@ -100,13 +100,13 @@ class StatsPanel(QWidget):
         content_layout.addLayout(grid)
         root.addWidget(content)
 
-    def update_from_state(
+    def _update_from_state(
         self,
         state: ViewerState,
         total_pairs: int,
-        missing_counts: Optional[Dict[str, int]] = None,
         intrinsic_errors: Optional[Dict[str, Dict[str, float]]] = None,
         extrinsic_errors: Optional[Dict[str, float]] = None,
+        calibration_rms: Optional[Dict[str, Optional[float]]] = None,
     ) -> None:
         breakdown = self._compute_mark_breakdown(state)
         manual_marked = breakdown.get("manual_total", 0)
@@ -158,14 +158,7 @@ class StatsPanel(QWidget):
         outliers_visible = len(state.calibration_outliers_intrinsic.get("visible", set()))
         outliers_stereo = len(state.calibration_outliers_extrinsic)
 
-        # Missing pairs
-        missing_lwir = missing_counts.get("lwir", 0) if missing_counts else 0
-        missing_visible = missing_counts.get("visible", 0) if missing_counts else 0
-
         # Update labels (using HTML for bold titles)
-        self.label_missing_pairs.setText(
-            f"<b>Incomplete pairs:</b> LWIR {missing_lwir} · Visible {missing_visible}"
-        )
         self.label_marked.setText(
             f"<b>Manual marks:</b> {manual_marked} "
             f"({reason_text(REASON_USER)}: {manual_delete}, "
@@ -194,12 +187,12 @@ class StatsPanel(QWidget):
         self.label_outliers_auto.setText(
             f"<b>Outliers:</b> Stereo {outliers_stereo}"
         )
+        self._update_calibration_rms(calibration_rms)
         self._update_intrinsic_errors(intrinsic_errors)
         self._update_extrinsic_errors(extrinsic_errors)
 
     def update_stats(self, session, state: ViewerState) -> None:
-        """Compatibility wrapper: pull missing counts/errors from session and delegate to update_from_state."""
-        missing_counts = getattr(state, "missing_counts", None)
+        """Compatibility wrapper: pull errors from state and delegate to update_from_state."""
         intrinsic_errors = state.cache_data["reproj_errors"]
         extrinsic_errors = state.cache_data["extrinsic_errors"]
         total_pairs = session.total_pairs() if session else 0
@@ -217,7 +210,23 @@ class StatsPanel(QWidget):
                 f" auto={auto_counts}",
                 "STATS",
             )
-        self.update_from_state(state, total_pairs, missing_counts, intrinsic_errors, extrinsic_errors)
+        # Extract RMS from matrices for calibration result display
+        matrices = state.cache_data.get("_matrices") or {}
+        extrinsic = state.cache_data.get("_extrinsic") or {}
+        # Safe extraction: matrices[channel] may be None or dict
+        lwir_mat = matrices.get("lwir")
+        vis_mat = matrices.get("visible")
+        calibration_rms = {
+            "lwir": lwir_mat.get("reprojection_error") if isinstance(lwir_mat, dict) else None,
+            "visible": vis_mat.get("reprojection_error") if isinstance(vis_mat, dict) else None,
+            "stereo": extrinsic.get("reprojection_error") if isinstance(extrinsic, dict) else None,
+        }
+        if is_debug_enabled("stats"):
+            log_debug(
+                f"stats:rms lwir={calibration_rms['lwir']} vis={calibration_rms['visible']} stereo={calibration_rms['stereo']}",
+                "STATS",
+            )
+        self._update_from_state(state, total_pairs, intrinsic_errors, extrinsic_errors, calibration_rms)
 
     def _compute_mark_breakdown(self, state: ViewerState) -> Dict[str, int]:
         if hasattr(state, "breakdown_marks"):
@@ -226,19 +235,32 @@ class StatsPanel(QWidget):
         return {}
 
     def reset(self) -> None:
-        self.label_missing_pairs.setText("<b>Incomplete pairs:</b> LWIR 0 · Visible 0")
         self.label_marked.setText("<b>Manual marks:</b> 0")
         self.label_calibration_manual.setText("<b>Manual calibration:</b> 0 (both: 0, partial: 0, none: 0)")
         self.label_outliers_manual.setText("<b>Outliers:</b> LWIR 0, Visible 0")
         self.label_detected.setText("<b>Auto marks:</b> 0")
         self.label_calibration_auto.setText("<b>Auto calibration:</b> 0 (both: 0, partial: 0, none: 0)")
         self.label_outliers_auto.setText("<b>Outliers:</b> Stereo 0")
-        self.label_intrinsic_errors.setText("<b>Intrinsic reprojection:</b> LWIR –; Visible –")
-        self.label_extrinsic_errors.setText("<b>Stereo consistency:</b> –")
+        self.label_calibration_rms.setText("<b>Calibration RMS:</b> LWIR –; Visible –; Stereo –")
+        self.label_intrinsic_errors.setText("<b>Max per-image error:</b> LWIR –; Visible –")
+        self.label_extrinsic_errors.setText("<b>Stereo max:</b> –")
+
+    def _update_calibration_rms(self, rms: Optional[Dict[str, Optional[float]]]) -> None:
+        if not rms:
+            self.label_calibration_rms.setText("<b>Calibration RMS:</b> LWIR –; Visible –; Stereo –")
+            return
+        parts = []
+        for key, label in [("lwir", "LWIR"), ("visible", "Visible"), ("stereo", "Stereo")]:
+            val = rms.get(key)
+            if val is not None:
+                parts.append(f"{label} {val:.3f} px")
+            else:
+                parts.append(f"{label} –")
+        self.label_calibration_rms.setText("<b>Calibration RMS:</b> " + "; ".join(parts))
 
     def _update_intrinsic_errors(self, errors: Optional[Dict[str, Dict[str, float]]]) -> None:
         if not errors:
-            self.label_intrinsic_errors.setText("<b>Intrinsic reprojection:</b> LWIR –; Visible –")
+            self.label_intrinsic_errors.setText("<b>Max per-image error:</b> LWIR –; Visible –")
             return
         parts = []
         for channel in ("lwir", "visible"):
@@ -248,13 +270,21 @@ class StatsPanel(QWidget):
                 parts.append(f"{channel.upper()} max: {worst_err:.2f} px ({worst_base})")
             else:
                 parts.append(f"{channel.upper()}: –")
-        self.label_intrinsic_errors.setText("<b>Intrinsic reprojection:</b> " + "; ".join(parts))
+        self.label_intrinsic_errors.setText("<b>Max per-image error:</b> " + "; ".join(parts))
 
     def _update_extrinsic_errors(self, errors: Optional[Dict[str, float]]) -> None:
         if not errors:
-            self.label_extrinsic_errors.setText("<b>Stereo consistency:</b> –")
+            self.label_extrinsic_errors.setText("<b>Stereo max:</b> –")
             return
-        worst_base, worst_err = max(errors.items(), key=lambda item: item[1])
+        # Filter to only numeric values (skip any malformed entries)
+        numeric_errors = {
+            base: err for base, err in errors.items()
+            if isinstance(err, (int, float))
+        }
+        if not numeric_errors:
+            self.label_extrinsic_errors.setText("<b>Stereo max:</b> –")
+            return
+        worst_base, worst_err = max(numeric_errors.items(), key=lambda item: item[1])
         self.label_extrinsic_errors.setText(
-            f"<b>Stereo consistency:</b> max dT {worst_err:.2f} (squares) at {worst_base}"
+            f"<b>Stereo max:</b> dT {worst_err:.2f} (squares) at {worst_base}"
         )

@@ -1,0 +1,316 @@
+# Multiespectral Urban Dataset - Label Configuration
+# Version: 1.0.0
+#
+# This configuration defines the labeling schema for multiespectral (LWIR + Visible)
+# urban detection datasets. It separates Permanent Infrastructure from Dynamic Agents
+# and includes universal + class-specific attributes for bias analysis.
+
+schema_version: "1.0.0"
+
+dataset_meta:
+  name: multiespectral_urban_dataset
+  description: >
+    Optimized urban detection schema. Separates Permanent Infrastructure from Dynamic Agents.
+    Includes universal attributes for cross-category analysis and specific attributes for
+    different classes to check for bias or handle complexity of certain situations
+    (changes in vegetation, different types of vehicles, etc.).
+  bbox_format: normalized_center_xywh  # [x_center, y_center, width, height] all in [0,1]
+
+# Universal attributes applied to ALL annotations
+universal_attrs:
+  source:
+    type: enum
+    options: [auto, reviewed, manual]
+    description: >
+      Origin of the annotation:
+      - auto: Suggested by detection model, not yet reviewed
+      - reviewed: Auto-detected but manually reviewed and accepted
+      - manual: Manually created from scratch (e.g., user drew the bbox)
+  confidence:
+    type: float
+    range: [0, 1]
+    description: Detection confidence score (from model if auto/reviewed)
+  occlusion:
+    type: enum
+    options: [none, partial, heavy]
+    description: Level of occlusion
+  truncation:
+    type: bool
+    description: Whether the object is truncated at image boundary
+
+# --------------------#
+#  CLASS DEFINITIONS  #
+# --------------------#
+
+classes:
+  # -----------------------------------------------------------#
+  #  GROUP 1: Dynamic Objects (objects that move or can move)  #
+  # -----------------------------------------------------------#
+
+  - id: 1
+    name: person
+    description: Any human. Includes riders, pedestrians, workers, etc.
+    group: dynamic
+    aliases: [pedestrian, human, people]
+    attributes:
+      role:
+        type: enum
+        options: [pedestrian, rider, worker]
+      age_group:
+        type: enum
+        options: [adult, child]
+      activity:
+        type: enum
+        options: [standing, walking, sitting, cycling, running, lying]
+      perceived_gender:
+        type: enum
+        options: [male, female, unknown]
+  - id: 2
+    name: car
+    group: dynamic
+    aliases: [vehicle, automobile]
+    attributes:
+      type:
+        type: enum
+        options: [sedan, suv, van, hatchback, pickup, coupe, utility, unknown]
+        description: utility includes similar small utility vehicles for paths/terrain
+      special_service:
+        type: enum
+        options: [none, taxi, police, ambulance, vtc]
+      state:
+        type: enum
+        options: [moving, stopped, parked]
+
+  - id: 3
+    name: heavy_vehicle
+    group: dynamic
+    aliases: [bus, truck, lorry]
+    attributes:
+      class:
+        type: enum
+        options: [bus, truck, construction, mobile_crane]
+      special_service:
+        type: enum
+        options: [none, fire_dept, ambulance, police, military]
+      state:
+        type: enum
+        options: [moving, stopped, parked]
+
+  - id: 4
+    name: cycle
+    description: Bicycles and Motorcycles (2-wheelers)
+    group: dynamic
+    aliases: [bicycle, motorcycle, motorbike, bike]
+    attributes:
+      propulsion:
+        type: enum
+        options: [bicycle, motorcycle, scooter]
+      state:
+        type: enum
+        options: [moving, stopped, parked, fallen]
+      rider_attached:
+        type: bool
+
+  - id: 5
+    name: personal_mobility
+    description: Wheelchairs, strollers, walkers
+    group: dynamic
+    attributes:
+      type:
+        type: enum
+        options: [wheelchair, stroller, walker]
+      user_visible:
+        type: bool
+
+  - id: 6
+    name: animal
+    group: dynamic
+    aliases: [dog, cat, bird]
+    attributes:
+      type:
+        type: enum
+        options: [dog, cat, bird, wildlife]
+      restrained:
+        type: bool
+        description: Whether the animal appears restrained (leash, cage, etc.)
+
+  - id: 7
+    name: loose_object
+    description: >
+      Portable objects that don't belong to the map. Can be labeled even when
+      carried by a person (use 'carried' attribute to distinguish).
+    group: dynamic
+    aliases: [backpack, handbag, suitcase, cart]
+    attributes:
+      type:
+        type: enum
+        options: [trash_bag, box, cone, debris, bag, cart, trolley]
+        description: bag covers backpacks, handbags, suitcases, etc.
+      carried:
+        type: bool
+        description: Whether the object is being carried/worn by a person
+      location:
+        type: enum
+        options: [road, sidewalk, terrain]
+
+  - id: 8
+    name: emergency_vehicle
+    description: Emergency service vehicles with priority (lights/sirens)
+    group: dynamic
+    aliases: [police_car, ambulance, fire_truck]
+    attributes:
+      service:
+        type: enum
+        options: [police, ambulance, fire_dept, civil_protection]
+      lights_active:
+        type: bool
+        description: Whether emergency lights are visibly active
+      state:
+        type: enum
+        options: [moving, stopped]
+
+  - id: 9
+    name: construction_element
+    description: Temporary construction/works elements
+    group: dynamic
+    aliases: [scaffolding, construction_barrier]
+    attributes:
+      type:
+        type: enum
+        options: [scaffolding, container, portable_fence, excavation, machinery]
+      location:
+        type: enum
+        options: [road, sidewalk, building]
+
+  # -----------------------------------------------------#
+  #  GROUP 2: Infrastructure (permanent static objects)  #
+  # -----------------------------------------------------#
+
+  - id: 10
+    name: traffic_light
+    group: infrastructure
+    aliases: [traffic light, stoplight]
+    attributes:
+      state:
+        type: enum
+        options: [red, yellow, green, off, flashing]
+      type:
+        type: enum
+        options: [vehicle, pedestrian, bicycle]
+      shape:
+        type: enum
+        options: [circle, arrow]
+
+  - id: 11
+    name: traffic_sign
+    description: Vertical fixed signage
+    group: infrastructure
+    aliases: [stop sign, stop_sign]
+    attributes:
+      shape:
+        type: enum
+        options: [circle, triangle, square, octagon, rectangle]
+      category:
+        type: enum
+        options: [stop, yield, warning, limit, prohibition, info, electronic_vms]
+        description: VMS = Variable Message Sign (electronic display)
+      cleanliness:
+        type: enum
+        options: [clean, dirty_graffiti]
+
+  - id: 12
+    name: street_furniture
+    description: Fixed objects on sidewalk
+    group: infrastructure
+    aliases: [bench, parking meter, parking_meter, fire hydrant, fire_hydrant]
+    attributes:
+      type:
+        type: enum
+        options: [bench, trash_bin, lamp_post, utility_pole, parking_meter, bus_shelter, ad_panel, bike_rack]
+      condition:
+        type: enum
+        options: [good, damaged]
+
+  - id: 13
+    name: barrier
+    description: Objects designed to block path
+    group: infrastructure
+    attributes:
+      type:
+        type: enum
+        options: [fence, bollard, guardrail, jersey_barrier]
+      material:
+        type: enum
+        options: [metal, concrete, plastic]
+
+  - id: 14
+    name: vegetation
+    description: >
+      Vegetation elements. Split trunks and canopies for better localization handling.
+    group: infrastructure
+    attributes:
+      type:
+        type: enum
+        options: [tree_trunk, tree_canopy, hedge, bush]
+      foliage_state:
+        type: enum
+        options: [bare, sparse, dense, blooming]
+        description: "bare=winter/dead, dense=summer/evergreen"
+  - id: 15
+    name: doorway
+    description: >
+      Door and entrances to buildings.
+    group: infrastructure
+    attributes:
+      state:
+        type: enum
+        options: [open, closed, blocked]
+      material:
+        type: enum
+        options: [wood, metal, glass, composite]
+
+  - id: 16
+    name: road_marking
+    description: Painted markings on road surface
+    group: infrastructure
+    attributes:
+      type:
+        type: enum
+        options: [crosswalk, stop_line, lane_arrow, lane_line, bike_lane, parking_spot]
+      visibility:
+        type: enum
+        options: [clear, faded, obscured]
+        description: How visible/readable is the marking
+
+
+  # -------------------------------------------#
+  #  GROUP 3: Specific Bremen Dataset classes  #
+  # -------------------------------------------#
+
+  - id: 17
+    name: soil_probe
+    description: >
+      Lance/probe instrument used for taking soil samples.
+    group: bremen_specific
+    aliases: [lance, probe, sampling_lance]
+    attributes:
+      position:
+        type: enum
+        options: [on_support, in_ground, handheld, lying]
+        description: >
+          on_support: mounted on lance_support structure
+          in_ground: inserted into soil for sampling
+          handheld: being carried/used by person
+          lying: on the ground, not in use
+
+  - id: 18
+    name: probe_support
+    description: >
+      Support/holder structure for soil probes. Can hold multiple probes (up to 4).
+    group: bremen_specific
+    aliases: [lance_support, probe_holder, lance_rack]
+    attributes:
+      probe_count:
+        type: enum
+        options: ["0", "1", "2", "3", "4"]
+        description: Number of probes currently mounted on the support

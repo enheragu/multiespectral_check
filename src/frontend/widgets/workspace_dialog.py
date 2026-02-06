@@ -544,6 +544,77 @@ class WorkspacePanel(QWidget):
             self.workspace_manager.flush_all()
         super().closeEvent(event)
 
+    def resizeEvent(self, event) -> None:
+        """Recalculate column widths when window is resized."""
+        super().resizeEvent(event)
+        self._adjust_column_widths()
+
+    def _adjust_column_widths(self) -> None:
+        """Calculate optimal column widths to fit window, wrapping long text columns if needed.
+
+        Strategy:
+        1. Calculate ideal width for each column based on content
+        2. If total exceeds available width, shrink the "wrappable" columns proportionally
+        3. Wrappable columns: Delete Reasons (3), Tagged to delete (4), Calibration (5)
+        """
+        header = self.table.horizontalHeader()
+        if header is None or self.table.rowCount() == 0:
+            return
+
+        # Available width (table viewport minus scrollbar and margins)
+        available = self.table.viewport().width() - 4
+
+        # Columns that can wrap (indices)
+        wrappable_cols = {3, 4, 5}  # Delete Reasons, Tagged to delete, Calibration
+        min_col_width = 80  # Minimum width for any column
+
+        # Calculate ideal widths based on content
+        ideal_widths = []
+        for col in range(self.table.columnCount()):
+            # Get max content width for this column
+            max_width = header.sectionSizeHint(col)
+            for row in range(self.table.rowCount()):
+                item = self.table.item(row, col)
+                if item:
+                    # Estimate width from text (rough approximation)
+                    text_width = len(item.text()) * 7 + 20  # ~7px per char + padding
+                    max_width = max(max_width, text_width)
+            ideal_widths.append(max_width)
+
+        total_ideal = sum(ideal_widths)
+
+        if total_ideal <= available:
+            # Everything fits - use ideal widths, distribute extra to last column
+            for col, width in enumerate(ideal_widths):
+                header.resizeSection(col, width)
+            # Give extra space to last column
+            extra = available - total_ideal
+            if extra > 0:
+                header.resizeSection(6, ideal_widths[6] + extra)
+        else:
+            # Need to shrink wrappable columns
+            # First, calculate fixed columns total
+            fixed_total = sum(w for i, w in enumerate(ideal_widths) if i not in wrappable_cols)
+            wrappable_total = sum(w for i, w in enumerate(ideal_widths) if i in wrappable_cols)
+
+            # Space available for wrappable columns
+            space_for_wrappable = max(available - fixed_total, len(wrappable_cols) * min_col_width)
+
+            # Distribute proportionally based on ideal widths
+            for col in range(self.table.columnCount()):
+                if col in wrappable_cols:
+                    if wrappable_total > 0:
+                        ratio = ideal_widths[col] / wrappable_total
+                        new_width = max(int(space_for_wrappable * ratio), min_col_width)
+                    else:
+                        new_width = min_col_width
+                    header.resizeSection(col, new_width)
+                else:
+                    header.resizeSection(col, ideal_widths[col])
+
+        # Force row heights to recalculate after column width changes
+        self.table.resizeRowsToContents()
+
     def set_workspace_dir(self, workspace_dir: Path, *, force_refresh: bool = False) -> None:
         same = self.workspace_dir == workspace_dir
         self.workspace_dir = workspace_dir
@@ -593,7 +664,7 @@ class WorkspacePanel(QWidget):
         header_row.addWidget(self.open_button)
         layout.addLayout(header_row)
 
-        self.table = QTableWidget(0, 8, self)  # 8 columns now (added Patterns)
+        self.table = QTableWidget(0, 7, self)  # 7 columns
         self.table.setHorizontalHeaderLabels([
             "Dataset",
             "Pairs",
@@ -601,18 +672,20 @@ class WorkspacePanel(QWidget):
             "Delete Reasons",
             "Tagged to delete",
             "Calibration",
-            "Patterns",  # NEW COLUMN
             "Sweeps",
         ])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setWordWrap(True)  # Enable text wrapping for long columns
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)  # Fit to window
         self.table.itemSelectionChanged.connect(self._handle_selection_changed)
         copy_shortcut = QShortcut(QKeySequence.StandardKey.Copy, self.table)
         copy_shortcut.activated.connect(self._copy_selected_row)
         header = self.table.horizontalHeader()
         if header is not None:
-            header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-            header.setStretchLastSection(True)
+            # All columns interactive - we'll calculate widths manually
+            header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+            header.setStretchLastSection(False)
         vert_header = self.table.verticalHeader()
         if vert_header is not None:
             vert_header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
@@ -916,44 +989,19 @@ class WorkspacePanel(QWidget):
         """Format calibration statistics (delegate to stats)."""
         return info.stats.format_calibration(compact=True)
 
-    def _format_patterns(self, info: WorkspaceDatasetInfo) -> str:
-        """Format pattern matches: pattern_name (count), ..."""
-        if not info.stats.pattern_matches:
-            return ""
-        # Sort by count descending, then by name
-        sorted_patterns = sorted(
-            info.stats.pattern_matches.items(),
-            key=lambda x: (-x[1], x[0])
-        )
-        return ", ".join(f"{name} ({count})" for name, count in sorted_patterns)
-
     def _format_sweeps(self, info: WorkspaceDatasetInfo) -> str:
-        """Format sweep status with better readability."""
-        result = ""
+        """Format sweep status as compact single line with checkmarks."""
         parts = []
-        if info.stats.sweep_duplicates_done:
-            parts.append("Duplicate check ✓")
-        if info.stats.sweep_quality_done:
-            parts.append("Quality check ✓")
-        if info.stats.sweep_patterns_done:
-            parts.append("Pattern check ✓")
-
-        # Show which ones are NOT done
-        not_done = []
-        if not info.stats.sweep_duplicates_done:
-            not_done.append("Duplicate check ")
-        if not info.stats.sweep_quality_done:
-            not_done.append("Quality check ")
-        if not info.stats.sweep_patterns_done:
-            not_done.append("Pattern check ")
-
-        # Format: "D✓ Q✓" if some done, or "—" if none done
-        if parts:
-            result = " ".join(parts)
-
-        if not_done:
-            result = result + " (pending: " + ", ".join(not_done) + ")"
-        return result
+        # Duplicates
+        dup_status = "✓" if info.stats.sweep_duplicates_done else "–"
+        parts.append(f"Duplicates: {dup_status}  ")
+        # Quality
+        qual_status = "✓" if info.stats.sweep_quality_done else "–"
+        parts.append(f"Quality: {qual_status}  ")
+        # Patterns
+        pat_status = "✓" if info.stats.sweep_patterns_done else "–"
+        parts.append(f"Patterns: {pat_status}  ")
+        return "  ".join(parts)
 
     def _format_outliers(self, info: WorkspaceDatasetInfo) -> str:
         """Format outlier statistics (delegate to stats)."""
@@ -1197,6 +1245,14 @@ class WorkspacePanel(QWidget):
             else:
                 display_name = info.name
             # Indent all columns for child rows using a shared prefix
+            # For multiline content, we need to indent each line
+            def indent_text(text: str, prefix: str) -> str:
+                """Indent all lines in text with prefix."""
+                if not prefix:
+                    return text
+                lines = text.split('\n')
+                return '\n'.join(prefix + line if line else line for line in lines)
+
             child_prefix = "    " if (info.parent and not info.is_collection) else ""
             name_item = QTableWidgetItem(display_name)
             if info.name == "Workspace total" or info.is_collection:
@@ -1204,14 +1260,13 @@ class WorkspacePanel(QWidget):
                 font.setBold(True)
                 name_item.setFont(font)
             self.table.setItem(row, 0, name_item)
-            self.table.setItem(row, 1, QTableWidgetItem(child_prefix + str(info.stats.total_pairs)))
-            self.table.setItem(row, 2, QTableWidgetItem(child_prefix + self._format_removed(info)))
-            self.table.setItem(row, 3, QTableWidgetItem(child_prefix + self._format_reasons(info)))
-            self.table.setItem(row, 4, QTableWidgetItem(child_prefix + self._format_tagged(info)))
-            self.table.setItem(row, 5, QTableWidgetItem(child_prefix + self._format_calibration(info)))
-            self.table.setItem(row, 6, QTableWidgetItem(child_prefix + self._format_patterns(info)))
-            self.table.setItem(row, 7, QTableWidgetItem(child_prefix + self._format_sweeps(info)))
-            for col in range(8):
+            self.table.setItem(row, 1, QTableWidgetItem(indent_text(str(info.stats.total_pairs), child_prefix)))
+            self.table.setItem(row, 2, QTableWidgetItem(indent_text(self._format_removed(info), child_prefix)))
+            self.table.setItem(row, 3, QTableWidgetItem(indent_text(self._format_reasons(info), child_prefix)))
+            self.table.setItem(row, 4, QTableWidgetItem(indent_text(self._format_tagged(info), child_prefix)))
+            self.table.setItem(row, 5, QTableWidgetItem(indent_text(self._format_calibration(info), child_prefix)))
+            self.table.setItem(row, 6, QTableWidgetItem(indent_text(self._format_sweeps(info), child_prefix)))
+            for col in range(7):
                 item = self.table.item(row, col)
                 if item:
                     if info.is_collection or info.name == "Workspace total":
@@ -1235,6 +1290,9 @@ class WorkspacePanel(QWidget):
         self.open_button.setEnabled(bool(self._on_open and self._infos))
         if self.reset_button:
             self.reset_button.setEnabled(bool(self._infos))
+
+        # Adjust column widths to fit content and window
+        self._adjust_column_widths()
 
     def _open_selected(self) -> None:
         if not self._on_open or self._selected_index is None:

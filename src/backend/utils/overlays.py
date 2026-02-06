@@ -86,17 +86,40 @@ def draw_label_boxes(
     painter: QPainter,
     width: int,
     height: int,
-    boxes: Sequence[Tuple[str, float, float, float, float, QColor]],
+    boxes: Sequence[Tuple[str, float, float, float, float, QColor, bool]],
 ) -> None:
-    """Draw YOLO-format boxes (normalized) with class text on top."""
+    """Draw YOLO-format boxes (normalized) with class text on top.
+
+    Args:
+        painter: QPainter to draw with
+        width: Image width
+        height: Image height
+        boxes: Sequence of (cls_name, x_c, y_c, w_norm, h_norm, color, is_projected)
+               If is_projected=True, draw with dashed line style
+    """
     if not boxes:
         return
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-    for cls_name, x_c, y_c, w_norm, h_norm, color in boxes:
+    for box in boxes:
+        # Support both old (6-tuple) and new (7-tuple) formats for backwards compat
+        if len(box) == 6:
+            cls_name, x_c, y_c, w_norm, h_norm, color = box
+            is_projected = False
+        else:
+            cls_name, x_c, y_c, w_norm, h_norm, color, is_projected = box
+
         pen_width = max(2, int(max(width, height) / 200))
         inset = pen_width / 2.0
         pen = QPen(color)
         pen.setWidth(pen_width)
+
+        # Use dashed line for projected labels
+        if is_projected:
+            pen.setStyle(Qt.PenStyle.DashLine)
+            pen.setDashPattern([4, 4])  # 4px dash, 4px gap
+        else:
+            pen.setStyle(Qt.PenStyle.SolidLine)
+
         painter.setPen(pen)
         abs_w = max(1.0, w_norm * width)
         abs_h = max(1.0, h_norm * height)
@@ -111,7 +134,8 @@ def draw_label_boxes(
         painter.setFont(font)
         painter.setPen(QColor(color))
         metrics = painter.fontMetrics()
-        text = cls_name or "?"
+        # Add "[P]" suffix for projected labels
+        text = (cls_name or "?") + (" [P]" if is_projected else "")
         text_w = metrics.horizontalAdvance(text)
         text_h = metrics.height()
         text_x = abs_x + inset
@@ -120,7 +144,9 @@ def draw_label_boxes(
         bg_y = int(round(text_y - text_h))
         bg_w = int(round(text_w + 4))
         bg_h = int(round(text_h))
-        painter.fillRect(bg_x, bg_y, bg_w, bg_h, QColor(0, 0, 0, 160))
+        # Use slightly different background for projected
+        bg_alpha = 120 if is_projected else 160
+        painter.fillRect(bg_x, bg_y, bg_w, bg_h, QColor(0, 0, 0, bg_alpha))
         painter.setPen(QColor("white"))
         painter.drawText(int(round(text_x)), int(round(text_y - metrics.descent() // 2)), text)
 

@@ -56,6 +56,7 @@ class AppConfig:
     progress_task_workspace_sweep: str = "workspace-sweep"
     progress_task_workspace_reset: str = "workspace-reset"
     progress_task_quality: str = "quality-scan"
+    progress_task_patterns: str = "pattern-scan"
 
     # Cancel action labels
     @property
@@ -71,6 +72,7 @@ class AppConfig:
             self.progress_task_workspace_sweep: "Cancelling workspace sweep",
             self.progress_task_workspace_reset: "Cancelling workspace reset",
             self.progress_task_quality: "Cancelling quality sweep",
+            self.progress_task_patterns: "Cancelling pattern sweep",
         }
 
     # Calibration files

@@ -338,10 +338,14 @@ class DatasetHandler(QObject):
 
         log_info(f"*** FLUSHING CACHE for {self.dataset_path.name} ***", "HANDLER")
 
-        # Update summary from session if loaded
+        # Update summary from session if loaded, otherwise rebuild from disk
         if self.session is not None:
             log_debug("Updating summary from active session", "HANDLER")
             self.update_summary_from_session()
+        else:
+            # No active session - rebuild from disk (.image_labels.yaml may have been updated externally)
+            log_debug("No active session - rebuilding summary from disk", "HANDLER")
+            self.summary = self._rebuild_summary_from_full_cache()
 
         if self.summary is not None:
             config = get_config()
@@ -371,6 +375,15 @@ class DatasetHandler(QObject):
 
         # Rebuild from full cache to get latest state
         self.summary = self._rebuild_summary_from_full_cache()
+
+        # Update sweep_flags from live session state (not from disk)
+        # This ensures sweep flags set after the last disk save are preserved
+        sweep_flags = self.session.state.cache_data.get("sweep_flags", {})
+        if sweep_flags:
+            from backend.services.summary_derivation import update_summary_sweep_flags
+            summary_dict = self.summary.to_dict()
+            update_summary_sweep_flags(summary_dict, sweep_flags)
+            self.summary = SummaryCache(summary_dict)
 
     def update_from_workspace_info(self, info: 'WorkspaceDatasetInfo') -> None:
         """Update summary from WorkspaceDatasetInfo (used during workspace refresh)."""

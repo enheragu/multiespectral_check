@@ -15,7 +15,7 @@ from .calibration import (
     CalibrationWorkflowMixin,
     DeferredCalibrationQueue,
 )
-from .labels import LabelWorkflow, LabelingController, build_controller
+from .labels import LabelService
 from .overlays import OverlayPrefetcher, OverlayWorkflow
 from .signatures import SignatureController, SignatureScanManager
 
@@ -29,11 +29,9 @@ __all__ = [
     "CalibrationSolver",
     "CalibrationWorkflowMixin",
     "DeferredCalibrationQueue",
-    "LabelWorkflow",
-    "LabelingController",
+    "LabelService",
     "OverlayPrefetcher",
     "OverlayWorkflow",
     "SignatureController",
     "SignatureScanManager",
-    "build_controller",
 ]

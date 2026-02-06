@@ -45,13 +45,5 @@ class UiStateHelper:
     def update_stats_panel(self) -> None:
         if not hasattr(self, "stats_panel") or self.stats_panel is None:
             return
-        missing_counts = {"lwir": 0, "visible": 0}
-        if self.session.loader:
-            missing_counts = self.session.loader.missing_channel_counts()
-        self.stats_panel.update_from_state(
-            self.state,
-            self.session.total_pairs(),
-            missing_counts,
-            self.state.cache_data["reproj_errors"],
-            self.state.cache_data["extrinsic_errors"],
-        )
+        # Delegate to stats_panel.update_stats() - single source of truth
+        self.stats_panel.update_stats(self.session, self.state)

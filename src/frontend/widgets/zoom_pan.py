@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt6.QtCore import QPoint, QPointF, Qt, QRect, pyqtSignal
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtCore import QEvent, QPoint, QPointF, Qt, QRect, pyqtSignal
+from PyQt6.QtGui import QPixmap, QPainter, QColor, QPen, QFont
 from PyQt6.QtWidgets import QLabel, QScrollArea, QRubberBand
 
 
@@ -29,6 +29,9 @@ class ZoomPanView(QScrollArea):
         self._label.setMinimumSize(100, 100)  # Further reduced to allow narrower window
         self.setWidget(self._label)
 
+        # Install event filter for overlay painting
+        self._label.installEventFilter(self)
+
         # Allow the scroll area itself to shrink
         self.setMinimumSize(100, 100)
 
@@ -45,6 +48,20 @@ class ZoomPanView(QScrollArea):
         self._label_current_px: Optional[QPoint] = None
         self._rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, self)
         self._pending_scale: Optional[float] = None
+
+        # Edit highlight bbox (for live preview during editing)
+        self._edit_highlight: Optional[tuple] = None  # (x1, y1, x2, y2) normalized
+
+    def eventFilter(self, obj, event: QEvent) -> bool:
+        """Paint highlight overlay after the label paints itself."""
+        if obj is self._label and event.type() == QEvent.Type.Paint:
+            # Let the label paint itself first
+            self._label.event(event)
+            # Then paint our highlight overlay
+            if self._edit_highlight:
+                self._paint_edit_highlight()
+            return True
+        return super().eventFilter(obj, event)
 
     def set_placeholder(self, text: str) -> None:
         self._base_pixmap = None
@@ -142,7 +159,8 @@ class ZoomPanView(QScrollArea):
     def mouseMoveEvent(self, event):  # noqa: N802
         if self._labeling_mode:
             if self._label_start is not None:
-                pos_px = self._label_pos(event)
+                # Use clamp=True to allow drawing boxes at image edges
+                pos_px = self._label_pos(event, clamp=True)
                 if pos_px:
                     self._label_current_px = pos_px
                     self._update_rubber_band()
@@ -160,7 +178,8 @@ class ZoomPanView(QScrollArea):
 
     def mouseReleaseEvent(self, event):  # noqa: N802
         if self._labeling_mode and event.button() == Qt.MouseButton.LeftButton:
-            end = self._image_pos(event)
+            # Use clamp=True to allow finishing boxes at image edges
+            end = self._image_pos(event, clamp=True)
             if self._label_start and end:
                 self._emit_box(self._label_start, end)
             self._label_start = None
@@ -183,6 +202,10 @@ class ZoomPanView(QScrollArea):
         super().leaveEvent(event)
 
     def contextMenuEvent(self, event):  # noqa: N802
+        # In labeling mode, right-click is handled by mousePressEvent (labelDeleteRequested)
+        if self._labeling_mode:
+            event.accept()
+            return
         self.contextRequested.emit(event.globalPos())
         event.accept()
 
@@ -202,25 +225,78 @@ class ZoomPanView(QScrollArea):
         if not enabled:
             self.unsetCursor()
 
-    def _image_pos(self, event) -> Optional[QPointF]:
-        if not self._label or not self._label.pixmap() or self._label.pixmap().isNull():
-            return None
-        label_pos = self._label.mapFrom(self.viewport(), event.position().toPoint())
-        pix = self._label.pixmap()
-        if label_pos.x() < 0 or label_pos.y() < 0 or label_pos.x() > pix.width() or label_pos.y() > pix.height():
-            return None
-        x_norm = label_pos.x() / pix.width()
-        y_norm = label_pos.y() / pix.height()
-        return QPointF(x_norm, y_norm)
+    def set_edit_highlight(self, bbox: Optional[tuple]) -> None:
+        """Set a bbox to highlight during editing (x1, y1, x2, y2 normalized).
 
-    def _label_pos(self, event) -> Optional[QPoint]:
+        This draws a dashed rectangle with P1/P2 corner labels for live preview.
+        """
+        self._edit_highlight = bbox
+        self._label.update()  # Trigger repaint
+
+    def clear_edit_highlight(self) -> None:
+        """Clear the edit highlight."""
+        self._edit_highlight = None
+        self._label.update()  # Trigger repaint
+
+    def get_pixmap_size(self) -> Optional[tuple]:
+        """Get the size of the current base pixmap (width, height), or None if no pixmap."""
+        if self._base_pixmap and not self._base_pixmap.isNull():
+            return (self._base_pixmap.width(), self._base_pixmap.height())
+        return None
+    def _image_pos(self, event, clamp: bool = False) -> Optional[QPointF]:
+        """Get normalized image position from mouse event.
+
+        Args:
+            event: Mouse event
+            clamp: If True, clamp position to image bounds instead of returning None
+
+        Returns:
+            Normalized position (0-1) or None if outside bounds and clamp=False
+        """
         if not self._label or not self._label.pixmap() or self._label.pixmap().isNull():
             return None
         label_pos = self._label.mapFrom(self.viewport(), event.position().toPoint())
         pix = self._label.pixmap()
-        if label_pos.x() < 0 or label_pos.y() < 0 or label_pos.x() > pix.width() or label_pos.y() > pix.height():
+
+        if clamp:
+            # Clamp to image bounds (for bbox drawing at edges)
+            x = max(0, min(label_pos.x(), pix.width()))
+            y = max(0, min(label_pos.y(), pix.height()))
+            x_norm = x / pix.width()
+            y_norm = y / pix.height()
+            return QPointF(x_norm, y_norm)
+        else:
+            # Strict bounds check (for click detection)
+            if label_pos.x() < 0 or label_pos.y() < 0 or label_pos.x() > pix.width() or label_pos.y() > pix.height():
+                return None
+            x_norm = label_pos.x() / pix.width()
+            y_norm = label_pos.y() / pix.height()
+            return QPointF(x_norm, y_norm)
+
+    def _label_pos(self, event, clamp: bool = False) -> Optional[QPoint]:
+        """Get pixel position on label from mouse event.
+
+        Args:
+            event: Mouse event
+            clamp: If True, clamp position to image bounds instead of returning None
+
+        Returns:
+            Pixel position on label or None if outside bounds and clamp=False
+        """
+        if not self._label or not self._label.pixmap() or self._label.pixmap().isNull():
             return None
-        return label_pos  # type: ignore[return-value]
+        label_pos = self._label.mapFrom(self.viewport(), event.position().toPoint())
+        pix = self._label.pixmap()
+
+        if clamp:
+            # Clamp to image bounds
+            x = max(0, min(label_pos.x(), pix.width()))
+            y = max(0, min(label_pos.y(), pix.height()))
+            return QPoint(int(x), int(y))
+        else:
+            if label_pos.x() < 0 or label_pos.y() < 0 or label_pos.x() > pix.width() or label_pos.y() > pix.height():
+                return None
+            return label_pos  # type: ignore[return-value]
 
     def _emit_box(self, p1: QPointF, p2: QPointF) -> None:
         x1, y1 = p1.x(), p1.y()
@@ -287,6 +363,68 @@ class ZoomPanView(QScrollArea):
         )
         self._label.setPixmap(scaled)
         self._label.resize(scaled.size())
+        # Trigger repaint of highlight overlay
+        self._label.update()
+
+    def _paint_edit_highlight(self) -> None:
+        """Paint the edit highlight overlay with P1/P2 labels directly on the label widget."""
+        if not self._edit_highlight or not self._label.pixmap():
+            return
+
+        x1, y1, x2, y2 = self._edit_highlight
+        pix = self._label.pixmap()
+        if pix.isNull():
+            return
+
+        img_w = pix.width()
+        img_h = pix.height()
+
+        # Convert normalized coords to pixel coords on current pixmap
+        px1 = int(x1 * img_w)
+        py1 = int(y1 * img_h)
+        px2 = int(x2 * img_w)
+        py2 = int(y2 * img_h)
+
+        painter = QPainter(self._label)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Draw dashed rectangle
+        pen = QPen(QColor(255, 165, 0))  # Orange
+        pen.setWidth(2)
+        pen.setStyle(Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        painter.drawRect(px1, py1, px2 - px1, py2 - py1)
+
+        # Draw corner circles and labels
+        font = QFont()
+        font.setBold(True)
+        font.setPointSize(10)
+        painter.setFont(font)
+
+        # P1 (top-left) - cyan
+        p1_color = QColor(0, 200, 255)
+        pen.setColor(p1_color)
+        pen.setStyle(Qt.PenStyle.SolidLine)
+        painter.setPen(pen)
+        painter.setBrush(p1_color)
+        painter.drawEllipse(QPoint(px1, py1), 6, 6)
+
+        # P1 label
+        painter.setPen(QPen(Qt.GlobalColor.white))
+        painter.drawText(px1 + 10, py1 + 5, "P1")
+
+        # P2 (bottom-right) - magenta
+        p2_color = QColor(255, 100, 255)
+        pen.setColor(p2_color)
+        painter.setPen(pen)
+        painter.setBrush(p2_color)
+        painter.drawEllipse(QPoint(px2, py2), 6, 6)
+
+        # P2 label
+        painter.setPen(QPen(Qt.GlobalColor.white))
+        painter.drawText(px2 - 25, py2 - 10, "P2")
+
+        painter.end()
 
     def _set_scroll_ratio(self, scrollbar, ratio: float) -> None:  # type: ignore[override]
         ratio = max(0.0, min(1.0, ratio))

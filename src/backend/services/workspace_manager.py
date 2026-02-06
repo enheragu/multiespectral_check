@@ -71,7 +71,8 @@ class WorkspaceManager:
         infos: List[WorkspaceDatasetInfo] = []
         for handler in self.handlers.values():
             log_debug(f"\nLoading summary for {handler.dataset_path.name}...", "WORKSPACE_MGR")
-            summary = handler.load_summary()
+            # Always force rebuild to get fresh data from disk (sweep_flags may have changed)
+            summary = handler.load_summary(force_rebuild=True)
             is_collection = self._is_collection(handler.dataset_path)
             parent = self._get_parent_name(handler.dataset_path)
             log_debug(f"  {handler.dataset_path.name}: is_collection={is_collection}, parent={parent}", "WORKSPACE_MGR")
@@ -171,8 +172,21 @@ class WorkspaceManager:
         return (path / "visible").is_dir() and (path / "lwir").is_dir()
 
     def _is_noise_dir(self, path: Path) -> bool:
-        """Return True if path should be skipped when scanning workspace."""
-        return path.name in {"to_delete", ".git", "__pycache__"}
+        """Return True if path should be skipped when scanning workspace.
+
+        Excludes:
+        - System directories (.git, __pycache__)
+        - Deleted items (to_delete)
+        - Special folders that look like datasets but aren't (labels, corners, etc.)
+        """
+        # Special folders to exclude (may have lwir/visible but are NOT datasets)
+        EXCLUDED_NAMES = {
+            "to_delete", ".git", "__pycache__",
+            "labels", "corners", "calibration", "calibration_corners",
+            "annotations", "masks", "output", "outputs", "results",
+            "trash", ".trash",
+        }
+        return path.name.lower() in EXCLUDED_NAMES
 
     def _is_collection(self, dataset_path: Path) -> bool:
         """Check if dataset is a collection (has subdirectories that are datasets)."""

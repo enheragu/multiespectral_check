@@ -371,29 +371,27 @@ class CalibrationCheckDialog(QDialog):
 
         # Load intrinsic metadata
         if self.intrinsic_path and self.intrinsic_path.exists():
-            try:
-                with open(self.intrinsic_path, "r", encoding="utf-8") as handle:
-                    payload = yaml.safe_load(handle) or {}
+            payload = load_yaml(self.intrinsic_path)
+            if payload:
                 metadata["intrinsic_file"] = self.intrinsic_path.name
                 metadata["file_path"] = str(self.intrinsic_path.parent)
                 metadata["pattern_size"] = payload.get("pattern_size")
                 metadata["square_size"] = payload.get("square_size") or payload.get("square_length")
                 metadata["updated_at"] = payload.get("updated_at")
-            except Exception:  # noqa: BLE001
+            else:
                 metadata["intrinsic_file"] = self.intrinsic_path.name + " (error reading)"
 
         # Load extrinsic metadata
         if self.extrinsic_path and self.extrinsic_path.exists():
-            try:
-                with open(self.extrinsic_path, "r", encoding="utf-8") as handle:
-                    payload = yaml.safe_load(handle) or {}
+            payload = load_yaml(self.extrinsic_path)
+            if payload:
                 metadata["extrinsic_file"] = self.extrinsic_path.name
                 # Use extrinsic timestamp if intrinsic didn't have one
                 if not metadata.get("updated_at"):
                     metadata["updated_at"] = payload.get("updated_at")
                 if not metadata.get("file_path"):
                     metadata["file_path"] = str(self.extrinsic_path.parent)
-            except Exception:  # noqa: BLE001
+            else:
                 metadata["extrinsic_file"] = self.extrinsic_path.name + " (error reading)"
 
         return metadata

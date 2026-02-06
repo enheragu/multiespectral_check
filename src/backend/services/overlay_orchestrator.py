@@ -150,16 +150,43 @@ class OverlayOrchestrator(QObject):
         stereo_error = cd["extrinsic_errors"].get(base)
 
         # Label data (only if showing labels)
-        label_boxes_lwir: List[Tuple[str, float, float, float, float, QColor]] = []
-        label_boxes_vis: List[Tuple[str, float, float, float, float, QColor]] = []
+        # Format: (display_name, x_center, y_center, width, height, color, is_projected)
+        label_boxes_lwir: List[Tuple[str, float, float, float, float, QColor, bool]] = []
+        label_boxes_vis: List[Tuple[str, float, float, float, float, QColor, bool]] = []
         label_sig_lwir: Optional[Tuple[Any, ...]] = None
         label_sig_vis: Optional[Tuple[Any, ...]] = None
 
         if self.show_labels:
-            label_boxes_lwir = self._get_label_boxes(base, "lwir")
-            label_boxes_vis = self._get_label_boxes(base, "visible")
-            label_sig_lwir = self._get_label_signature(base, "lwir", label_boxes_lwir)
-            label_sig_vis = self._get_label_signature(base, "visible", label_boxes_vis)
+            # Get direct labels for each channel (is_projected=False)
+            raw_lwir = self._get_label_boxes(base, "lwir")
+            raw_vis = self._get_label_boxes(base, "visible")
+
+            # Add is_projected=False flag to direct labels
+            label_boxes_lwir = [(d, x, y, w, h, c, False) for d, x, y, w, h, c in raw_lwir]
+            label_boxes_vis = [(d, x, y, w, h, c, False) for d, x, y, w, h, c in raw_vis]
+
+            # Project labels from other channel (is_projected=True)
+            # vis -> lwir projection
+            projected_to_lwir = self._project_labels(
+                raw_vis, "visible", "lwir", base
+            )
+            # lwir -> vis projection
+            projected_to_vis = self._project_labels(
+                raw_lwir, "lwir", "visible", base
+            )
+
+            # Append projected labels
+            label_boxes_lwir.extend(projected_to_lwir)
+            label_boxes_vis.extend(projected_to_vis)
+
+            # Update signatures to include projected labels
+            label_sig_lwir = self._get_label_signature(base, "lwir", raw_lwir)
+            label_sig_vis = self._get_label_signature(base, "visible", raw_vis)
+            # Include cross-channel info in signature for cache invalidation
+            if label_sig_lwir and raw_vis:
+                label_sig_lwir = (*label_sig_lwir, "proj", len(raw_vis))
+            if label_sig_vis and raw_lwir:
+                label_sig_vis = (*label_sig_vis, "proj", len(raw_lwir))
 
         # Get base pixmaps from session
         display_lwir, display_vis = self.session.prepare_display_pair(base, self.view_rectified)
@@ -200,8 +227,9 @@ class OverlayOrchestrator(QObject):
 
         # Get calibration matrices for corner transformation
         cd = self.state.cache_data
-        lwir_matrices = cd.get("_matrices", {}).get("lwir", {})
-        vis_matrices = cd.get("_matrices", {}).get("visible", {})
+        matrices = cd.get("_matrices") or {}
+        lwir_matrices = matrices.get("lwir") or {}
+        vis_matrices = matrices.get("visible") or {}
 
         # When show_overlays is False, suppress info overlays (but keep grid and labels)
         if not self.show_overlays:
@@ -306,6 +334,135 @@ class OverlayOrchestrator(QObject):
         self._cached_lwir_calib_size = None
         self._cached_vis_calib_size = None
         self._aligned_cache = None
+
+    def _project_labels(
+        self,
+        labels: List[Tuple[str, float, float, float, float, QColor]],
+        source_channel: str,
+        target_channel: str,
+        base: str,
+    ) -> List[Tuple[str, float, float, float, float, QColor, bool]]:
+        """Project labels from one channel to the other using calibration.
+
+        Uses the homography computed for stereo alignment to project bbox coordinates.
+        All returned labels have is_projected=True.
+
+        Args:
+            labels: List of (display_name, x_center, y_center, width, height, color)
+            source_channel: 'visible' or 'lwir' - where labels were annotated
+            target_channel: 'visible' or 'lwir' - where to project
+            base: Image base name
+
+        Returns:
+            List of projected labels with is_projected=True flag
+        """
+        if not labels:
+            return []
+
+        # Get calibration data for projection
+        cd = self.state.cache_data
+        matrices = cd.get("_matrices") or {}
+
+        # Need both intrinsics and extrinsic
+        # Note: _extrinsic is the key for extrinsic calibration data
+        lwir_mat = matrices.get("lwir") or {}
+        vis_mat = matrices.get("visible") or {}
+        extrinsic = cd.get("_extrinsic") or {}
+
+        if not lwir_mat or not vis_mat or not extrinsic:
+            log_debug(
+                f"No calibration data for label projection "
+                f"(lwir={bool(lwir_mat)}, vis={bool(vis_mat)}, ext={bool(extrinsic)})",
+                "LABELS"
+            )
+            return []
+
+        # Get or compute homography for this projection direction
+        homography = self._get_projection_homography(
+            source_channel, target_channel, lwir_mat, vis_mat, extrinsic, base
+        )
+
+        if homography is None:
+            return []
+
+        # Get image sizes for normalization
+        source_size = self.session.get_original_image_size(base, source_channel)
+        target_size = self.session.get_original_image_size(base, target_channel)
+
+        if not source_size or not target_size:
+            log_debug(f"No image sizes for label projection", "LABELS")
+            return []
+
+        # Import here to avoid circular imports
+        from backend.services.labels.bbox_transform import project_bbox_with_homography
+
+        projected: List[Tuple[str, float, float, float, float, QColor, bool]] = []
+
+        for display_name, xc, yc, w, h, color in labels:
+            bbox = (xc, yc, w, h)
+            proj_bbox = project_bbox_with_homography(
+                bbox, homography, source_size, target_size
+            )
+            if proj_bbox:
+                proj_xc, proj_yc, proj_w, proj_h = proj_bbox
+                # Use same color but with is_projected=True
+                projected.append((display_name, proj_xc, proj_yc, proj_w, proj_h, color, True))
+
+        if projected:
+            log_debug(
+                f"Projected {len(projected)}/{len(labels)} labels from {source_channel} to {target_channel}",
+                "LABELS"
+            )
+
+        return projected
+
+    def _get_projection_homography(
+        self,
+        source_channel: str,
+        target_channel: str,
+        lwir_mat: Dict[str, Any],
+        vis_mat: Dict[str, Any],
+        extrinsic: Dict[str, Any],
+        base: str,
+    ) -> Optional[Any]:
+        """Get or compute homography for label projection between channels.
+
+        Reuses compute_alignment_homography from stereo_alignment.py.
+        """
+        try:
+            import numpy as np
+            from backend.utils.stereo_alignment import compute_alignment_homography
+        except ImportError:
+            return None
+
+        # Determine source and target matrices
+        if source_channel == "visible":
+            source_mat = vis_mat
+            target_mat = lwir_mat
+            source_is_lwir = False
+        else:
+            source_mat = lwir_mat
+            target_mat = vis_mat
+            source_is_lwir = True
+
+        # Get image size for homography computation
+        source_size = self.session.get_original_image_size(base, source_channel)
+        if not source_size:
+            return None
+
+        try:
+            homography = compute_alignment_homography(
+                source_matrix=source_mat,
+                target_matrix=target_mat,
+                rotation=extrinsic.get("rotation") or extrinsic.get("R"),
+                translation=extrinsic.get("translation") or extrinsic.get("T"),
+                image_size=source_size,
+                source_is_lwir=source_is_lwir,
+            )
+            return homography
+        except Exception as e:
+            log_debug(f"Failed to compute projection homography: {e}", "LABELS")
+            return None
 
     def clear(self) -> None:
         """Clear all cached overlays and cancel prefetching."""

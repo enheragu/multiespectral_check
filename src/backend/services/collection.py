@@ -247,7 +247,8 @@ class Collection:
 
     def distribute_to_children(self, marks: Dict[str, Dict[str, Any]],
                                calibration_marked: Set[str],
-                               calibration_data: Optional[Dict[str, Dict[str, Any]]] = None) -> None:
+                               calibration_data: Optional[Dict[str, Dict[str, Any]]] = None,
+                               sweep_flags: Optional[Dict[str, bool]] = None) -> None:
         """
         Distribute marks made at collection level back to child datasets.
 
@@ -258,9 +259,11 @@ class Collection:
             marks: Dict of base -> {reason: str, auto: bool}
             calibration_marked: Set of bases marked for calibration
             calibration_data: Optional dict of base -> {marked, auto, results, ...}
+            sweep_flags: Optional dict of sweep type -> bool (duplicates, quality, patterns)
         """
         start = time.perf_counter()
         calibration_data = calibration_data or {}
+        sweep_flags = sweep_flags or {}
 
         # Group by child
         child_marks: Dict[str, Dict[str, Dict[str, Any]]] = {}  # child_key -> {base: {reason, auto}}
@@ -289,10 +292,9 @@ class Collection:
             if isinstance(outlier_dict, dict) and any(outlier_dict.values()):
                 log_debug(f"Distributing outliers for {prefixed_base}: {outlier_dict}", "COLLECTION")
 
-        # Save to each child's cache
+        # Save to each child's cache - visit ALL children to handle removals
         updated_children = 0
-        for child_key in set(child_marks.keys()) | set(child_calibration.keys()):
-            child_dir = self._child_dirs.get(child_key)
+        for child_key, child_dir in self._child_dirs.items():
             if not child_dir or not child_dir.exists():
                 log_warning(f"Collection {self.name}: Child directory not found: {child_key}", "COLLECTION")
                 continue
@@ -302,27 +304,49 @@ class Collection:
                 child_cache_path = child_dir / DATASET_CACHE_FILENAME
                 child_cache = load_dataset_cache_file(child_cache_path)
 
-                # Merge marks (unified format: base -> {reason, auto})
+                # Sync marks - add new, remove unmarked
+                # marks_for_child contains ONLY the bases that should be marked
                 existing_marks = child_cache.get("marks", {})
                 if not isinstance(existing_marks, dict):
                     existing_marks = {}
-                marks_to_add = child_marks.get(child_key, {})
-                if marks_to_add:
-                    existing_marks.update(marks_to_add)
-                    child_cache["marks"] = existing_marks
+                marks_for_child = child_marks.get(child_key, {})
+
+                # First, remove marks that are no longer present
+                marks_to_remove = [
+                    local_base for local_base in existing_marks
+                    if local_base not in marks_for_child
+                ]
+                for local_base in marks_to_remove:
+                    del existing_marks[local_base]
+                    log_debug(f"Collection {self.name}: Removed mark for {child_key}/{local_base}", "COLLECTION")
+
+                # Then add/update marks
+                existing_marks.update(marks_for_child)
+                child_cache["marks"] = existing_marks
 
                 # Remove legacy auto_marks field if present
                 if "auto_marks" in child_cache:
                     del child_cache["auto_marks"]
 
-                # Merge calibration (now includes full entry with results)
+                # Sync calibration - add new, remove unmarked
+                # calibration_to_add contains ONLY the bases that should be marked
                 calibration_to_add = child_calibration.get(child_key, {})
-                if calibration_to_add:
-                    existing_calib = child_cache.get("calibration", {})
-                    if not isinstance(existing_calib, dict):
-                        existing_calib = {}
+                existing_calib = child_cache.get("calibration", {})
+                if not isinstance(existing_calib, dict):
+                    existing_calib = {}
 
-                    for local_base, calib_entry in calibration_to_add.items():
+                # First, remove entries that are no longer marked
+                # (they exist in existing but not in calibration_to_add)
+                bases_to_remove = [
+                    local_base for local_base in existing_calib
+                    if local_base not in calibration_to_add
+                ]
+                for local_base in bases_to_remove:
+                    del existing_calib[local_base]
+                    log_debug(f"Collection {self.name}: Removed calibration mark for {child_key}/{local_base}", "COLLECTION")
+
+                # Then add/update marked entries
+                for local_base, calib_entry in calibration_to_add.items():
                         if local_base not in existing_calib:
                             existing_calib[local_base] = {}
                         # Merge entry preserving existing data
@@ -344,7 +368,8 @@ class Collection:
                             existing_entry["outlier"]["stereo"] = calib_entry["outlier"].get("stereo", False)
                         existing_calib[local_base] = existing_entry
 
-                    child_cache["calibration"] = existing_calib
+                # Always update calibration in cache (may have removals)
+                child_cache["calibration"] = existing_calib
 
                 # Update reason_counts (read from unified format)
                 reason_counts: Dict[str, int] = {}
@@ -357,6 +382,17 @@ class Collection:
                         reason_counts[reason] = reason_counts.get(reason, 0) + 1
                 child_cache["reason_counts"] = reason_counts
 
+                # Propagate sweep flags to child (collection sweep applies to all children)
+                if sweep_flags:
+                    existing_sweep = child_cache.get("sweep_flags", {})
+                    if not isinstance(existing_sweep, dict):
+                        existing_sweep = {}
+                    # Merge: only set True flags (don't reset False)
+                    for flag_name, flag_value in sweep_flags.items():
+                        if flag_value:
+                            existing_sweep[flag_name] = True
+                    child_cache["sweep_flags"] = existing_sweep
+
                 # Save child cache
                 save_dataset_cache_file(child_cache_path, child_cache)
 
@@ -368,8 +404,8 @@ class Collection:
                     handler.force_flush()
 
                 updated_children += 1
-                mark_count = len(marks_to_add)
-                auto_count = sum(1 for m in marks_to_add.values() if isinstance(m, dict) and m.get("auto"))
+                mark_count = len(marks_for_child)
+                auto_count = sum(1 for m in marks_for_child.values() if isinstance(m, dict) and m.get("auto"))
                 calib_count = len(calibration_to_add)
                 if mark_count or calib_count:
                     log_info(f"Collection {self.name}: Distributed to {child_key}: {mark_count} marks ({auto_count} auto), {calib_count} calibration", "COLLECTION")

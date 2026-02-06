@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Callable, Optional
 
 from PyQt6.QtGui import QKeySequence
-from PyQt6.QtWidgets import QMenu
+from PyQt6.QtWidgets import QApplication, QMenu
 
 from common.reasons import REASON_CHOICES, REASON_SHORTCUTS, REASON_USER
 from backend.services.dataset_actions import DatasetActions
@@ -33,7 +33,9 @@ class MarkingController:
         schedule_calibration_job: Callable[[str, bool], bool],
         reconcile_filter_state: Callable[[], None],
         calibration_shortcut: str,
+        get_image_path: Optional[Callable[[str, str], Optional[str]]] = None,
         refresh_workspace: Optional[Callable[[], None]] = None,
+        enter_labelling_mode: Optional[Callable[[], None]] = None,
     ) -> None:
         self.parent = parent
         self.state = state
@@ -51,8 +53,14 @@ class MarkingController:
         self.schedule_calibration_job = schedule_calibration_job
         self.reconcile_filter_state = reconcile_filter_state
         self.calibration_shortcut = calibration_shortcut
+        self.get_image_path = get_image_path
         self.refresh_workspace = refresh_workspace
+        self._enter_labelling_mode = enter_labelling_mode
 
+    def enter_labelling_mode(self) -> None:
+        """Enter manual labelling mode via the configured callback."""
+        if self._enter_labelling_mode:
+            self._enter_labelling_mode()
     # Context menu -------------------------------------------------
     def show_context_menu(self, global_pos) -> None:
         if not self.has_images():
@@ -95,6 +103,20 @@ class MarkingController:
             if reanalyze_action is not None:
                 reanalyze_action.setShortcut(QKeySequence("Ctrl+Shift+R"))
                 reanalyze_action.setShortcutVisibleInContextMenu(True)
+        menu.addSeparator()
+        labelling_action = menu.addAction("Enter manual labelling mode")
+        if labelling_action is not None:
+            labelling_action.setShortcut(QKeySequence("Ctrl+L"))
+            labelling_action.setShortcutVisibleInContextMenu(True)
+        # Copy path submenu
+        copy_lwir_action = None
+        copy_vis_action = None
+        if self.get_image_path:
+            menu.addSeparator()
+            copy_menu = menu.addMenu("Copy image path")
+            if copy_menu:
+                copy_lwir_action = copy_menu.addAction("LWIR path")
+                copy_vis_action = copy_menu.addAction("Visible path")
         chosen = menu.exec(global_pos)
         if chosen is None:
             return
@@ -123,6 +145,26 @@ class MarkingController:
             if self.schedule_calibration_job(base, True):
                 self.status_message(f"Re-running calibration analysis for {base}", 4000)
             return
+        if labelling_action and chosen is labelling_action:
+            self.enter_labelling_mode()
+            return
+        if copy_lwir_action and chosen is copy_lwir_action:
+            self._copy_image_path(base, "lwir")
+            return
+        if copy_vis_action and chosen is copy_vis_action:
+            self._copy_image_path(base, "visible")
+            return
+
+    def _copy_image_path(self, base: str, channel: str) -> None:
+        """Copy absolute image path to clipboard."""
+        if not self.get_image_path:
+            return
+        path = self.get_image_path(base, channel)
+        if path:
+            clipboard = QApplication.clipboard()
+            if clipboard:
+                clipboard.setText(str(path))
+                self.status_message(f"Copied {channel.upper()} path to clipboard", 3000)
 
     # Marking actions ----------------------------------------------
     def apply_mark_reason(self, base: str, reason: Optional[str]) -> None:
@@ -138,8 +180,11 @@ class MarkingController:
         base = self.get_current_base()
         if not base:
             return
-        current = self.state.cache_data["marks"].get(base)
-        if current == reason:
+        mark_entry = self.state.cache_data["marks"].get(base)
+        # Extract reason from dict format {"reason": ..., "auto": ...} or legacy string
+        current_reason = mark_entry.get("reason") if isinstance(mark_entry, dict) else mark_entry
+        if current_reason == reason:
+            # Toggle off: same reason pressed again
             self.apply_mark_reason(base, None)
         else:
             self.apply_mark_reason(base, reason)
