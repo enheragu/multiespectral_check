@@ -17,38 +17,38 @@ This documents the key decisions that make the codebase:
 
 ## 1. Architecture: Backend / Frontend / Common
 
-**Separación clara entre lógica de negocio y GUI**:
-- **backend/**: Pure Python logic. NO UI widgets (QMessageBox, QDialog, etc). SOLO threading Qt (QObject, QRunnable, pyqtSignal).
-- **frontend/**: Qt-dependent UI. Widgets, dialogs, user interactions. Delega lógica a backend.
-- **common/**: Shared utilities y constantes usadas por backend Y frontend:
-  - `log_utils.py` - Logging centralizado con timestamps
-  - `dict_helpers.py` - Navegación segura de dicts anidados
-  - `timing.py` - Performance monitoring y decorators
-  - `reasons.py` - Constantes de DELETE_REASONS
+**Clear separation between business logic and GUI**:
+- **backend/**: Pure Python logic. NO UI widgets (QMessageBox, QDialog, etc). ONLY Qt threading (QObject, QRunnable, pyqtSignal).
+- **frontend/**: Qt-dependent UI. Widgets, dialogs, user interactions. Delegates logic to backend.
+- **common/**: Shared utilities and constants used by backend AND frontend:
+  - `log_utils.py` - Centralized logging with timestamps
+  - `dict_helpers.py` - Safe navigation of nested dicts
+  - `timing.py` - Performance monitoring and decorators
+  - `reasons.py` - DELETE_REASONS constants
 
-**Regla**: Si frontend Y backend lo usan → va en `common/`. Si solo backend → `backend/utils/`.
+**Rule**: If both frontend AND backend use it → goes in `common/`. If only backend → `backend/utils/`.
 
-**Type Safety**: Backend tiene type checking más estricto (mypy.ini). Frontend más permisivo por complejidad de Qt.
+**Type Safety**: Backend has stricter type checking (mypy.ini). Frontend is more permissive due to Qt complexity.
 
 ---
 
 ## 2. Single Source of Truth: cache_data
 
-**Problema**: Estado distribuido causaba inconsistencias, conversiones O(n) en cada acceso.
+**Problem**: Distributed state caused inconsistencies, O(n) conversions on every access.
 
-**Solución**: `cache_data` dict es la única fuente de verdad mutable:
+**Solution**: `cache_data` dict is the only mutable source of truth:
 ```python
 cache_data = {
     "marks": {},           # Dict[str, Dict] - base → {reason: str, auto: bool}
     "overrides": set(),    # Set[str] in memory, List in YAML
-    "calibration": {},     # Nested dict con results, outliers, etc.
-    "_detection_bins": {}  # Runtime-only (no persiste)
+    "calibration": {},     # Nested dict with results, outliers, etc.
+    "_detection_bins": {}  # Runtime-only (not persisted)
 }
 ```
 
-**Formato unificado de marks**:
+**Unified marks format**:
 ```yaml
-# Nuevo formato (unificado):
+# Unified format:
 marks:
   base_001:
     reason: duplicate
@@ -58,111 +58,111 @@ marks:
     auto: false
 ```
 
-**Reglas**:
-- Properties son **vistas read-only** computadas desde cache_data
-- Para modificar: acceder `cache_data` directamente, NUNCA a través de properties
-- **Conversión Set↔List SOLO en cache.py**: `_normalize_dataset_entry()` (List→Set al cargar) y `serialize_dataset_entry()` (Set→List al guardar)
-- mypy detecta violaciones (mutaciones de properties generan errores)
+**Rules**:
+- Properties are **read-only views** computed from cache_data
+- To modify: access `cache_data` directly, NEVER through properties
+- **Set↔List conversion ONLY in cache.py**: `_normalize_dataset_entry()` (List→Set on load) and `serialize_dataset_entry()` (Set→List on save)
+- mypy detects violations (property mutations generate errors)
 
 ---
 
-## 3. Data Ownership: Quien produce, gestiona
+## 3. Data Ownership: Who produces, manages
 
-**Jerarquía**: Workspace (agrega) → Collection (agrega) → Dataset (produce)
+**Hierarchy**: Workspace (aggregates) → Collection (aggregates) → Dataset (produces)
 
-**Dataset** (nivel bajo):
-- ✅ Produce y almacena: marks (con auto flag embebido), calibration corners, sweep_flags
-- ✅ Archivos: `.image_labels.yaml`, `.summary_cache.yaml`, `calibration/*.yaml`
+**Dataset** (low level):
+- ✅ Produces and stores: marks (with embedded auto flag), calibration corners, sweep_flags
+- ✅ Files: `.image_labels.yaml`, `.summary_cache.yaml`, `calibration/*.yaml`
 
-**Collection** (nivel medio):
-- ✅ Agrega datos de hijos con namespacing (`child/base`)
-- ✅ Distribuye cambios de vuelta a hijos
-- ❌ NO tiene cache propio, NO produce datos
+**Collection** (mid level):
+- ✅ Aggregates child data with namespacing (`child/base`)
+- ✅ Distributes changes back to children
+- ❌ Does NOT have its own cache, does NOT produce data
 
-**Workspace** (nivel alto):
-- ✅ Vista unificada, coordina sweeps
-- ❌ NO modifica datos de hijos directamente
+**Workspace** (high level):
+- ✅ Unified view, coordinates sweeps
+- ❌ Does NOT modify child data directly
 
-**Implementación**: Ver `backend/services/collection.py` (~656 líneas) que encapsula toda la lógica de aggregation/distribution.
+**Implementation**: See `backend/services/collection.py` (~656 lines) which encapsulates all aggregation/distribution logic.
 
-**Regla clave**: Delegar al nivel más bajo donde vive la información. Workspace coordina pero NO ejecuta; Dataset ejecuta y almacena.
+**Key rule**: Delegate to the lowest level where the information lives. Workspace coordinates but does NOT execute; Dataset executes and stores.
 
 ---
 
-## 4. Atomicidad y Encapsulación
+## 4. Atomicity and Encapsulation
 
-**Principio**: Operaciones completas, auto-contenidas. Quien maneja la información, encapsula el comportamiento.
+**Principle**: Complete, self-contained operations. Whoever handles the information, encapsulates the behavior.
 
-**Atomicidad**:
+**Atomicity**:
 ```python
-# ✅ Operación atómica: marca, actualiza contadores, guarda
+# ✅ Atomic operation: mark, update counters, save
 def mark_image(self, base: str, reason: str, auto: bool = False) -> None:
     self.cache_data["marks"][base] = {"reason": reason, "auto": auto}
     self.rebuild_reason_counts()
     self.mark_cache_dirty()
 
-# ❌ NO: pasos dispersos que se pueden olvidar
+# ❌ NO: scattered steps that can be forgotten
 marks[base] = reason
-# ... 50 líneas después...
-rebuild_counts()  # Fácil olvidar
+# ... 50 lines later...
+rebuild_counts()  # Easy to forget
 ```
 
-**Encapsulación de comportamiento**:
+**Behavior encapsulation**:
 ```python
-# ✅ Dataset encapsula sweep completo
+# ✅ Dataset encapsulates complete sweep
 def run_duplicate_sweep(self) -> int:
     count = self._compute_duplicates()
     self.mark_cache_dirty()
     self.mark_sweep_done('duplicates')
     return count
 
-# ❌ NO: lógica dispersa en llamador
+# ❌ NO: logic scattered in caller
 count = compute_duplicates(dataset)
 dataset.mark_cache_dirty()
 dataset.mark_sweep_done('duplicates')
 ```
 
-**Reglas**:
-- ✅ Una operación = un método que hace TODO
-- ✅ Quien produce datos, los valida y persiste
-- ❌ NO dividir operaciones lógicamente atómicas
-- Intentar reutilizar funcionalidades. No repetir código que pueda inducir a errores si se puede aprovechar una función que ya existe y ha sido probada.
+**Rules**:
+- ✅ One operation = one method that does EVERYTHING
+- ✅ Whoever produces data, validates and persists it
+- ❌ DO NOT split logically atomic operations
+- Reuse existing functionality. Don't repeat code that could introduce errors when a tested function already exists.
 ---
 
-## 5. Código Limpio: Funciones con Propósito
+## 5. Clean Code: Functions with Purpose
 
-**Principio**: Cada función debe aportar valor. No getters/setters triviales. Cada clase es atómica y responsable de sus datos.
+**Principle**: Every function should add value. No trivial getters/setters. Each class is atomic and responsible for its own data.
 
-**✅ Funciones con lógica**: Validan, transforman, encapsulan.
-**✅ Properties útiles**: Cálculos derivados, agregaciones complejas.
-**❌ NO**: Getters/setters que solo hacen `return self.x` o `self.x = value`.
+**✅ Functions with logic**: Validate, transform, encapsulate.
+**✅ Useful properties**: Derived calculations, complex aggregations.
+**❌ NO**: Getters/setters that only do `return self.x` or `self.x = value`.
 
-**Regla**: Si la función no valida, no transforma, y no encapsula lógica → probablemente sobra.
+**Rule**: If the function doesn't validate, doesn't transform, and doesn't encapsulate logic → it's probably unnecessary.
 
-Intentamos que el código no sea demasiado extenso en ningún fichero, encapsulando funcionalidades en nuevos objetos/ficheros cuando sea posible y pertinente. Tampoco queremos tener demasiados ficheros, buscar punto medio.
+We aim to keep code from growing too large in any single file, encapsulating functionality into new objects/files when appropriate. We also avoid having too many files — find a middle ground.
 ---
 
 ## 6. Configuration: Single Source of Truth
 
-**Toda configuración en `config.py`**: constantes, paths, timeouts, límites, números mágicos.
+**All configuration in `config.py`**: constants, paths, timeouts, limits, magic numbers.
 
 ```python
-# ✅ Directo
+# ✅ Direct
 from config import get_config
 config = get_config()
 self.size = config.chessboard_size
 
-# ❌ NO re-exportar
-CHESSBOARD_SIZE = config.chessboard_size  # Innecesario
+# ❌ DO NOT re-export
+CHESSBOARD_SIZE = config.chessboard_size  # Unnecessary
 ```
 
-**Reglas**:
-- ✅ Acceso directo via `config.property`
-- ❌ NO duplicar constantes
-- ❌ NO re-exportar para "conveniencia"
-- ✅ Un solo `get_config()` por módulo, reutilizar la instancia
+**Rules**:
+- ✅ Direct access via `config.property`
+- ❌ DO NOT duplicate constants
+- ❌ DO NOT re-export for "convenience"
+- ✅ One `get_config()` per module, reuse the instance
 
-**Ejemplos de config.py**:
+**Examples in config.py**:
 ```python
 @dataclass
 class Config:
@@ -173,7 +173,7 @@ class Config:
     overlay_cache_limit: int = 24
     signature_scan_timer_interval_ms: int = 100
 
-    # Progress task IDs (para tracking consistente)
+    # Progress task IDs (for consistent tracking)
     progress_task_detection: str = "calibration-detect"
     progress_task_signatures: str = "signature-scan"
     progress_task_quality: str = "quality-scan"
@@ -183,41 +183,41 @@ class Config:
 
 ## 7. Fail Fast: None Checks & Error Handling
 
-**Principio**: Validar al inicio, fallar rápido, no enmascarar errores.
+**Principle**: Validate at the start, fail fast, don't mask errors.
 
-**Patrón**:
+**Pattern**:
 ```python
 def process_data(obj: Optional[Foo]) -> Result:
-    # ✅ Validar al inicio
+    # ✅ Validate at the start
     if obj is None:
         log_error("obj is None, cannot process")
         return Result.error()
 
-    # ✅ Resto del código asume obj válido
+    # ✅ Rest of the code assumes obj is valid
     return obj.compute()
 ```
 
-**Reglas**:
-- ✅ Checks de None al inicio de función
-- ✅ Si algo crítico es None: log_error y retornar
-- ✅ Si "no debería ser None": dejarlo petar (detecta bugs de programación)
-- ❌ NO llenar código con `if obj is not None` en cada uso
-- ❌ NO enmascarar errores con valores por defecto silenciosos
+**Rules**:
+- ✅ None checks at the start of functions
+- ✅ If something critical is None: log_error and return
+- ✅ If it "shouldn't be None": let it crash (detects programming bugs)
+- ❌ DO NOT fill code with `if obj is not None` on every use
+- ❌ DO NOT mask errors with silent default values
 
 ---
 
 ## 8. YAML-Compatible Types
 
-**Preferir tipos serializables**:
-- ✅ `list` sobre `tuple` (YAML serializable)
-- ✅ `dict` sobre clases custom
-- ✅ Tipos primitivos: str, int, float, bool
-- ⚠️ Matrices numpy: solo donde necesario (calibración)
+**Prefer serializable types**:
+- ✅ `list` over `tuple` (YAML serializable)
+- ✅ `dict` over custom classes
+- ✅ Primitive types: str, int, float, bool
+- ⚠️ Numpy matrices: only where necessary (calibration)
 
-**Conversión en fronteras**:
-- Memoria: Set[str] (eficiencia en lookups)
+**Conversion at boundaries**:
+- Memory: Set[str] (efficiency in lookups)
 - YAML: List[str] (serializable)
-- Conversión SOLO en `cache.py`: `_normalize_dataset_entry()` (load) y `serialize_dataset_entry()` (save)
+- Conversion ONLY in `cache.py`: `_normalize_dataset_entry()` (load) and `serialize_dataset_entry()` (save)
 
 ---
 
@@ -253,49 +253,49 @@ def process_data(obj: Optional[Foo]) -> Result:
 
 ## 11. Sweep Ownership
 
-**Principio**: Dataset ejecuta sweeps sobre sus datos, se auto-marca dirty y sweep_done.
+**Principle**: Dataset executes sweeps on its own data, self-marks dirty and sweep_done.
 
-**Pattern**: Workspace/Collection delegan → Dataset ejecuta → Auto-marca flags
+**Pattern**: Workspace/Collection delegates → Dataset executes → Self-marks flags
 
-**Handler Registry**: Un DatasetHandler por path, persiste en memoria para reutilización.
+**Handler Registry**: One DatasetHandler per path, persists in memory for reuse.
 
 ---
 
 ## 12. Code Cleanliness: No Legacy, No Cruft
 
-**Principio**: El código debe ser actual, no arrastrar compatibilidad hacia atrás. Se modificarán las funciones originales para adaptarlas a la API nueva, no se añaden wrappers que mantienen el código obsoleto y añaden código extra.
+**Principle**: Code should be current, not carry backward compatibility. Original functions should be modified to adapt to the new API; don't add wrappers that keep obsolete code alive and add extra code.
 
-**❌ Eliminar**:
+**❌ Remove**:
 ```python
 # Legacy: combined dict for backwards compatibility
-removed_by_reason = {}  # <-- "Legacy" engañoso si es API actual
+removed_by_reason = {}  # <-- Misleading "Legacy" if it's the current API
 
 # Fallback to old scan_workspace for compatibility
-results = scan_workspace()  # <-- NO debe haber "old" si es la única versión
+results = scan_workspace()  # <-- There shouldn't be an "old" if it's the only version
 
 # Keep complex properties for backward compatibility (will migrate in future)
-@property  # <-- Migrar cuanto antes!
+@property  # <-- Migrate as soon as possible!
 ```
 
-**✅ Hacer**:
+**✅ Do**:
 ```python
 # Combine user and auto reasons for total count
-removed_by_reason = {}  # <-- Descripción clara, sin "Legacy"
+removed_by_reason = {}  # <-- Clear description, no "Legacy"
 
-results = scan_workspace()  # <-- Sin "fallback" si es el único código
+results = scan_workspace()  # <-- No "fallback" if it's the only code
 
-@property  # <-- Sin promesas de "future migration"
+@property  # <-- No promises of "future migration"
 def reason_counts(self) -> Dict[str, int]:
     return self.cache_data["reason_counts"]
 ```
 
-**Reglas**:
-- ❌ NO código muerto "por si acaso" - Si no se usa, eliminarlo
-- ✅ Si algo ES legacy y debe mantenerse: documentar POR QUÉ y cuándo se eliminará
-- ✅ Al actualizar código: eliminar TODA referencia a formato antiguo
-- ✅ Comentarios que explican QUÉ hace el código
+**Rules**:
+- ❌ NO dead code "just in case" - If it's not used, remove it
+- ✅ If something IS legacy and must be kept: document WHY and when it will be removed
+- ✅ When updating code: remove ALL references to old format
+- ✅ Comments that explain WHAT the code does
 
-**Ejemplo**: Eliminar compatibilidad con formatos antiguos al refactorizar - código debe ser actual, no arrastrar legacy.
+**Example**: Remove compatibility with old formats when refactoring - code should be current, not carry legacy.
 
 ---
 

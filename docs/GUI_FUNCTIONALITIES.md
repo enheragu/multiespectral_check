@@ -169,7 +169,7 @@ Display options:
 ### Collection/Dataset Menu
 
 - Load Collection
-- Load recet (with sub-menut with 5 most recent collections)
+- Load recent (with submenu with 5 most recent collections)
 **Tagging & Deletion**:
 - Sweep operations (automated)
 - Delete all tagged images
