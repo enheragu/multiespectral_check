@@ -6,7 +6,6 @@ from typing import Sequence, Tuple
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QDialog,
-    QFormLayout,
     QGroupBox,
     QLabel,
     QScrollArea,
@@ -14,7 +13,15 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from frontend.utils.ui_messages import HELP_MENU_SECTIONS, HELP_OVERVIEW, HELP_SHORTCUTS, SUPPORT_EMAIL
+from frontend.utils.ui_messages import (
+    HELP_CONTEXT_MENUS,
+    HELP_DATASET_VIEW,
+    HELP_MENU_SECTIONS,
+    HELP_OVERVIEW,
+    HELP_SHORTCUTS,
+    HELP_WORKSPACE_PANEL,
+    SUPPORT_EMAIL,
+)
 from frontend.widgets import style
 
 
@@ -47,16 +54,46 @@ class HelpDialog(QDialog):
         content = QWidget(scroll)
         content.setStyleSheet("background: transparent;")
         content_layout = QVBoxLayout(content)
+
+        # Overview
         overview = QLabel(HELP_OVERVIEW, content)
         overview.setWordWrap(True)
         overview.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         content_layout.addWidget(overview)
-        for title, entries in HELP_MENU_SECTIONS:
-            content_layout.addWidget(self._section_header(f"{title} Menu:"))
-            content_layout.addWidget(self._build_menu_group(entries))
-        content_layout.addWidget(self._section_header("Shortcuts:"))
+
+        # ============ PANELS SECTION ============
+        content_layout.addWidget(self._major_section_header("Panels"))
+
+        content_layout.addWidget(self._section_header("Workspace Panel"))
+        content_layout.addWidget(self._build_entry_group(HELP_WORKSPACE_PANEL))
+
+        content_layout.addWidget(self._section_header("Dataset / Collection View"))
+        content_layout.addWidget(self._build_entry_group(HELP_DATASET_VIEW))
+
+        # ============ CONTEXT MENUS SECTION ============
+        content_layout.addWidget(self._major_section_header("Context Menus (Right-Click)"))
+
+        for title, entries in HELP_CONTEXT_MENUS:
+            content_layout.addWidget(self._section_header(title))
+            content_layout.addWidget(self._build_entry_group(entries))
+
+        # ============ MENUS SECTION ============
+        content_layout.addWidget(self._major_section_header("Menus"))
+
+        # Menus in menubar order: File, View, Workspace, Dataset, Calibration, Labelling, Help
+        menu_order = ["File", "View", "Workspace", "Dataset", "Calibration", "Labelling", "Help"]
+        menu_dict = {title: entries for title, entries in HELP_MENU_SECTIONS}
+        for menu_name in menu_order:
+            if menu_name in menu_dict:
+                content_layout.addWidget(self._section_header(f"{menu_name} Menu"))
+                content_layout.addWidget(self._build_entry_group(menu_dict[menu_name]))
+
+        # ============ SHORTCUTS SECTION ============
+        content_layout.addWidget(self._major_section_header("Keyboard Shortcuts"))
         content_layout.addWidget(self._build_shortcuts_group())
-        content_layout.addWidget(self._section_header("Contact:"))
+
+        # Contact
+        content_layout.addWidget(self._section_header("Contact"))
         contact_box = QWidget(content)
         contact_box.setObjectName("contact_box")
         contact_box.setStyleSheet(style.panel_body_style("contact_box"))
@@ -75,37 +112,58 @@ class HelpDialog(QDialog):
 
         layout.addWidget(card)
 
-    def _build_menu_group(self, entries: Sequence[Tuple[str, str]]) -> QGroupBox:
+    def _build_entry_group(self, entries: Sequence[Tuple[str, str]]) -> QGroupBox:
+        """Build a group with vertical layout: each entry is label (bold) + description below."""
         group = QGroupBox(self)
         group.setStyleSheet(GROUP_BOX_STYLE)
-        form = QFormLayout(group)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        for label, description in entries:
-            label_widget = QLabel(label, group)
-            label_widget.setStyleSheet("font-weight: 600;")
+        vbox = QVBoxLayout(group)
+        vbox.setSpacing(8)
+        for label_text, description in entries:
+            # Label in bold
+            label_widget = QLabel(f"<b>{label_text}</b>", group)
+            label_widget.setTextFormat(Qt.TextFormat.RichText)
             label_widget.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            description_widget = QLabel(description, group)
-            description_widget.setWordWrap(True)
-            description_widget.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            form.addRow(label_widget, description_widget)
+            vbox.addWidget(label_widget)
+            # Description below, indented slightly
+            desc_widget = QLabel(description, group)
+            desc_widget.setWordWrap(True)
+            desc_widget.setContentsMargins(12, 0, 0, 4)
+            desc_widget.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            vbox.addWidget(desc_widget)
         return group
 
     def _build_shortcuts_group(self) -> QGroupBox:
+        """Build shortcuts group with monospace keys."""
         group = QGroupBox(self)
         group.setStyleSheet(GROUP_BOX_STYLE)
-        form = QFormLayout(group)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        vbox = QVBoxLayout(group)
+        vbox.setSpacing(6)
         for combo, description in HELP_SHORTCUTS:
-            combo_label = QLabel(combo, group)
-            combo_label.setStyleSheet("font-family: monospace;")
-            combo_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            description_widget = QLabel(description, group)
-            description_widget.setWordWrap(True)
-            description_widget.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            form.addRow(combo_label, description_widget)
+            # Key combo in monospace
+            label_widget = QLabel(f"<code style='font-family: monospace; font-weight: bold;'>{combo}</code>", group)
+            label_widget.setTextFormat(Qt.TextFormat.RichText)
+            label_widget.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            vbox.addWidget(label_widget)
+            # Description below
+            desc_widget = QLabel(description, group)
+            desc_widget.setWordWrap(True)
+            desc_widget.setContentsMargins(12, 0, 0, 4)
+            desc_widget.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            vbox.addWidget(desc_widget)
         return group
 
     def _section_header(self, text: str) -> QLabel:
+        """Subsection header (medium size)."""
         label = QLabel(text)
-        label.setStyleSheet(SECTION_HEADER_STYLE + "margin-top: 12px;")
+        label.setStyleSheet(SECTION_HEADER_STYLE + "margin-top: 8px;")
+        return label
+
+    def _major_section_header(self, text: str) -> QLabel:
+        """Major section header (larger, with separator line effect)."""
+        label = QLabel(f"━━━  {text}  ━━━")
+        label.setStyleSheet(
+            f"font-size: 16px; font-weight: bold; color: {style.TEXT_TITLE}; "
+            "margin-top: 20px; margin-bottom: 4px;"
+        )
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         return label

@@ -330,7 +330,7 @@ class Ui_MainWindow(object):
         self.action_filter_calibration_partial = QtGui.QAction("Calibration with single detection", MainWindow)
         self.action_filter_calibration_missing = QtGui.QAction("Calibration without detections", MainWindow)
         self.action_filter_delete_candidates = QtGui.QAction("Delete candidates", MainWindow)
-        self.action_run_quality_scan = QtGui.QAction("Run blur/motion sweep", MainWindow)
+        self.action_run_quality_scan = QtGui.QAction("⚠ Run blur/motion sweep (experimental)", MainWindow)
         self.action_filter_delete_manual = QtGui.QAction("Delete (manual)", MainWindow)
         self.action_filter_delete_duplicate = QtGui.QAction("Delete (duplicate)", MainWindow)
         self.action_filter_delete_blurry = QtGui.QAction("Delete (blurry)", MainWindow)

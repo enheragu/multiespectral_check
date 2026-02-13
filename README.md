@@ -41,6 +41,15 @@ From the root directory of the repository:
 source scripts/run_debug.sh
 ```
 
+### First steps with the GUI
+
+1. **Set a workspace**: Open a folder containing your datasets/collections. The workspace panel shows dataset statistics at a glance.
+2. **Open a dataset**: Double-click a dataset in the workspace table or use Dataset > Load dataset.
+3. **Browse images**: Use ← / → arrows or Space to navigate LWIR/Visible pairs.
+4. **Filter & clean**: Run sweep tools (Dataset > Detect delete candidates) to flag duplicates, missing pairs, or blurry images. Review and tag manually via right-click or keyboard shortcuts. ⚠ Blur/motion sweep is still experimental.
+5. **Calibrate**: If you have calibration images (with chessboard), use the Calibration menu to detect corners, compute intrinsic/extrinsic matrices, and check the calibration report. Different view settings (undistort, stereo alignment) become available after calibration.
+6. **Label**: Configure a detection model and labels YAML (Labelling menu), then run automatic labelling on individual images or the full dataset. Manual labelling mode (Ctrl+L) lets you draw and edit bounding boxes directly.
+
 ## 📁 Dataset expected structure
 
 Once the GUI is started, a Workspace can be loaded. A workspace is a folder that contains one or more collections of sets. Each collection can contain one or more sets, and each set contains the actual images and metadata. The expected structure is as follows:
@@ -64,12 +73,12 @@ Note that collections are optional and can be used to group specific sets (all c
 
 - ✅ Review multispectral datasets (two synchronized images).
 - ✅ Handle big datasets split as multiple sets grouped as collections inside a workspace. Share calibration and useful configuration within the workspace.
-- ✅ Filter common image problems by automatic search (duplicates, missing pairs, noise) and manual tagging (problems in synchronization, blurry images, etc).
+- ✅ Filter common image problems by automatic search (duplicates, missing pairs, calibration patterns) and manual tagging (problems in synchronization, blurry images, etc). ⚠ Blur/motion detection is still experimental.
 - ✅ Tag calibration image pairs (those with chessboard pattern) either manually or through calibration search sweep. Chessboard detection with subpixel corner adjustment (not always better, check thoroughly).
 - ✅ Generate intrinsic and extrinsic calibration, with option to filter outliers (auto-detected or manually selected) to refine calibration.
 - ✅ Different options to check image rectification to match images field of view through calibration.
-- ✅ Manual labeling based on `config/labels_multiespectral_dataset.yaml` configuration file. Includes main labels and extra attributes.
-- ⏳ [TBD] Automatic label suggestion through different methods.
+- ✅ Manual labelling with bounding box drawing, class selection (autocomplete), and per-label editing/deletion. Check `config/labels_mmultiespectral_dataset.yaml` for an example of label configuration.
+- ⏳ [TBD] Automatic label suggestion using configurable detection models. Run on individual images or batch across the full dataset.
 - ⏳ [TBD] Dataset statistics and visualization of label distribution.
 - ⏳ [TBD] Dataset export with matching images and specific label format (YOLO, PascalVOC, etc).
 - ⏳ [TBD] Coverage and log for debug tracking and code quality control.

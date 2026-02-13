@@ -969,11 +969,11 @@ class ImageViewer(QMainWindow):
 
         # Detect delete candidates submenu (sweeps)
         detect_menu = add_submenu("Detect delete candidates", QStyle.StandardPixmap.SP_MediaPlay, self.menu_workspace)
-        add_action("Duplicates", QStyle.StandardPixmap.SP_MediaPlay, self._handle_workspace_duplicate_sweep, detect_menu)
-        add_action("Blur/motion", QStyle.StandardPixmap.SP_MediaPlay, self._handle_workspace_quality_sweep, detect_menu)
-        add_action("Patterns", QStyle.StandardPixmap.SP_MediaPlay, self._handle_workspace_pattern_sweep, detect_menu)
+        add_action("Run Duplicates sweep", QStyle.StandardPixmap.SP_MediaPlay, self._handle_workspace_duplicate_sweep, detect_menu)
+        add_action("⚠ Run Blur/motion sweep (experimental)", QStyle.StandardPixmap.SP_MediaPlay, self._handle_workspace_quality_sweep, detect_menu)
+        add_action("Run Patterns sweep", QStyle.StandardPixmap.SP_MediaPlay, self._handle_workspace_pattern_sweep, detect_menu)
         detect_menu.addSeparator()
-        add_action("Missing pairs", QStyle.StandardPixmap.SP_MediaPlay, self._handle_workspace_missing_sweep, detect_menu)
+        add_action("Run Missing pairs sweep", QStyle.StandardPixmap.SP_MediaPlay, self._handle_workspace_missing_sweep, detect_menu)
         detect_menu.addSeparator()
         add_action("Run all sweeps…", QStyle.StandardPixmap.SP_MediaPlay, self._handle_workspace_all_sweeps, detect_menu)
 
