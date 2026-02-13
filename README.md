@@ -1,13 +1,87 @@
+# Multiespectral Check GUI
 
-# INstall UV
+GUI for multispectral dataset review, calibration, and labeling for detection tasks.
+
+![Image of the GUI with calibration images loaded](./docs/media/gui_general_view.png)
+
+## ⚙️ Requirements
+
+- **OS**: Linux (tested on Ubuntu 24.04 and 20.04)
+- **Python**: >= 3.12
+- Main dependencies: PyQt6, OpenCV, NumPy (see `requirements.txt` for full list)
+
+## 🚀 Installation
+
+It is recommended to work in a virtual environment so that dependencies match. [UV](https://docs.astral.sh/uv/) is a nice match for that and allows easy management of different Python versions along with their dependencies.
+
+```sh
+# Clone the repository
+git clone https://github.com/enheragu/multiespectral_check.git
+cd multiespectral_check
+
+# Install UV package manager
 curl -LsSf https://astral.sh/uv/install.sh | sh
-# Install target python version
-uv python install 3.12
 
-# Create VENV
+# Install Python 3.12 and create virtual env
+uv python install 3.12
 uv venv --python 3.12 .venv
 source .venv/bin/activate
-python --version
+python --version  # Should show 3.12.x
 
-# Install requirements
+# Install dependencies
 uv pip install -r requirements.txt
+```
+
+## ▶️ Usage
+
+The main entry point is `src/main.py`. Although it can be executed directly, it is recommended to use `scripts/run_debug.sh`, which enables extra logging stored into a file along with coverage tools. This way any error or crash can be better debugged.
+
+From the root directory of the repository:
+```sh
+source scripts/run_debug.sh
+```
+
+## 📁 Dataset expected structure
+
+Once the GUI is started, a Workspace can be loaded. A workspace is a folder that contains one or more collections of sets. Each collection can contain one or more sets, and each set contains the actual images and metadata. The expected structure is as follows:
+
+```text
+workspace/
+├── collection1/          # Groups related datasets
+│   ├── set_a/        # LWIR + Visible synchronized pairs
+│   │   ├── lwir/
+│   │   │   ├── img_001.png
+│   │   │   ├── img_001.yaml (metadata)
+│   │   │   └── ...
+│   │   └── visible/     # Same structure
+│   └── set_b/
+└── standalone_set/  # Treated as single-set collection
+```
+
+Note that collections are optional and can be used to group specific sets (all calibration sets, all daylight sets, etc). If a set is not inside a collection, it will be treated as a single-set collection.
+
+## ✨ Core features
+
+- ✅ Review multispectral datasets (two synchronized images).
+- ✅ Handle big datasets split as multiple sets grouped as collections inside a workspace. Share calibration and useful configuration within the workspace.
+- ✅ Filter common image problems by automatic search (duplicates, missing pairs, noise) and manual tagging (problems in synchronization, blurry images, etc).
+- ✅ Tag calibration image pairs (those with chessboard pattern) either manually or through calibration search sweep. Chessboard detection with subpixel corner adjustment (not always better, check thoroughly).
+- ✅ Generate intrinsic and extrinsic calibration, with option to filter outliers (auto-detected or manually selected) to refine calibration.
+- ✅ Different options to check image rectification to match images field of view through calibration.
+- ✅ Manual labeling based on `config/labels_multiespectral_dataset.yaml` configuration file. Includes main labels and extra attributes.
+- ⏳ [TBD] Automatic label suggestion through different methods.
+- ⏳ [TBD] Dataset statistics and visualization of label distribution.
+- ⏳ [TBD] Dataset export with matching images and specific label format (YOLO, PascalVOC, etc).
+- ⏳ [TBD] Coverage and log for debug tracking and code quality control.
+
+
+## 📚 Extra documentation
+
+- [GUI_FUNCTIONALITIES.md](docs/GUI_FUNCTIONALITIES.md) — Detailed information about the functionalities included in the GUI.
+- [DESIGN_PHILOSOPHY.md](docs/DESIGN_PHILOSOPHY.md) — Design and coding philosophy followed in this project.
+
+## 🐛 Bug reports & Contact
+
+If you find a bug or have a feature request, please [open an issue](https://github.com/enheragu/multiespectral_check/issues) on GitHub or contact the maintainer via [email](mailto:e.heredia@umh.es).
+
+For general questions, feel free to reach out via the repository's issue tracker.
