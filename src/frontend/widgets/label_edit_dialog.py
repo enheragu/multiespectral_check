@@ -96,6 +96,8 @@ class LabelEditDialog(QDialog):
         self._p2_x_spin: Optional[QSpinBox] = None
         self._p2_y_spin: Optional[QSpinBox] = None
 
+        self._ok_button: Optional[QWidget] = None
+
         # Block signals during setup
         self._setup_in_progress = True
         self._setup_ui()
@@ -322,6 +324,13 @@ class LabelEditDialog(QDialog):
 
         # Connect class change AFTER setup to avoid spurious updates
         self._class_combo.currentTextChanged.connect(self._on_class_changed)
+
+        # Validate class selection when text changes (prevent invalid classes)
+        self._ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        self._class_combo.currentTextChanged.connect(self._validate_class_selection)
+        self._class_combo.editTextChanged.connect(self._validate_class_selection)
+        # Initial validation
+        self._validate_class_selection(self._class_combo.currentText())
 
     def _update_size_label(self) -> None:
         """Update the size info label with current dimensions."""
@@ -585,12 +594,64 @@ class LabelEditDialog(QDialog):
 
         return None
 
-    def get_class_id(self) -> Optional[str]:
-        """Get the selected class ID."""
-        text = self._class_combo.currentText()
+    def _validate_class_selection(self, text: str = "") -> None:
+        """Enable OK button only if the current class text resolves to a valid config class."""
+        if not self._ok_button:
+            return
+        resolved = self._resolve_class_id(text or self._class_combo.currentText())
+        self._ok_button.setEnabled(resolved is not None)
+        if resolved is None and text:
+            self._ok_button.setToolTip("Class not found in label configuration")
+        else:
+            self._ok_button.setToolTip("")
+
+    def _resolve_class_id(self, text: str) -> Optional[str]:
+        """Resolve user input to a valid class ID using config.
+
+        Handles formats: '0: person', '0', 'person'.
+        Returns None if no config is loaded or class not found.
+        """
+        text = text.strip()
+        if not text:
+            return None
+        if not self.config:
+            # No config loaded — accept anything as-is
+            return text
+        # Handle "id: name" format
         if ":" in text:
-            return text.split(":")[0].strip()
-        return text.strip() if text else None
+            leading = text.split(":", 1)[0].strip()
+            if leading and leading in self.config.classes:
+                return leading
+        # Direct ID match
+        if text in self.config.classes:
+            return text
+        # Name match (case-insensitive)
+        text_lower = text.lower()
+        for cls_id, cls_def in self.config.classes.items():
+            if cls_def.name.lower() == text_lower:
+                return cls_id
+            for alias in cls_def.aliases:
+                if alias.lower() == text_lower:
+                    return cls_id
+        return None
+
+    def accept(self) -> None:
+        """Validate class selection before accepting the dialog."""
+        resolved = self._resolve_class_id(self._class_combo.currentText())
+        if resolved is None:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                self, "Invalid class",
+                "The selected class is not in the label configuration.\n\n"
+                "Please select a class from the dropdown or type a valid name."
+            )
+            self._class_combo.setFocus()
+            return
+        super().accept()
+
+    def get_class_id(self) -> Optional[str]:
+        """Get the selected class ID (validated against config)."""
+        return self._resolve_class_id(self._class_combo.currentText())
 
     def get_bbox(self) -> tuple:
         """Get the current bounding box (normalized center format)."""

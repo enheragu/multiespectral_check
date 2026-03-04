@@ -741,6 +741,13 @@ class WorkspacePanel(QWidget):
 
         infos = self.workspace_manager.scan_workspace()
 
+        # Detect if workspace root is itself a dataset (common user mistake)
+        if not infos and self.workspace_dir:
+            ws = self.workspace_dir
+            if (ws / "lwir").is_dir() and (ws / "visible").is_dir():
+                log_warning(f"Workspace root {ws.name} is a dataset, not a workspace", "WORKSPACE")
+                self._show_dataset_detected_dialog(ws.name)
+
         log_info(f"Scan complete, applying {len(infos)} results to table...", "WORKSPACE")
         self._apply_scan_results(infos)
         datasets = len([i for i in self._infos if not i.is_collection])
@@ -750,6 +757,60 @@ class WorkspacePanel(QWidget):
             self.reset_button.setEnabled(bool(self._infos))
         if self.progress_placeholder:
             self.progress_placeholder.setVisible(bool(self._reset_workers))
+
+    def _show_dataset_detected_dialog(self, folder_name: str) -> None:
+        """Show informational dialog when the workspace root is itself a dataset."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Dataset detected")
+        dlg.setSizeGripEnabled(False)
+        layout = QVBoxLayout(dlg)
+
+        header = QLabel(
+            f"The selected folder <b>{folder_name}</b> appears to be a dataset "
+            f"(it contains <code>lwir/</code> and <code>visible/</code> folders)."
+        )
+        header.setWordWrap(True)
+        layout.addWidget(header)
+
+        hint = QLabel("A workspace should contain datasets or collections of datasets:")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        tree_text = (
+            "workspace/\n"
+            "├── collection_1/\n"
+            "│   ├── set_a/        (lwir/ + visible/)\n"
+            "│   └── set_b/\n"
+            "└── standalone_set/    (lwir/ + visible/)"
+        )
+        tree = QPlainTextEdit()
+        tree.setReadOnly(True)
+        tree.setPlainText(tree_text)
+        tree.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Size to content: line height × number of lines + margins
+        doc = tree.document()
+        doc.adjustSize()
+        margins = tree.contentsMargins()
+        line_count = tree_text.count("\n") + 1
+        line_h = tree.fontMetrics().lineSpacing()
+        tree.setFixedHeight(line_count * line_h + margins.top() + margins.bottom() + 16)
+        layout.addWidget(tree)
+
+        footer = QLabel(
+            "Please select the <b>parent folder</b> that contains your "
+            "dataset(s) or create a workspace based on the expected structure."
+        )
+        footer.setWordWrap(True)
+        layout.addWidget(footer)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        buttons.accepted.connect(dlg.accept)
+        layout.addWidget(buttons)
+
+        dlg.adjustSize()
+        dlg.setFixedSize(dlg.size())
+        dlg.exec()
 
     def _open_sweep_dialog(self) -> None:
         dialog = _SweepConfirmDialog(self)

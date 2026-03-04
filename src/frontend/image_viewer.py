@@ -1943,16 +1943,12 @@ class ImageViewer(QMainWindow):
         handler.saveStatusChanged.connect(self._on_save_status_changed)
 
         # Sync sweep states FROM handler summary TO session state (summary is source of truth)
+        # NOTE: "missing" is not tracked in SummaryCache — it's always auto-derived
+        # on load by DatasetSession._auto_mark_missing_pairs(), so no sync needed.
         if handler.summary:
-            # Copy sweep flags from summary to session state
-            self.session.state.cache_data["sweep_flags"]["missing"] = handler.summary.get_sweep_missing_done()
             self.session.state.cache_data["sweep_flags"]["duplicates"] = handler.summary.get_sweep_duplicates_done()
             self.session.state.cache_data["sweep_flags"]["quality"] = handler.summary.get_sweep_quality_done()
             self.session.state.cache_data["sweep_flags"]["patterns"] = handler.summary.get_sweep_patterns_done()
-            # Mark missing sweep as done on load
-            handler.summary.set_sweep_missing_done(True)
-            self.session.state.cache_data["sweep_flags"]["missing"] = True
-            handler.mark_dirty()
 
         # Initialize LabelService for this dataset
         self.label_service = LabelService(dataset_path=dir_path)
@@ -2896,9 +2892,15 @@ class ImageViewer(QMainWindow):
             view.clear_edit_highlight()
 
         if result:
-            new_class_id = result.get("class_id")
+            cls_value = result.get("class_id")
             new_display_bbox = result.get("bbox")  # In DISPLAY coordinates
             new_attrs = result.get("attributes", {})
+
+            # Validate class_id against config (same as new_annotation flow)
+            new_class_id = self.label_service.class_id_for_value(cls_value) if cls_value else None
+            if new_class_id is None:
+                QMessageBox.warning(self, "Label class", "Select a class from the list or type a valid name/id.")
+                return
 
             # Transform display bbox back to original coordinates for storage
             if new_display_bbox:

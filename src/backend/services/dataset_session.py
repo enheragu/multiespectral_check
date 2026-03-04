@@ -995,9 +995,12 @@ class DatasetSession:
 
         # Merge loaded cache into base structure (cache values override defaults)
         # Special handling for nested dicts like sweep_flags to merge keys
+        # and List→Set conversion for overrides at load boundary (§2, §8 Design Philosophy)
         for key, value in cache_entry.items():
             if key == "sweep_flags" and isinstance(value, dict) and isinstance(base_data.get(key), dict):
                 base_data[key].update(value)
+            elif key == "overrides":
+                base_data[key] = set(value) if isinstance(value, (list, set)) else set()
             else:
                 base_data[key] = value
 

@@ -14,7 +14,7 @@ class AppConfig:
     """Main application configuration."""
 
     # Dataset defaults
-    default_dataset_dir: Path = Path.home() / "umh" / "ros2_ws" / "images_eeha"
+    default_dataset_dir: Path = Path("")
 
     # Pattern sweep
     patterns_dir: Path = Path(__file__).resolve().parent.parent / "config" / "patterns"
