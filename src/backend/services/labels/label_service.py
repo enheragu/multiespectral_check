@@ -61,6 +61,40 @@ if TYPE_CHECKING:
 
 
 # =============================================================================
+# Helpers
+# =============================================================================
+
+def _bbox_iou(
+    a: Tuple[float, float, float, float],
+    b: Tuple[float, float, float, float],
+) -> float:
+    """Intersection-over-Union for two normalised centre-format boxes.
+
+    Each box is ``(cx, cy, w, h)`` with values in [0, 1].
+    """
+    ax1 = a[0] - a[2] / 2
+    ay1 = a[1] - a[3] / 2
+    ax2 = a[0] + a[2] / 2
+    ay2 = a[1] + a[3] / 2
+
+    bx1 = b[0] - b[2] / 2
+    by1 = b[1] - b[3] / 2
+    bx2 = b[0] + b[2] / 2
+    by2 = b[1] + b[3] / 2
+
+    ix1 = max(ax1, bx1)
+    iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+
+    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    area_a = a[2] * a[3]
+    area_b = b[2] * b[3]
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+# =============================================================================
 # Label Service
 # =============================================================================
 
@@ -169,32 +203,74 @@ class LabelService:
         self._detector = detector
         self._class_mapper = class_mapper or get_default_coco_mapper()
         log_info(f"Detector set: {detector.get_model_info().name}")
+        self._validate_mapper_attrs()
 
-    def load_yolov8_detector(
+    def load_detector(
         self,
-        model_path: str = "yolov8n.pt",
-        confidence_threshold: float = 0.5,
-        class_mapper: Optional[ClassMapper] = None,
+        model_key: str,
+        *,
+        file_path: Optional[str] = None,
+        confidence_threshold: Optional[float] = None,
+        image_size: Optional[Tuple[int, int]] = None,
     ) -> None:
-        """Convenience method to load YOLOv8 detector.
+        """Load a detection model by key via the detector factory.
+
+        All model-specific knowledge lives in ``detector_factory``; this
+        method just bridges the factory and ``set_detector()``.
 
         Args:
-            model_path: Path to model weights or model name
-            confidence_threshold: Detection confidence threshold
-            class_mapper: Optional class mapper (defaults to COCO mapper)
+            model_key: Key from ``detector_factory.list_available_models()``
+                       (e.g. ``"gdino-base"``, ``"yolov8"``).
+            file_path: Weights file (required for models that need one).
+            confidence_threshold: Optional override for the model default.
+            image_size: Dataset image dimensions ``(width, height)``.
+                        Used to configure processing resolution so the
+                        detector sees images at their full native size.
         """
-        from .detection.yolov8 import YoloV8Detector
+        from .detection.detector_factory import create_detector
 
-        detector = YoloV8Detector(
-            model_path=model_path,
+        detector, mapper = create_detector(
+            model_key,
+            label_config=self._config,
+            file_path=file_path,
             confidence_threshold=confidence_threshold,
+            image_size=image_size,
         )
-        self.set_detector(detector, class_mapper)
+        self.set_detector(detector, mapper)
 
     @property
     def has_detector(self) -> bool:
         """Check if a detection model is configured."""
         return self._detector is not None
+
+    def _validate_mapper_attrs(self) -> None:
+        """Warn if mapper-inferred attribute keys don't match loaded schema.
+
+        Runs at detector-setup time so mismatches between
+        ``DEFAULT_COCO_TO_ATTRS`` and the YAML schema are caught early
+        instead of silently producing orphaned attributes at detection time.
+        """
+        if not self._config or not self._class_mapper:
+            return
+        mapper = self._class_mapper
+        for model_id in mapper.mapped_model_classes:
+            inferred = mapper.get_inferred_attrs(model_id)
+            if not inferred:
+                continue
+            schema_id = mapper.to_schema(model_id)
+            if schema_id is None:
+                continue
+            cls_def = self._config.classes.get(str(schema_id))
+            if cls_def is None:
+                continue
+            for attr_key in inferred:
+                if attr_key not in cls_def.attributes:
+                    log_warning(
+                        f"Mapper attr '{attr_key}' for model class {model_id} "
+                        f"→ schema class '{cls_def.name}' ({cls_def.class_id}) "
+                        f"not found in YAML schema attributes: "
+                        f"{list(cls_def.attributes.keys())}"
+                    )
 
     # =========================================================================
     # Calibration / Projection Setup
@@ -675,6 +751,11 @@ class LabelService:
     ) -> List[Annotation]:
         """Run auto-detection on an image.
 
+        If the image already has AUTO annotations that match the new
+        detections (same classes, similar bounding boxes), the method
+        returns the existing set without touching storage — avoiding
+        unnecessary writes and preserving any user-reviewed edits.
+
         Args:
             image_base: Image base name
             channel: Channel name
@@ -683,7 +764,7 @@ class LabelService:
             replace_existing_auto: If True, removes existing AUTO annotations first
 
         Returns:
-            List of new AUTO annotations added
+            List of new AUTO annotations added (empty if skipped)
         """
         if not self._detector:
             raise RuntimeError("No detector configured. Call set_detector() first.")
@@ -704,14 +785,63 @@ class LabelService:
             ann.attributes["model"] = model_info.name
             ann.attributes["model_version"] = model_info.version
 
-        # Optionally clear existing AUTO annotations
+        # ── Skip if existing AUTO labels already match ──
         if replace_existing_auto:
+            existing = [
+                a for a in self.get_annotations(image_base, channel)
+                if a.source == AnnotationSource.AUTO
+            ]
+            if self._annotations_match(existing, annotations):
+                log_debug(
+                    f"Skipping {image_base}/{channel}: "
+                    f"existing {len(existing)} AUTO labels match new detections"
+                )
+                return []
             self.clear_annotations(image_base, channel, AnnotationSource.AUTO)
 
         # Add new annotations
         self.add_annotations(image_base, channel, annotations)
 
         return annotations
+
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _annotations_match(
+        existing: List[Annotation],
+        new: List[Annotation],
+        iou_threshold: float = 0.70,
+    ) -> bool:
+        """Check whether two annotation sets are equivalent.
+
+        Returns True when both sets have the same number of items and
+        each existing annotation has a matching new one (same class_id,
+        IoU ≥ *iou_threshold*).  This is an O(N²) comparison but N is
+        typically ≤ 50 per image so the cost is negligible.
+
+        The threshold is intentionally high so that two *distinct*
+        nearby instances of the same class are not confused as duplicates.
+        """
+        if len(existing) != len(new):
+            return False
+        if not existing:
+            return True  # both empty
+
+        matched = [False] * len(new)
+        for old in existing:
+            found = False
+            for j, cur in enumerate(new):
+                if matched[j]:
+                    continue
+                if old.class_id != cur.class_id:
+                    continue
+                if _bbox_iou(old.bbox, cur.bbox) >= iou_threshold:
+                    matched[j] = True
+                    found = True
+                    break
+            if not found:
+                return False
+        return True
 
     def auto_detect_batch(
         self,
@@ -974,6 +1104,11 @@ class LabelService:
         annotations = self.get_annotations(image_base, channel)
         result: List[Tuple[str, float, float, float, float, Tuple[int, int, int]]] = []
 
+        # Internal / separately-rendered attributes that should not appear
+        # in the overlay text.  'confidence' and 'source' are shown via
+        # their own dedicated formatting, not through the attribute list.
+        _HIDDEN_ATTRS = {"model", "model_version", "raw_label", "confidence", "source"}
+
         for ann in annotations:
             # Get class name from config or use ID
             cls_name = ann.class_id
@@ -984,6 +1119,18 @@ class LabelService:
 
             # Display format: "id: name" if different, else just name
             display = f"{ann.class_id}: {cls_name}" if ann.class_id != cls_name else cls_name
+
+            # Append useful attributes in parentheses
+            visible_attrs = [
+                str(v) for k, v in ann.attributes.items()
+                if k not in _HIDDEN_ATTRS and v not in (None, "", "unknown")
+            ]
+            if visible_attrs:
+                display += f" ({', '.join(visible_attrs)})"
+
+            # Append confidence percentage for auto detections
+            if ann.source == AnnotationSource.AUTO and ann.confidence < 1.0:
+                display += f" {ann.confidence:.0%}"
 
             # Get color from class name
             color = class_color(cls_name)
@@ -1035,6 +1182,10 @@ class LabelService:
     ) -> Optional[Tuple[int, Annotation]]:
         """Find annotation containing or nearest to a point.
 
+        When multiple annotations contain the point, returns the
+        **smallest** one (by area) so that inner / overlapping boxes
+        are preferred over larger enclosing ones.
+
         Args:
             image_base: Image base name
             channel: Channel name
@@ -1048,14 +1199,21 @@ class LabelService:
         if not annotations:
             return None
 
-        # First try to find one that contains the point
+        # Collect ALL containing annotations, pick smallest by area
+        containing: list[Tuple[int, Annotation, float]] = []
         for idx, ann in enumerate(annotations):
             left = ann.x_center - ann.width / 2
             right = ann.x_center + ann.width / 2
             top = ann.y_center - ann.height / 2
             bottom = ann.y_center + ann.height / 2
             if left <= x_norm <= right and top <= y_norm <= bottom:
-                return (idx, ann)
+                area = ann.width * ann.height
+                containing.append((idx, ann, area))
+
+        if containing:
+            # Return the annotation with the smallest area
+            containing.sort(key=lambda t: t[2])
+            return (containing[0][0], containing[0][1])
 
         # Fallback: find nearest by center
         best_idx = 0
@@ -1067,6 +1225,45 @@ class LabelService:
                 best_idx = idx
 
         return (best_idx, annotations[best_idx])
+
+    def find_all_annotations_at(
+        self,
+        image_base: str,
+        channel: str,
+        x_norm: float,
+        y_norm: float,
+    ) -> list[Tuple[int, Annotation]]:
+        """Find ALL annotations containing the given point.
+
+        Returns them sorted by area ascending (smallest first) so the
+        most precise / innermost box is first in the list.
+
+        Args:
+            image_base: Image base name
+            channel: Channel name
+            x_norm: X coordinate [0,1]
+            y_norm: Y coordinate [0,1]
+
+        Returns:
+            List of (index, annotation) tuples, sorted by area ascending.
+            Empty list when no annotations contain the point.
+        """
+        annotations = self.get_annotations(image_base, channel)
+        if not annotations:
+            return []
+
+        hits: list[Tuple[int, Annotation, float]] = []
+        for idx, ann in enumerate(annotations):
+            left = ann.x_center - ann.width / 2
+            right = ann.x_center + ann.width / 2
+            top = ann.y_center - ann.height / 2
+            bottom = ann.y_center + ann.height / 2
+            if left <= x_norm <= right and top <= y_norm <= bottom:
+                area = ann.width * ann.height
+                hits.append((idx, ann, area))
+
+        hits.sort(key=lambda t: t[2])
+        return [(idx, ann) for idx, ann, _ in hits]
 
     def delete_annotation_at(
         self,

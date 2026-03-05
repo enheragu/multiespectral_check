@@ -1,15 +1,29 @@
+# ── GUI ──────────────────────────────────────────────
 PyQt6
+
+# ── Core ─────────────────────────────────────────────
 PyYAML
-types-PyYAML
 opencv-python
 numpy
 tqdm
-types-tqdm
 tabulate
+Pillow
+
+# ── Detection models (optional – only needed for auto-labelling) ─
+torch
+torchvision
+transformers
+ultralytics
+
+# ── Type stubs ───────────────────────────────────────
+types-PyYAML
+types-tqdm
 types-tabulate
+
+# ── Dev / testing ────────────────────────────────────
 pytest
 pytest-cov
+coverage
 pipx
 pycln
 vulture
-coverage

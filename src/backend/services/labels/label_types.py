@@ -284,6 +284,11 @@ class Annotation:
     annotation_id: Optional[int] = None  # Assigned when added to ImageLabels
     confidence: float = 1.0  # Detection confidence
 
+    def __post_init__(self) -> None:
+        """Guarantee class_id is always stored as str."""
+        if not isinstance(self.class_id, str):
+            self.class_id = str(self.class_id)
+
     @property
     def x_center(self) -> float:
         """X center coordinate [0,1]."""

@@ -324,6 +324,13 @@ class Ui_MainWindow(object):
         self.action_label_manual_mode = QtGui.QAction("Manual labelling mode", MainWindow)
         self.action_label_manual_mode.setCheckable(True)
         self.action_label_manual_mode.setShortcut(QtGui.QKeySequence("Ctrl+L"))
+        self.action_label_auto_mode = QtGui.QAction("Auto labelling mode", MainWindow)
+        self.action_label_auto_mode.setCheckable(True)
+        self.action_label_auto_mode.setShortcut(QtGui.QKeySequence("Ctrl+Shift+L"))
+        self.action_label_detection_channel = QtGui.QAction("Detection channel: Visible", MainWindow)
+        self.action_label_detection_channel.setToolTip(
+            "Toggle which image channel is used for auto-detection (Visible / LWIR)"
+        )
         self.action_filter_all = QtGui.QAction("Show all images", MainWindow)
         self.action_filter_calibration_any = QtGui.QAction("Calibration candidates", MainWindow)
         self.action_filter_calibration_both = QtGui.QAction("Calibration with both detections", MainWindow)
@@ -519,6 +526,9 @@ class Ui_MainWindow(object):
         self.menu_labelling.addAction(self.action_label_clear_current)
         self.menu_labelling.addSeparator()
         self.menu_labelling.addAction(self.action_label_manual_mode)
+        self.menu_labelling.addAction(self.action_label_auto_mode)
+        self.menu_labelling.addSeparator()
+        self.menu_labelling.addAction(self.action_label_detection_channel)
         self.menu_help.addAction(self.action_show_help)
         self.menubar.addAction(self.menu_file.menuAction())
         self.menubar.addAction(self.menu_view.menuAction())

@@ -36,6 +36,7 @@ class MarkingController:
         get_image_path: Optional[Callable[[str, str], Optional[str]]] = None,
         refresh_workspace: Optional[Callable[[], None]] = None,
         enter_labelling_mode: Optional[Callable[[], None]] = None,
+        enter_auto_labelling_mode: Optional[Callable[[], None]] = None,
     ) -> None:
         self.parent = parent
         self.state = state
@@ -56,11 +57,18 @@ class MarkingController:
         self.get_image_path = get_image_path
         self.refresh_workspace = refresh_workspace
         self._enter_labelling_mode = enter_labelling_mode
+        self._enter_auto_labelling_mode = enter_auto_labelling_mode
 
     def enter_labelling_mode(self) -> None:
         """Enter manual labelling mode via the configured callback."""
         if self._enter_labelling_mode:
             self._enter_labelling_mode()
+
+    def enter_auto_labelling_mode(self) -> None:
+        """Enter auto labelling mode via the configured callback."""
+        if self._enter_auto_labelling_mode:
+            self._enter_auto_labelling_mode()
+
     # Context menu -------------------------------------------------
     def show_context_menu(self, global_pos) -> None:
         if not self.has_images():
@@ -108,6 +116,10 @@ class MarkingController:
         if labelling_action is not None:
             labelling_action.setShortcut(QKeySequence("Ctrl+L"))
             labelling_action.setShortcutVisibleInContextMenu(True)
+        auto_labelling_action = menu.addAction("Enter auto labelling mode")
+        if auto_labelling_action is not None:
+            auto_labelling_action.setShortcut(QKeySequence("Ctrl+Shift+L"))
+            auto_labelling_action.setShortcutVisibleInContextMenu(True)
         # Copy path submenu
         copy_lwir_action = None
         copy_vis_action = None
@@ -147,6 +159,9 @@ class MarkingController:
             return
         if labelling_action and chosen is labelling_action:
             self.enter_labelling_mode()
+            return
+        if auto_labelling_action and chosen is auto_labelling_action:
+            self.enter_auto_labelling_mode()
             return
         if copy_lwir_action and chosen is copy_lwir_action:
             self._copy_image_path(base, "lwir")

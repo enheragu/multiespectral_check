@@ -43,6 +43,7 @@ class ZoomPanView(QScrollArea):
         self._drag_origin: Optional[QPointF] = None
         self._suppress_emit = False
         self._labeling_mode = False
+        self._auto_label_mode = False   # right-click edit only (no rubber-band)
         self._label_start: Optional[QPointF] = None
         self._label_start_px: Optional[QPoint] = None
         self._label_current_px: Optional[QPoint] = None
@@ -143,7 +144,7 @@ class ZoomPanView(QScrollArea):
                 self._update_rubber_band()
             event.accept()
             return
-        if self._labeling_mode and event.button() == Qt.MouseButton.RightButton:
+        if (self._labeling_mode or self._auto_label_mode) and event.button() == Qt.MouseButton.RightButton:
             pos = self._image_pos(event)
             if pos:
                 self.labelDeleteRequested.emit(pos.x(), pos.y(), event.globalPosition().toPoint())
@@ -202,8 +203,9 @@ class ZoomPanView(QScrollArea):
         super().leaveEvent(event)
 
     def contextMenuEvent(self, event):  # noqa: N802
-        # In labeling mode, right-click is handled by mousePressEvent (labelDeleteRequested)
-        if self._labeling_mode:
+        # In labeling/auto-label mode, right-click is handled by
+        # mousePressEvent (labelDeleteRequested)
+        if self._labeling_mode or self._auto_label_mode:
             event.accept()
             return
         self.contextRequested.emit(event.globalPos())
@@ -224,6 +226,10 @@ class ZoomPanView(QScrollArea):
         self._rubber_band.hide()
         if not enabled:
             self.unsetCursor()
+
+    def set_auto_label_mode(self, enabled: bool) -> None:
+        """Enable right-click label editing without rubber-band drawing."""
+        self._auto_label_mode = enabled
 
     def set_edit_highlight(self, bbox: Optional[tuple]) -> None:
         """Set a bbox to highlight during editing (x1, y1, x2, y2 normalized).

@@ -61,7 +61,7 @@ classes:
         options: [adult, child]
       activity:
         type: enum
-        options: [standing, walking, sitting, cycling, running, lying]
+        options: [standing, sitting, lying]
       perceived_gender:
         type: enum
         options: [male, female, unknown]
@@ -84,11 +84,11 @@ classes:
   - id: 3
     name: heavy_vehicle
     group: dynamic
-    aliases: [bus, truck, lorry]
+    aliases: [city bus, truck, lorry]
     attributes:
       class:
         type: enum
-        options: [bus, truck, construction, mobile_crane]
+        options: [city bus, truck, construction, mobile_crane]
       special_service:
         type: enum
         options: [none, fire_dept, ambulance, police, military]
@@ -130,9 +130,6 @@ classes:
       type:
         type: enum
         options: [dog, cat, bird, wildlife]
-      restrained:
-        type: bool
-        description: Whether the animal appears restrained (leash, cage, etc.)
 
   - id: 7
     name: loose_object
@@ -149,9 +146,6 @@ classes:
       carried:
         type: bool
         description: Whether the object is being carried/worn by a person
-      location:
-        type: enum
-        options: [road, sidewalk, terrain]
 
   - id: 8
     name: emergency_vehicle
@@ -173,14 +167,11 @@ classes:
     name: construction_element
     description: Temporary construction/works elements
     group: dynamic
-    aliases: [scaffolding, construction_barrier]
+    aliases: [scaffolding, construction_barrier, construction_fence]
     attributes:
       type:
         type: enum
         options: [scaffolding, container, portable_fence, excavation, machinery]
-      location:
-        type: enum
-        options: [road, sidewalk, building]
 
   # -----------------------------------------------------#
   #  GROUP 2: Infrastructure (permanent static objects)  #
@@ -214,31 +205,26 @@ classes:
         type: enum
         options: [stop, yield, warning, limit, prohibition, info, electronic_vms]
         description: VMS = Variable Message Sign (electronic display)
-      cleanliness:
-        type: enum
-        options: [clean, dirty_graffiti]
 
   - id: 12
     name: street_furniture
-    description: Fixed objects on sidewalk
+    description: Fixed objects on sidewalk / public way
     group: infrastructure
-    aliases: [bench, parking meter, parking_meter, fire hydrant, fire_hydrant]
+    aliases: [bench, parking meter, parking_meter, fire hydrant, fire_hydrant, fire extinguisher, fire hose]
     attributes:
       type:
         type: enum
-        options: [bench, trash_bin, lamp_post, utility_pole, parking_meter, bus_shelter, ad_panel, bike_rack]
-      condition:
-        type: enum
-        options: [good, damaged]
-
+        options: [bench, trash_bin, lamp_post, utility_pole, parking_meter, fire_hydrant, fire_extinguisher, fire_hose, bus_shelter, ad_panel, bike_rack]
+      
   - id: 13
     name: barrier
-    description: Objects designed to block path
+    description: Permanent objects designed to block path
     group: infrastructure
+    aliases: [guardrail, bollard]
     attributes:
       type:
         type: enum
-        options: [fence, bollard, guardrail, jersey_barrier]
+        options: [metal_fence, bollard, guardrail, jersey_barrier]
       material:
         type: enum
         options: [metal, concrete, plastic]
@@ -248,6 +234,7 @@ classes:
     description: >
       Vegetation elements. Split trunks and canopies for better localization handling.
     group: infrastructure
+    aliases: [tree, palm tree, plant, shrub, bush]
     attributes:
       type:
         type: enum
@@ -262,9 +249,6 @@ classes:
       Door and entrances to buildings.
     group: infrastructure
     attributes:
-      state:
-        type: enum
-        options: [open, closed, blocked]
       material:
         type: enum
         options: [wood, metal, glass, composite]

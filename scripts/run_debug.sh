@@ -13,9 +13,12 @@ LATEST_LOG="$LOG_DIR/latest.log"
 mkdir -p "$LOG_DIR"
 mkdir -p "$COVERAGE_DIR"
 
-# Activar venv si existe
-if [ -d "$PROJECT_DIR/../venv" ]; then
-    echo "Activating venv..."
+# Activar venv si existe (preferir .venv del proyecto, fallback al padre)
+if [ -d "$PROJECT_DIR/.venv" ]; then
+    echo "Activating project venv ($PROJECT_DIR/.venv)..."
+    source "$PROJECT_DIR/.venv/bin/activate"
+elif [ -d "$PROJECT_DIR/../venv" ]; then
+    echo "Activating parent venv ($PROJECT_DIR/../venv)..."
     source "$PROJECT_DIR/../venv/bin/activate"
 fi
 

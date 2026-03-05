@@ -165,10 +165,23 @@ class ClassMapper:
         self,
         model_to_schema: Optional[Dict[int, int]] = None,
         schema_to_model: Optional[Dict[int, int]] = None,
+        model_to_attrs: Optional[Dict[int, Dict[str, str]]] = None,
     ) -> None:
-        """Initialize mapper with one or both directions."""
+        """Initialize mapper with one or both directions.
+
+        Args:
+            model_to_schema: {model_class_id: schema_class_id}
+            schema_to_model: {schema_class_id: model_class_id}
+            model_to_attrs: {model_class_id: {attr_name: attr_value}}
+                Optional per-class inferred attributes.  When a model
+                class ID is known to correspond to a specific schema
+                attribute value (e.g. COCO "bird" → animal with
+                ``type=bird``), this dict propagates that information
+                into the converted Annotation.
+        """
         self._model_to_schema = model_to_schema or {}
         self._schema_to_model = schema_to_model or {}
+        self._model_to_attrs: Dict[int, Dict[str, str]] = model_to_attrs or {}
 
         # Build reverse mapping if only one direction provided
         if self._model_to_schema and not self._schema_to_model:
@@ -198,6 +211,14 @@ class ClassMapper:
         """Get list of schema class IDs that have mappings."""
         return list(self._schema_to_model.keys())
 
+    def get_inferred_attrs(self, model_class_id: int) -> Dict[str, str]:
+        """Return inferred schema attribute values for a model class ID.
+
+        Returns a *copy* of the stored dict so callers can safely mutate
+        the result.
+        """
+        return dict(self._model_to_attrs.get(model_class_id, {}))
+
 
 # =============================================================================
 # COCO Class Constants (used by YOLO and other COCO-trained models)
@@ -213,10 +234,13 @@ COCO_TRAFFIC_LIGHT = 9
 COCO_STOP_SIGN = 11
 COCO_PARKING_METER = 12
 COCO_BENCH = 13
+COCO_FIRE_HYDRANT = 10
 COCO_BIRD = 14
 COCO_CAT = 15
 COCO_DOG = 16
 COCO_BACKPACK = 24
+COCO_HANDBAG = 26
+COCO_SUITCASE = 28
 
 # Our schema class IDs (from labels_multiespectral_dataset.yaml)
 SCHEMA_PERSON = 1
@@ -225,9 +249,11 @@ SCHEMA_HEAVY_VEHICLE = 3
 SCHEMA_CYCLE = 4
 SCHEMA_ANIMAL = 6
 SCHEMA_LOOSE_OBJECT = 7
-SCHEMA_TRAFFIC_LIGHT = 8
-SCHEMA_TRAFFIC_SIGN = 9
-SCHEMA_STREET_FURNITURE = 10
+SCHEMA_EMERGENCY_VEHICLE = 8
+SCHEMA_CONSTRUCTION_ELEMENT = 9
+SCHEMA_TRAFFIC_LIGHT = 10
+SCHEMA_TRAFFIC_SIGN = 11
+SCHEMA_STREET_FURNITURE = 12
 
 # Default COCO -> Schema mapping
 DEFAULT_COCO_TO_SCHEMA: Dict[int, int] = {
@@ -238,6 +264,7 @@ DEFAULT_COCO_TO_SCHEMA: Dict[int, int] = {
     COCO_BUS: SCHEMA_HEAVY_VEHICLE,
     COCO_TRUCK: SCHEMA_HEAVY_VEHICLE,
     COCO_TRAFFIC_LIGHT: SCHEMA_TRAFFIC_LIGHT,
+    COCO_FIRE_HYDRANT: SCHEMA_STREET_FURNITURE,
     COCO_STOP_SIGN: SCHEMA_TRAFFIC_SIGN,
     COCO_PARKING_METER: SCHEMA_STREET_FURNITURE,
     COCO_BENCH: SCHEMA_STREET_FURNITURE,
@@ -245,12 +272,37 @@ DEFAULT_COCO_TO_SCHEMA: Dict[int, int] = {
     COCO_CAT: SCHEMA_ANIMAL,
     COCO_DOG: SCHEMA_ANIMAL,
     COCO_BACKPACK: SCHEMA_LOOSE_OBJECT,
+    COCO_HANDBAG: SCHEMA_LOOSE_OBJECT,
+    COCO_SUITCASE: SCHEMA_LOOSE_OBJECT,
+}
+
+# Inferred schema attributes per COCO class.
+# When YOLO detects e.g. "bird" (COCO 14) we know it maps to
+# SCHEMA_ANIMAL *and* that animal.type = "bird".
+DEFAULT_COCO_TO_ATTRS: Dict[int, Dict[str, str]] = {
+    COCO_BICYCLE: {"propulsion": "bicycle"},
+    COCO_MOTORCYCLE: {"propulsion": "motorcycle"},
+    COCO_BUS: {"class": "bus"},
+    COCO_TRUCK: {"class": "truck"},
+    COCO_FIRE_HYDRANT: {"type": "fire_hydrant"},
+    COCO_STOP_SIGN: {"category": "stop"},
+    COCO_PARKING_METER: {"type": "parking_meter"},
+    COCO_BENCH: {"type": "bench"},
+    COCO_BIRD: {"type": "bird"},
+    COCO_CAT: {"type": "cat"},
+    COCO_DOG: {"type": "dog"},
+    COCO_BACKPACK: {"type": "bag"},
+    COCO_HANDBAG: {"type": "bag"},
+    COCO_SUITCASE: {"type": "bag"},
 }
 
 
 def get_default_coco_mapper() -> ClassMapper:
     """Get the default COCO (YOLO) to schema class mapper."""
-    return ClassMapper(model_to_schema=DEFAULT_COCO_TO_SCHEMA)
+    return ClassMapper(
+        model_to_schema=DEFAULT_COCO_TO_SCHEMA,
+        model_to_attrs=DEFAULT_COCO_TO_ATTRS,
+    )
 
 
 # =============================================================================
@@ -279,11 +331,25 @@ def detection_to_annotation(
             return None
         class_id = mapped_id
 
+    # Merge detection attributes (raw_label, inferred attrs like type,
+    # class, service…) and always include confidence.
+    attrs: Dict[str, Any] = {"confidence": detection.confidence}
+    if detection.attributes:
+        attrs.update(detection.attributes)
+
+    # Apply mapper-level inferred attributes (e.g. COCO bird → type=bird).
+    # Lower priority: don't override attrs already set by the detector.
+    if class_mapper is not None:
+        mapper_attrs = class_mapper.get_inferred_attrs(detection.class_id)
+        for k, v in mapper_attrs.items():
+            if k not in attrs:
+                attrs[k] = v
+
     return Annotation(
         class_id=class_id,
         bbox=detection.bbox,
         source=AnnotationSource.AUTO,
-        attributes={"confidence": detection.confidence},
+        attributes=attrs,
     )
 
 
