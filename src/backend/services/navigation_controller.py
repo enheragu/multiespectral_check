@@ -51,18 +51,19 @@ class NavigationController(QObject):
             self._current_index = value
             self.indexChanged.emit(value)
 
-    def prev(self, message_label: str = "filtered images") -> bool:
+    def prev(self, message_label: str = "filtered images", step: int = 1) -> bool:
         """Navigate to previous image respecting current filter.
 
         Args:
             message_label: Label to use in status message if navigation blocked
+            step: Number of positions to move (default 1)
 
         Returns:
             True if navigation succeeded, False if blocked
         """
         if not self.session.has_images():
             return False
-        if not self._navigate(-1):
+        if not self._navigate(-1, step):
             filter_mode = self._get_filter_mode()
             # Import here to avoid circular dependency
             from backend.services.filter_modes import FILTER_ALL
@@ -71,18 +72,19 @@ class NavigationController(QObject):
             return False
         return True
 
-    def next(self, message_label: str = "filtered images") -> bool:
+    def next(self, message_label: str = "filtered images", step: int = 1) -> bool:
         """Navigate to next image respecting current filter.
 
         Args:
             message_label: Label to use in status message if navigation blocked
+            step: Number of positions to move (default 1)
 
         Returns:
             True if navigation succeeded, False if blocked
         """
         if not self.session.has_images():
             return False
-        if not self._navigate(1):
+        if not self._navigate(1, step):
             filter_mode = self._get_filter_mode()
             # Import here to avoid circular dependency
             from backend.services.filter_modes import FILTER_ALL
@@ -112,11 +114,12 @@ class NavigationController(QObject):
         """Reset navigation to first image."""
         self.current_index = 0
 
-    def _navigate(self, direction: int) -> bool:
+    def _navigate(self, direction: int, step: int = 1) -> bool:
         """Internal navigation with filter support.
 
         Args:
             direction: 1 for next, -1 for previous
+            step: Number of matching images to skip (default 1)
 
         Returns:
             True if navigation succeeded
@@ -134,18 +137,38 @@ class NavigationController(QObject):
 
         # No filter - simple circular navigation
         if filter_mode == FILTER_ALL:
-            self.current_index = (self.current_index + direction) % total
+            self.current_index = (self.current_index + direction * step) % total
             return True
 
-        # Filter active - search for next matching image
-        # Use internal _current_index to avoid emitting signals during search
+        # Filter active - search for next matching image, skip `step` matches
         start = self._current_index
         candidate = start
+        matches_found = 0
         for _ in range(total):
             candidate = (candidate + direction) % total
             base = self.session.get_base(candidate)
             if base and self._filter_accepts(base):
-                self.current_index = candidate  # Only emit once we found the target
+                matches_found += 1
+                if matches_found >= step:
+                    self.current_index = candidate  # Only emit once we found the target
+                    return True
+
+        # Fewer matches than step — land on the last match found (if any)
+        if matches_found > 0:
+            # Re-scan to find the last accepted candidate
+            candidate = start
+            last_match = start
+            found = 0
+            for _ in range(total):
+                candidate = (candidate + direction) % total
+                base = self.session.get_base(candidate)
+                if base and self._filter_accepts(base):
+                    found += 1
+                    last_match = candidate
+                    if found >= step:
+                        break
+            if last_match != start:
+                self.current_index = last_match
                 return True
 
         # No match found - index stays unchanged

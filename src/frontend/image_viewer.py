@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from PyQt6.QtCore import QEventLoop, QRunnable, Qt, QTimer
 from PyQt6.QtGui import (QAction, QActionGroup, QColor, QIcon, QKeySequence,
-                         QPixmap)
+                         QPixmap, QShortcut)
 from PyQt6.QtWidgets import (QApplication, QComboBox, QCompleter, QDialog,
                              QFileDialog, QInputDialog, QMainWindow, QMenu,
                              QMessageBox, QStyle, QVBoxLayout)
@@ -584,10 +584,25 @@ class ImageViewer(QMainWindow):
         )
 
     def connect_signals(self) -> None:
+        if hasattr(self.ui, "btn_prev_fast"):
+            self.ui.btn_prev_fast.clicked.connect(lambda: self.prev_image(step=5))
         if hasattr(self.ui, "btn_prev"):
             self.ui.btn_prev.clicked.connect(self.prev_image)
+        if hasattr(self.ui, "btn_goto"):
+            self.ui.btn_goto.clicked.connect(self._handle_goto_image)
         if hasattr(self.ui, "btn_next"):
             self.ui.btn_next.clicked.connect(self.next_image)
+        if hasattr(self.ui, "btn_next_fast"):
+            self.ui.btn_next_fast.clicked.connect(lambda: self.next_image(step=5))
+
+        # Window-level shortcuts (bypass QScrollArea key grab)
+        QShortcut(QKeySequence("Shift+Left"), self).activated.connect(
+            lambda: self.prev_image(step=5))
+        QShortcut(QKeySequence("Shift+Right"), self).activated.connect(
+            lambda: self.next_image(step=5))
+        QShortcut(QKeySequence("Ctrl+G"), self).activated.connect(
+            self._handle_goto_image)
+
         if hasattr(self.ui, "btn_delete_marked"):
             self.ui.btn_delete_marked.clicked.connect(self.delete_marked_images)
         if hasattr(self.ui, "action_load_dataset"):
@@ -1997,6 +2012,9 @@ class ImageViewer(QMainWindow):
         self.invalidate_overlay_cache()
         self.ui.btn_prev.setEnabled(True)
         self.ui.btn_next.setEnabled(True)
+        self.ui.btn_prev_fast.setEnabled(True)
+        self.ui.btn_next_fast.setEnabled(True)
+        self.ui.btn_goto.setEnabled(True)
         self._update_dataset_window_title(force=True)
         self._update_dataset_label()
         self._update_delete_button()
@@ -2082,6 +2100,9 @@ class ImageViewer(QMainWindow):
         self.load_current()
         self.ui.btn_prev.setEnabled(True)
         self.ui.btn_next.setEnabled(True)
+        self.ui.btn_prev_fast.setEnabled(True)
+        self.ui.btn_next_fast.setEnabled(True)
+        self.ui.btn_goto.setEnabled(True)
         self._update_dataset_window_title(force=True)
         self._update_dataset_label()
         self._update_delete_button()
@@ -2178,17 +2199,31 @@ class ImageViewer(QMainWindow):
 
         return self.overlay_orchestrator.render_pair(base)
 
-    def prev_image(self):
-        log_debug(f"prev_image called. has_images={self.session.has_images()}, current_index={self.navigation.current_index}", "NAV")
+    def prev_image(self, step: int = 1):
+        log_debug(f"prev_image called (step={step}). has_images={self.session.has_images()}, current_index={self.navigation.current_index}", "NAV")
         message_label = FILTER_MESSAGE_LABELS.get(self.filter_controller.filter_mode, "filtered images")
-        result = self.navigation.prev(message_label)
+        result = self.navigation.prev(message_label, step=step)
         log_debug(f"prev_image result={result}, new_index={self.navigation.current_index}", "NAV")
 
-    def next_image(self):
-        log_debug(f"next_image called. has_images={self.session.has_images()}, current_index={self.navigation.current_index}", "NAV")
+    def next_image(self, step: int = 1):
+        log_debug(f"next_image called (step={step}). has_images={self.session.has_images()}, current_index={self.navigation.current_index}", "NAV")
         message_label = FILTER_MESSAGE_LABELS.get(self.filter_controller.filter_mode, "filtered images")
-        result = self.navigation.next(message_label)
+        result = self.navigation.next(message_label, step=step)
         log_debug(f"next_image result={result}, new_index={self.navigation.current_index}", "NAV")
+
+    def _handle_goto_image(self):
+        """Open a dialog to jump to a specific image number."""
+        total = self.session.total_pairs()
+        if total <= 0:
+            return
+        from PyQt6.QtWidgets import QInputDialog
+        current_1based = self.navigation.current_index + 1
+        number, ok = QInputDialog.getInt(
+            self, "Go to image", f"Image number (1 – {total}):",
+            value=current_1based, min=1, max=total, step=1,
+        )
+        if ok:
+            self.navigation.jump_to(number - 1)
 
     def _ensure_overlay_cached(self, base: str) -> None:
         # Silent check - don't show popup, just return if no images
@@ -4588,6 +4623,9 @@ class ImageViewer(QMainWindow):
         self.ui.text_metadata_vis.clear()
         self.ui.btn_prev.setEnabled(False)
         self.ui.btn_next.setEnabled(False)
+        self.ui.btn_prev_fast.setEnabled(False)
+        self.ui.btn_next_fast.setEnabled(False)
+        self.ui.btn_goto.setEnabled(False)
         self.setWindowTitle("Image Viewer")
         self.state.signatures = {}
         self.state.calibration_marked.clear()

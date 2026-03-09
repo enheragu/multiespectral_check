@@ -29,7 +29,7 @@ class AppConfig:
     overlay_cache_limit: int = 24
 
     # Duplicate detection
-    signature_threshold: float = 0.003  # Lower = more strict (fewer duplicates), Higher = less strict
+    signature_threshold: float = 0.001  # Lower = more strict (fewer duplicates), Higher = less strict
     signature_size: int = 64
 
     # Cache settings
