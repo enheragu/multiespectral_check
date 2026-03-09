@@ -44,6 +44,7 @@ class WorkspaceDatasetInfo:
     children: List["WorkspaceDatasetInfo"] = field(default_factory=list)
     parent: Optional[str] = None
     stats: DatasetStats = field(default_factory=DatasetStats)
+    labels_total: int = 0
 
 
 def scan_workspace(workspace_dir: Path) -> List[WorkspaceDatasetInfo]:
@@ -181,6 +182,7 @@ def collect_dataset_info(dataset_dir: Path, parent: Optional[str] = None) -> Wor
         note=note,
         parent=parent,
         stats=stats,
+        labels_total=_load_labels_total(dataset_dir),
     )
     log_perf(
         f"dataset {dataset_dir.name}: pairs={stats.total_pairs} removed={stats.removed_total} "
@@ -351,6 +353,9 @@ def _dataset_signature(dataset_dir: Path) -> float:
             dataset_dir / "to_delete" / "lwir",
             dataset_dir / "to_delete" / "visible",
             dataset_dir / "to_delete" / "reasons",
+            dataset_dir / "labels",
+            dataset_dir / "labels" / "lwir",
+            dataset_dir / "labels" / "visible",
         ):
             if folder.exists():
                 try:
@@ -385,13 +390,16 @@ def invalidate_workspace_cache(workspace_dir: Path) -> None:
 def _quick_signature(dataset_dir: Path) -> float:
     try:
         sigs = [dataset_dir.stat().st_mtime]
-        cache_path = dataset_dir / DATASET_CACHE_FILENAME
-        if cache_path.exists():
-            try:
-                sigs.append(cache_path.stat().st_mtime)
-            except OSError:
-                pass
-        for sub in (dataset_dir / "lwir", dataset_dir / "visible"):
+        for cache_name in (DATASET_CACHE_FILENAME, ".labels_summary_cache.yaml"):
+            cache_path = dataset_dir / cache_name
+            if cache_path.exists():
+                try:
+                    sigs.append(cache_path.stat().st_mtime)
+                except OSError:
+                    pass
+        for sub in (dataset_dir / "lwir", dataset_dir / "visible",
+                    dataset_dir / "labels", dataset_dir / "labels" / "lwir",
+                    dataset_dir / "labels" / "visible"):
             try:
                 sigs.append(sub.stat().st_mtime)
             except OSError:
@@ -455,6 +463,7 @@ def _build_info_from_cache(cache_entry: DatasetCache, dataset_dir: Path, parent:
         note=note,
         parent=parent,
         stats=stats,
+        labels_total=_load_labels_total(dataset_dir),
     )
 
 
@@ -476,8 +485,10 @@ def _aggregate_collection(collection_dir: Path, children: List[WorkspaceDatasetI
 
     # Create collection stats by merging all children
     collection_stats = DatasetStats()
+    labels_total = 0
     for child in children:
         collection_stats.merge(child.stats)
+        labels_total += child.labels_total
 
     log_debug(f"Collection {collection_dir.name}: aggregated - "
               f"pairs={collection_stats.total_pairs}, "
@@ -492,6 +503,7 @@ def _aggregate_collection(collection_dir: Path, children: List[WorkspaceDatasetI
         children=children,
         parent=None,
         stats=collection_stats,
+        labels_total=labels_total,
     )
 
 
@@ -545,5 +557,39 @@ def _summary_to_info(summary: Dict[str, object], workspace_dir: Path, parent_hin
 def _scan_workers() -> int:
     cpu = os.cpu_count() or 2
     return max(2, min(8, cpu))
+
+
+def _load_labels_total(dataset_dir: Path) -> int:
+    """Read total annotation count, deriving from disk if cache is absent.
+
+    Fast path: read from ``.labels_summary_cache.yaml``.
+    Slow path (cache miss): derive from label YAML files and persist cache
+    so subsequent scans are instant.  This runs inside a ThreadPoolExecutor
+    worker, so it won't block the UI.
+    """
+    from backend.services.labels.label_summary_derivation import (
+        LABELS_SUMMARY_CACHE_FILENAME,
+        derive_labels_summary_from_disk,
+        save_labels_summary_cache,
+    )
+
+    cache_path = dataset_dir / LABELS_SUMMARY_CACHE_FILENAME
+    if cache_path.exists():
+        try:
+            data = load_yaml(cache_path)
+            if isinstance(data, dict):
+                return int(data.get("total_annotations", 0))
+        except Exception:  # noqa: BLE001
+            pass
+
+    # Cache miss — derive from disk and persist
+    try:
+        summary = derive_labels_summary_from_disk(dataset_dir)
+        total = int(summary.get("total_annotations", 0))
+        if total > 0:
+            save_labels_summary_cache(dataset_dir, summary)
+        return total
+    except Exception:  # noqa: BLE001
+        return 0
 
 

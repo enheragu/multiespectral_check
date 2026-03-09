@@ -86,6 +86,7 @@ class AppConfig:
 
     # Cache files
     summary_cache_filename: str = ".summary_cache.yaml"
+    labels_summary_cache_filename: str = ".labels_summary_cache.yaml"
 
 
 # Global singleton instance

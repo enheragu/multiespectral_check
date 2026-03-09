@@ -13,13 +13,18 @@ WHY SEPARATE FROM cache_data?
     following the same dirty-tracking pattern as the main cache system.
 
 Storage structure:
-    dataset/
-    └── labels/
-        ├── _labels_config.yaml     # Copy of schema config used
-        ├── visible/
-        │   └── {base}.yaml         # Labels for visible images
-        └── lwir/
-            └── {base}.yaml         # Labels for LWIR images
+    workspace/
+    ├── labels_config.yaml          # Workspace-wide label schema config
+    └── dataset/
+        └── labels/
+            ├── visible/
+            │   └── {base}.yaml     # Labels for visible images
+            └── lwir/
+                └── {base}.yaml     # Labels for LWIR images
+
+Config resolution:
+    1. ``{workspace}/labels_config.yaml``  (single source per workspace)
+    2. ``config/labels_multiespectral_dataset.yaml``  (repo default)
 
 Source of Truth:
     _cache: Dict[(channel, base) -> ImageLabels] is the in-memory truth.
@@ -27,7 +32,6 @@ Source of Truth:
 """
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -36,9 +40,34 @@ from common.yaml_utils import load_yaml, save_yaml
 
 from backend.services.labels.label_types import (
     Annotation,
+    AnnotationSource,
     ImageLabels,
-    LabelConfig,
 )
+
+# -------------------------------------------------------------------------
+# Workspace-level config
+# -------------------------------------------------------------------------
+WORKSPACE_CONFIG_FILENAME = "labels_config.yaml"
+
+
+def find_labels_config(start_dir: Path, max_levels: int = 5) -> Optional[Path]:
+    """Walk up from *start_dir* looking for ``labels_config.yaml``.
+
+    Returns the first match found, or ``None`` if none within *max_levels*
+    parent directories.  This is the primary mechanism for
+    ``_load_class_name_map`` to locate the workspace config without
+    requiring an explicit path.
+    """
+    current = start_dir.resolve()
+    for _ in range(max_levels):
+        candidate = current / WORKSPACE_CONFIG_FILENAME
+        if candidate.exists():
+            return candidate
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return None
 
 
 class LabelStorage:
@@ -51,97 +80,15 @@ class LabelStorage:
     """
 
     LABELS_DIR = "labels"
-    CONFIG_FILENAME = "_labels_config.yaml"
 
     def __init__(self, dataset_path: Path) -> None:
         """Initialize storage for a dataset."""
         self.dataset_path = dataset_path
         self._labels_dir = dataset_path / self.LABELS_DIR
-        self._config_path = self._labels_dir / self.CONFIG_FILENAME
 
         # SOURCE OF TRUTH: in-memory cache
         self._cache: Dict[Tuple[str, str], ImageLabels] = {}
         self._dirty: Set[Tuple[str, str]] = set()
-        self._config: Optional[LabelConfig] = None
-
-    # =========================================================================
-    # Config Management
-    # =========================================================================
-
-    def get_config(self) -> Optional[LabelConfig]:
-        """Get the label config for this dataset.
-
-        Returns the config that was copied to the dataset, or None if
-        no config has been set yet.
-        """
-        if self._config is not None:
-            return self._config
-
-        if self._config_path.exists():
-            try:
-                self._config = LabelConfig.from_yaml(self._config_path)
-                return self._config
-            except Exception as e:
-                log_warning(f"Failed to load label config: {e}", "LABELS")
-                return None
-        return None
-
-    def set_config(self, config: LabelConfig, source_path: Optional[Path] = None) -> None:
-        """Set the label config for this dataset.
-
-        Copies the config to the dataset's labels directory.
-
-        Args:
-            config: The LabelConfig to use
-            source_path: Original path of config file (for copying)
-        """
-        self._config = config
-
-        # Ensure labels directory exists
-        self._labels_dir.mkdir(parents=True, exist_ok=True)
-
-        # Copy or save config
-        if source_path and source_path.exists():
-            shutil.copy2(source_path, self._config_path)
-            log_info(f"Copied label config to {self._config_path}", "LABELS")
-        else:
-            # Serialize config (basic - loses comments)
-            data = {
-                "schema_version": config.schema_version,
-                "dataset_meta": config.dataset_meta,
-                "universal_attrs": {
-                    name: {
-                        "type": attr.attr_type.value,
-                        **({"options": attr.options} if attr.options else {}),
-                        **({"range": list(attr.range)} if attr.range else {}),
-                        **({"description": attr.description} if attr.description else {}),
-                    }
-                    for name, attr in config.universal_attrs.items()
-                },
-                "classes": [
-                    {
-                        "id": cls.id,
-                        "name": cls.name,
-                        "group": cls.group,
-                        **({"description": cls.description} if cls.description else {}),
-                        "attributes": {
-                            name: {
-                                "type": attr.attr_type.value,
-                                **({"options": attr.options} if attr.options else {}),
-                                **({"range": list(attr.range)} if attr.range else {}),
-                            }
-                            for name, attr in cls.attributes.items()
-                        } if cls.attributes else {},
-                    }
-                    for cls in sorted(config.classes.values(), key=lambda c: c.id)
-                ],
-            }
-            save_yaml(self._config_path, data)
-            log_info(f"Saved label config to {self._config_path}", "LABELS")
-
-    def has_config(self) -> bool:
-        """Check if dataset has a label config."""
-        return self._config_path.exists()
 
     # =========================================================================
     # Label I/O
@@ -192,7 +139,9 @@ class LabelStorage:
     def save_labels(self, channel: str, base: str, labels: Optional[ImageLabels] = None) -> bool:
         """Save labels for an image.
 
-        If labels is None, saves from cache. If labels is empty, deletes the file.
+        AUTO annotations are **never** persisted.  Only REVIEWED and
+        MANUAL annotations are written to disk.  If no persistent
+        annotations remain the file is deleted.
 
         Args:
             channel: "visible" or "lwir"
@@ -211,26 +160,32 @@ class LabelStorage:
             if labels is None:
                 return True  # Nothing to save
 
-        # Delete file if empty
-        if labels.is_empty():
+        # Build a persistent-only snapshot (exclude AUTO)
+        persistent = [a for a in labels.annotations if a.source != AnnotationSource.AUTO]
+
+        # Delete file if no persistent annotations remain
+        if not persistent:
             if path.exists():
                 try:
                     path.unlink()
-                    log_debug(f"Deleted empty labels file: {path}", "LABELS")
+                    log_debug(f"Deleted labels file (no persistent annotations): {path}", "LABELS")
                 except Exception as e:
                     log_warning(f"Failed to delete {path}: {e}", "LABELS")
                     return False
-            self._cache.pop(cache_key, None)
+            # Keep the in-memory cache intact (AUTO labels stay alive)
             self._dirty.discard(cache_key)
             return True
 
-        # Save to disk
+        # Save persistent annotations to disk
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            save_yaml(path, labels.to_dict())
-            self._cache[cache_key] = labels
+            # Build dict with only persistent annotations
+            data = labels.to_dict()
+            data["annotations"] = [a.to_dict() for a in persistent]
+            save_yaml(path, data)
             self._dirty.discard(cache_key)
-            log_debug(f"Saved {len(labels.annotations)} labels to {path}", "LABELS")
+            log_debug(f"Saved {len(persistent)} labels to {path} "
+                      f"({len(labels.annotations) - len(persistent)} AUTO skipped)", "LABELS")
             return True
         except Exception as e:
             log_warning(f"Failed to save labels to {path}: {e}", "LABELS")
@@ -368,8 +323,10 @@ class LabelStorage:
             return []
 
         bases = []
-        for path in channel_dir.glob("*.yaml"):
-            bases.append(path.stem)
+        for path in channel_dir.rglob("*.yaml"):
+            # For collections, labels live in subdirs (e.g. child_key/base.yaml)
+            rel = path.relative_to(channel_dir)
+            bases.append(str(rel.with_suffix("")))
         return sorted(bases)
 
     def get_annotation_count(self, channel: str, base: str) -> int:

@@ -6,13 +6,22 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from common.yaml_utils import load_yaml, save_yaml
-from PyQt6.QtCore import Qt, QUrl
-from PyQt6.QtGui import QDesktopServices
+from PyQt6.QtCore import Qt, QRectF, QUrl
+from PyQt6.QtGui import (
+    QColor,
+    QDesktopServices,
+    QPainter,
+    QPen,
+    QPixmap,
+    QPolygonF,
+)
+from PyQt6.QtCore import QPointF
 from PyQt6.QtWidgets import (
     QDialog,
     QFormLayout,
     QFrame,
     QGridLayout,
+    QHBoxLayout,
     QLabel,
     QPushButton,
     QScrollArea,
@@ -32,6 +41,7 @@ class CalibrationCheckDialog(QDialog):
         intrinsic_path: Optional[Path] = None,
         extrinsic_path: Optional[Path] = None,
         dataset_paths: Optional[List[str]] = None,
+        dataset_path: Optional[Path] = None,
     ) -> None:
         super().__init__(parent)
         self.matrices = matrices or {}
@@ -39,6 +49,7 @@ class CalibrationCheckDialog(QDialog):
         self.intrinsic_path = intrinsic_path
         self.extrinsic_path = extrinsic_path
         self.dataset_paths = dataset_paths or []
+        self.dataset_path = dataset_path
         self.file_metadata = self._load_file_metadata()
         self.setWindowTitle("Calibration report")
         self.setMinimumWidth(720)
@@ -73,6 +84,12 @@ class CalibrationCheckDialog(QDialog):
         card_layout.addWidget(self._section_heading("Extrinsic calibration:"))
         card_layout.addWidget(self._extrinsic_group())
 
+        # Chessboard coverage charts
+        coverage_widget = self._chessboard_coverage_group()
+        if coverage_widget:
+            card_layout.addWidget(self._section_heading("Chessboard coverage:"))
+            card_layout.addWidget(coverage_widget)
+
         card_layout.addStretch(1)
 
         # Add button to open calibration files (both if available)
@@ -99,12 +116,14 @@ class CalibrationCheckDialog(QDialog):
         intrinsic_path: Optional[Path],
         extrinsic_path: Optional[Path] = None,
         dataset_paths: Optional[List[str]] = None,
+        dataset_path: Optional[Path] = None,
     ) -> None:
         self.matrices = matrices or {}
         self.extrinsic = extrinsic or {}
         self.intrinsic_path = intrinsic_path
         self.extrinsic_path = extrinsic_path
         self.dataset_paths = dataset_paths or []
+        self.dataset_path = dataset_path
         self.file_metadata = self._load_file_metadata()
         self._rebuild_ui()
 
@@ -329,6 +348,55 @@ class CalibrationCheckDialog(QDialog):
         layout.addLayout(form)
         return panel
 
+    def _chessboard_coverage_group(self) -> Optional[QWidget]:
+        """Build side-by-side chessboard coverage charts (LWIR + Visible)."""
+        if not self.dataset_path:
+            return None
+        try:
+            from backend.services.calibration_corners_io import load_corners_for_dataset
+            all_corners = load_corners_for_dataset(self.dataset_path)
+        except Exception:  # noqa: BLE001
+            return None
+        if not all_corners:
+            return None
+
+        # Extract per-channel polygon data (4 outer corners of each chessboard)
+        pattern_size = self.file_metadata.get("pattern_size")  # [cols, rows] or None
+        lwir_quads = _extract_chessboard_quads(all_corners, "lwir", pattern_size)
+        vis_quads = _extract_chessboard_quads(all_corners, "visible", pattern_size)
+
+        if not lwir_quads and not vis_quads:
+            return None
+
+        panel = QWidget()
+        panel.setObjectName("coverage_panel")
+        panel.setStyleSheet(style.panel_body_style("coverage_panel"))
+        layout = QHBoxLayout(panel)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(12)
+
+        chart_w, chart_h = 340, 280
+
+        # LWIR chart
+        lwir_label = QLabel()
+        lwir_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lwir_pix = _render_chessboard_coverage(
+            lwir_quads, chart_w, chart_h, "LWIR", QColor(220, 60, 60, 50),
+        )
+        lwir_label.setPixmap(lwir_pix)
+        layout.addWidget(lwir_label)
+
+        # Visible chart
+        vis_label = QLabel()
+        vis_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        vis_pix = _render_chessboard_coverage(
+            vis_quads, chart_w, chart_h, "Visible", QColor(60, 120, 220, 50),
+        )
+        vis_label.setPixmap(vis_pix)
+        layout.addWidget(vis_label)
+
+        return panel
+
     def _field_label(self, text: str) -> QLabel:
         label = QLabel(text)
         label.setStyleSheet("font-weight: 700; color: #111;")
@@ -421,3 +489,166 @@ class CalibrationCheckDialog(QDialog):
         if isinstance(value, (int, float)):
             return f"{value:.3f} units"
         return "Not specified"
+
+
+# ======================================================================
+# Chessboard coverage chart helpers
+# ======================================================================
+
+# Chart rendering constants (matching label_report_dialog style)
+_COV_DPR = 2
+_COV_BG = QColor("#fafafa")
+_COV_AXIS_COLOR = QColor("#444444")
+_COV_FONT_SIZE = 9
+_COV_TITLE_FONT_SIZE = 10
+_COV_M = (40, 28, 22, 10)  # (left, bottom, top, right) margins
+
+
+def _extract_chessboard_quads(
+    all_corners: Dict[str, Dict[str, Any]],
+    channel: str,
+    pattern_size: Optional[Any],
+) -> List[List[List[float]]]:
+    """Extract the 4 outer corners of each chessboard detection.
+
+    If *pattern_size* is ``[cols, rows]``, the quad vertices are taken
+    from the known grid positions (indices 0, cols-1, -cols, -1).
+    Otherwise the convex-hull extreme corners are estimated from the
+    first, last, and midpoints of the corner list.
+
+    Returns a list of quads, each quad being 4 points ``[[u, v], …]``.
+    """
+    cols: Optional[int] = None
+    rows: Optional[int] = None
+    if isinstance(pattern_size, (list, tuple)) and len(pattern_size) == 2:
+        cols, rows = int(pattern_size[0]), int(pattern_size[1])
+
+    quads: List[List[List[float]]] = []
+    for _base, data in all_corners.items():
+        corners = data.get(channel)
+        if not corners or len(corners) < 4:
+            continue
+        if cols and rows and len(corners) == cols * rows:
+            quad = [
+                corners[0],
+                corners[cols - 1],
+                corners[-1],
+                corners[-cols],
+            ]
+        else:
+            # Fallback: use first, mid-top, last, mid-bottom as rough quad
+            n = len(corners)
+            quad = [corners[0], corners[n // 2 - 1], corners[-1], corners[n // 2]]
+        quads.append(quad)
+    return quads
+
+
+def _render_chessboard_coverage(
+    quads: List[List[List[float]]],
+    width: int,
+    height: int,
+    title: str,
+    fill_color: QColor,
+) -> QPixmap:
+    """Draw chessboard quadrilaterals as semi-transparent polygons on a [0,1]² canvas."""
+    pix = QPixmap(width * _COV_DPR, height * _COV_DPR)
+    pix.setDevicePixelRatio(_COV_DPR)
+    pix.fill(_COV_BG)
+
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    f = p.font()
+    f.setPixelSize(_COV_FONT_SIZE)
+    p.setFont(f)
+
+    # Title
+    f.setPixelSize(_COV_TITLE_FONT_SIZE)
+    f.setBold(True)
+    p.setFont(f)
+    p.setPen(_COV_AXIS_COLOR)
+    ml, mb, mt, mr = _COV_M
+    p.drawText(
+        QRectF(0, 2, width, mt - 2),
+        Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom,
+        title,
+    )
+    f.setBold(False)
+    f.setPixelSize(_COV_FONT_SIZE)
+    p.setFont(f)
+
+    pw = width - ml - mr
+    ph = height - mt - mb
+
+    # Background image area
+    p.fillRect(QRectF(ml, mt, pw, ph), QColor("#f0f0f0"))
+
+    # Draw axes with ticks (0.0 – 1.0)
+    pen = QPen(_COV_AXIS_COLOR, 1)
+    p.setPen(pen)
+    p.drawLine(ml, mt, ml, height - mb)
+    p.drawLine(ml, height - mb, width - mr, height - mb)
+    n_ticks = 6
+    for i in range(n_ticks):
+        t = i / (n_ticks - 1)
+        x = ml + t * pw
+        p.drawLine(int(x), height - mb, int(x), height - mb + 3)
+        p.drawText(
+            QRectF(x - 16, height - mb + 4, 32, 14),
+            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+            f"{t:.1f}",
+        )
+        y = height - mb - t * ph
+        p.drawLine(ml - 3, int(y), ml, int(y))
+        p.drawText(
+            QRectF(0, y - 7, ml - 5, 14),
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+            f"{t:.1f}",
+        )
+
+    # Axis labels
+    p.drawText(
+        QRectF(ml, height - 10, pw, 12),
+        Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, "x",
+    )
+    p.save()
+    p.translate(8, mt + ph / 2)
+    p.rotate(-90)
+    p.drawText(
+        QRectF(-ph / 2, -8, ph, 16),
+        Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, "y",
+    )
+    p.restore()
+
+    # Draw chessboard quads
+    if quads:
+        stroke_color = QColor(
+            fill_color.red(), fill_color.green(), fill_color.blue(),
+            min(fill_color.alpha() + 60, 200),
+        )
+        pen = QPen(stroke_color, 1.0)
+        p.setBrush(fill_color)
+
+        for quad in quads:
+            polygon = QPolygonF()
+            for pt in quad:
+                px = ml + pt[0] * pw
+                py = mt + pt[1] * ph
+                polygon.append(QPointF(px, py))
+            p.setPen(pen)
+            p.drawPolygon(polygon)
+
+    # Count label
+    if quads:
+        p.setPen(_COV_AXIS_COLOR)
+        p.drawText(
+            QRectF(ml + 4, mt + 4, pw, 16),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+            f"{len(quads)} detections",
+        )
+
+    # Border
+    p.setPen(QPen(QColor("#999"), 1))
+    p.drawRect(QRectF(ml, mt, pw, ph))
+
+    p.end()
+    return pix

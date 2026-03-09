@@ -753,10 +753,10 @@ class GroundingDinoDetector(DetectionModel):
             ("girl",  {"perceived_gender": "female", "age_group": "child"}),
         ],
         14: [  # vegetation
-            ("tree",      {"type": "tree_canopy"}),
-            ("palm tree", {"type": "tree_canopy"}),
-            ("plant",     {}),
-            ("shrub",     {"type": "bush"}),
+            ("tree",         {"type": "tree_canopy"}),
+            ("palm tree",    {"type": "tree_canopy"}),
+            ("shrub",        {"type": "bush"}),
+            ("potted plant", {"type": "potted_plant"}),
         ],
     }
 

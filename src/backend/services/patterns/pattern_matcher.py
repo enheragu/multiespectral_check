@@ -142,20 +142,12 @@ class PatternMatcher:
     def has_patterns(self) -> bool:
         return bool(self._templates)
 
-    def match_path(self, image_path: Path) -> bool:
-        """Check if image matches any pattern (legacy bool interface)."""
-        return self.match_path_detailed(image_path) is not None
-
     def match_path_detailed(self, image_path: Path) -> Optional[str]:
         """Check if image matches any pattern and return pattern name."""
         img = _read_grayscale(image_path)
         if img is None:
             return None
         return self.match_image_detailed(img)
-
-    def match_any_paths(self, image_paths: Sequence[Optional[Path]]) -> bool:
-        """Check if any path matches any pattern (legacy bool interface)."""
-        return self.match_any_paths_detailed(image_paths) is not None
 
     def match_any_paths_detailed(self, image_paths: Sequence[Optional[Path]]) -> Optional[str]:
         """Check if any path matches any pattern and return pattern name."""
@@ -166,10 +158,6 @@ class PatternMatcher:
             if pattern_name:
                 return pattern_name
         return None
-
-    def match_image(self, gray: np.ndarray) -> bool:
-        """Check if image matches any pattern (legacy bool interface)."""
-        return self.match_image_detailed(gray) is not None
 
     def match_image_detailed(self, gray: np.ndarray) -> Optional[str]:
         """Check if image matches any pattern and return pattern name.

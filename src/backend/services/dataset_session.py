@@ -649,13 +649,12 @@ class DatasetSession:
         total = len(targets)
         calib = self.state.cache_data.setdefault("calibration", {})
         for idx, (base, mark_entry) in enumerate(targets, start=1):
-            # Check if this mark is auto (unified format)
+            # Extract reason and auto flag from unified dict format
             if isinstance(mark_entry, dict):
                 reason = mark_entry.get("reason", "")
                 is_auto = mark_entry.get("auto", False)
             else:
-                reason = mark_entry  # Legacy string format
-                is_auto = False
+                continue  # skip invalid entries
             if not self.loader.delete_entry(base, reason, auto=is_auto):
                 failed.append(base)
                 continue
@@ -741,6 +740,7 @@ class DatasetSession:
             config.calibration_intrinsic_filename,  # calibration_intrinsic.yaml
             config.calibration_extrinsic_filename,  # calibration_extrinsic.yaml
             config.summary_cache_filename,  # .summary_cache.yaml
+            config.labels_summary_cache_filename,  # .labels_summary_cache.yaml
         ]
 
         for filename in cache_files_to_remove:

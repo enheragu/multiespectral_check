@@ -98,6 +98,9 @@ class ClassDefinition:
         description: Optional description
         aliases: Alternative names for matching (e.g., ["pedestrian"] for person)
         attributes: Dict of attribute name -> AttributeDefinition
+        min_confidence: Per-class minimum confidence threshold for auto-detection.
+            Annotations below this threshold are discarded after detection.
+            When *None*, the detector's global threshold is used.
     """
     id: int
     name: str
@@ -105,6 +108,7 @@ class ClassDefinition:
     description: Optional[str] = None
     aliases: List[str] = field(default_factory=list)
     attributes: Dict[str, AttributeDefinition] = field(default_factory=dict)
+    min_confidence: Optional[float] = None
 
     @property
     def class_id(self) -> str:
@@ -127,6 +131,7 @@ class ClassDefinition:
             description=data.get("description"),
             aliases=data.get("aliases", []),
             attributes=attrs,
+            min_confidence=data.get("min_confidence"),
         )
 
     def get_attribute_options(self, attr_name: str) -> Optional[List[str]]:

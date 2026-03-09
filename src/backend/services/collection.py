@@ -167,11 +167,7 @@ class Collection:
                     for base, entry in child_marks.items():
                         prefixed_base = f"{child_key}/{base}"
                         if isinstance(entry, dict):
-                            # New format: {reason, auto}
                             self._marks[prefixed_base] = entry
-                        elif isinstance(entry, str):
-                            # Legacy format fallback: reason_str
-                            self._marks[prefixed_base] = {"reason": entry, "auto": False}
 
                 # Note: auto_marks is now embedded in marks, no separate aggregation needed
 
@@ -324,10 +320,6 @@ class Collection:
                 existing_marks.update(marks_for_child)
                 child_cache["marks"] = existing_marks
 
-                # Remove legacy auto_marks field if present
-                if "auto_marks" in child_cache:
-                    del child_cache["auto_marks"]
-
                 # Sync calibration - add new, remove unmarked
                 # calibration_to_add contains ONLY the bases that should be marked
                 calibration_to_add = child_calibration.get(child_key, {})
@@ -371,13 +363,13 @@ class Collection:
                 # Always update calibration in cache (may have removals)
                 child_cache["calibration"] = existing_calib
 
-                # Update reason_counts (read from unified format)
+                # Update reason_counts from marks
                 reason_counts: Dict[str, int] = {}
                 for base, mark_entry in existing_marks.items():
                     if isinstance(mark_entry, dict):
                         reason = mark_entry.get("reason", "")
                     else:
-                        reason = mark_entry  # Legacy: just string
+                        continue
                     if reason:
                         reason_counts[reason] = reason_counts.get(reason, 0) + 1
                 child_cache["reason_counts"] = reason_counts

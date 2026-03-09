@@ -94,6 +94,34 @@ def _bbox_iou(
     return inter / union if union > 0 else 0.0
 
 
+# Edge threshold for auto-detecting truncation (same as LabelEditDialog)
+_EDGE_THRESHOLD = 0.02
+
+
+def _auto_set_truncation(ann: Annotation) -> None:
+    """Set ``truncation=True`` when the bbox touches an image edge.
+
+    Uses the same 2 % threshold as :class:`LabelEditDialog` to stay
+    consistent with the manual labelling flow.  Only sets the attribute
+    when it is not already present.
+    """
+    if ann.attributes.get("truncation"):
+        return  # Already marked — don't overwrite
+    cx, cy, w, h = ann.bbox
+    left = cx - w / 2
+    right = cx + w / 2
+    top = cy - h / 2
+    bottom = cy + h / 2
+    at_edge = (
+        left <= _EDGE_THRESHOLD
+        or right >= (1.0 - _EDGE_THRESHOLD)
+        or top <= _EDGE_THRESHOLD
+        or bottom >= (1.0 - _EDGE_THRESHOLD)
+    )
+    if at_edge:
+        ann.attributes["truncation"] = True
+
+
 # =============================================================================
 # Label Service
 # =============================================================================
@@ -126,7 +154,12 @@ class LabelService:
         """
         self._dataset_path: Optional[Path] = None
         self._config: Optional[LabelConfig] = None
+        self._config_path: Optional[Path] = None
         self._storage: Optional[LabelStorage] = None
+
+        # Collection mode: per-child storage pool
+        self._collection_children: Dict[str, Path] = {}
+        self._child_storages: Dict[str, LabelStorage] = {}
 
         # Detection model (lazy loaded)
         self._detector: Optional[DetectionModel] = None
@@ -151,6 +184,7 @@ class LabelService:
     def load_config(self, config_path: Path) -> None:
         """Load label configuration from YAML file."""
         self._config = LabelConfig.from_yaml(config_path)
+        self._config_path = config_path
         log_info(f"Loaded label config: {len(self._config.classes)} classes")
 
         # Re-initialize storage with new config if dataset is set
@@ -171,7 +205,6 @@ class LabelService:
             return
 
         self._storage = LabelStorage(dataset_path=self._dataset_path)
-        self._storage.set_config(self._config)
         log_debug(f"Label storage initialized for {self._dataset_path}")
 
     @property
@@ -182,7 +215,61 @@ class LabelService:
     @property
     def is_ready(self) -> bool:
         """Check if service is ready for operations."""
+        if self._collection_children:
+            return self._config is not None
         return self._storage is not None and self._config is not None
+
+    # =========================================================================
+    # Collection Support
+    # =========================================================================
+
+    def set_collection_children(self, children: Dict[str, Path]) -> None:
+        """Configure collection mode with child dataset paths.
+
+        In collection mode, namespaced bases like ``child_key/actual_base``
+        are routed to per-child LabelStorage instances so that label files
+        live under each child dataset's ``labels/`` directory.
+
+        Args:
+            children: Maps child_key to child dataset directory path.
+        """
+        self._collection_children = dict(children)
+        self._child_storages.clear()
+        log_debug(f"Collection label mode: {len(children)} children configured")
+
+    def _resolve(self, image_base: str) -> Tuple[Optional[LabelStorage], str]:
+        """Resolve storage and base name for potentially namespaced bases.
+
+        In collection mode, splits ``child_key/actual_base`` and routes
+        to the child's :class:`LabelStorage`.  In single-dataset mode,
+        returns ``self._storage`` unchanged.
+
+        Returns:
+            ``(storage, local_base)`` — *storage* may be ``None`` when the
+            service is uninitialised or the child key is unknown.
+        """
+        if self._collection_children and "/" in image_base:
+            child_key, local_base = image_base.rsplit("/", 1)
+            child_path = self._collection_children.get(child_key)
+            if child_path:
+                if child_key not in self._child_storages:
+                    self._child_storages[child_key] = LabelStorage(dataset_path=child_path)
+                return self._child_storages[child_key], local_base
+        return self._storage, image_base
+
+    def _all_storages(self) -> List[LabelStorage]:
+        """Return every active storage (main + per-child)."""
+        storages: List[LabelStorage] = []
+        if self._storage:
+            storages.append(self._storage)
+        storages.extend(self._child_storages.values())
+        return storages
+
+    def _save_and_invalidate(self, storage: LabelStorage, channel: str, base: str) -> bool:
+        """Save a single image's labels and mark the summary cache stale."""
+        result = storage.save_labels(channel, base)
+        self.invalidate_labels_summary_cache()
+        return result
 
     # =========================================================================
     # Detection Model
@@ -372,9 +459,10 @@ class LabelService:
         Returns:
             ImageLabels or None if storage not initialized
         """
-        if not self._storage:
+        storage, image_base = self._resolve(image_base)
+        if not storage:
             return None
-        return self._storage.load_labels(channel, image_base)
+        return storage.load_labels(channel, image_base)
 
     def get_annotations(
         self,
@@ -465,11 +553,12 @@ class LabelService:
             channel: Channel name
             annotation: Annotation to add
         """
-        if not self._storage:
+        storage, image_base = self._resolve(image_base)
+        if not storage:
             raise RuntimeError("LabelService not initialized")
 
         # LabelStorage.add_annotation handles load + mark_dirty
-        self._storage.add_annotation(channel, image_base, annotation)
+        storage.add_annotation(channel, image_base, annotation)
 
     def add_annotations(
         self,
@@ -484,11 +573,12 @@ class LabelService:
             channel: Channel name
             annotations: Annotations to add
         """
-        if not self._storage:
+        storage, image_base = self._resolve(image_base)
+        if not storage:
             raise RuntimeError("LabelService not initialized")
 
         for ann in annotations:
-            self._storage.add_annotation(channel, image_base, ann)
+            storage.add_annotation(channel, image_base, ann)
 
     def set_annotations(
         self,
@@ -503,12 +593,13 @@ class LabelService:
             channel: Channel name
             annotations: New annotations (replaces existing)
         """
-        if not self._storage:
+        storage, image_base = self._resolve(image_base)
+        if not storage:
             raise RuntimeError("LabelService not initialized")
 
-        labels = self._storage.load_labels(channel, image_base)
+        labels = storage.load_labels(channel, image_base)
         labels.annotations = list(annotations)
-        self._storage.mark_dirty(channel, image_base)
+        storage.mark_dirty(channel, image_base)
 
     def remove_annotation(
         self,
@@ -521,17 +612,18 @@ class LabelService:
         Returns:
             Removed annotation or None if index invalid
         """
-        if not self._storage:
+        storage, image_base = self._resolve(image_base)
+        if not storage:
             raise RuntimeError("LabelService not initialized")
 
-        labels = self._storage.load_labels(channel, image_base)
+        labels = storage.load_labels(channel, image_base)
         if not labels or index < 0 or index >= len(labels.annotations):
             return None
 
         removed = labels.annotations.pop(index)
-        self._storage.mark_dirty(channel, image_base)
+        storage.mark_dirty(channel, image_base)
         # Save immediately for manual deletions
-        self._storage.save_labels(channel, image_base)
+        self._save_and_invalidate(storage, channel, image_base)
         return removed
 
     def update_annotation(
@@ -556,10 +648,11 @@ class LabelService:
         Returns:
             True if annotation was updated, False if not found
         """
-        if not self._storage:
+        storage, image_base = self._resolve(image_base)
+        if not storage:
             raise RuntimeError("LabelService not initialized")
 
-        labels = self._storage.load_labels(channel, image_base)
+        labels = storage.load_labels(channel, image_base)
         if not labels:
             return False
 
@@ -598,9 +691,9 @@ class LabelService:
                 target_ann.attributes = {}
             target_ann.attributes.update(new_attributes)
 
-        self._storage.mark_dirty(channel, image_base)
+        storage.mark_dirty(channel, image_base)
         # Save immediately for manual edits
-        self._storage.save_labels(channel, image_base)
+        self._save_and_invalidate(storage, channel, image_base)
         log_debug(f"Updated annotation {annotation_id} in {channel}/{image_base}", "LABELS")
         return True
 
@@ -620,10 +713,11 @@ class LabelService:
         Returns:
             Number of annotations removed
         """
-        if not self._storage:
+        storage, image_base = self._resolve(image_base)
+        if not storage:
             raise RuntimeError("LabelService not initialized")
 
-        labels = self._storage.load_labels(channel, image_base)
+        labels = storage.load_labels(channel, image_base)
         if not labels:
             return 0
 
@@ -636,7 +730,7 @@ class LabelService:
             count = len(original) - len(labels.annotations)
 
         if count > 0:
-            self._storage.mark_dirty(channel, image_base)
+            storage.mark_dirty(channel, image_base)
         return count
 
     # =========================================================================
@@ -659,10 +753,11 @@ class LabelService:
         Returns:
             Number of annotations marked
         """
-        if not self._storage:
+        storage, image_base = self._resolve(image_base)
+        if not storage:
             raise RuntimeError("LabelService not initialized")
 
-        labels = self._storage.load_labels(channel, image_base)
+        labels = storage.load_labels(channel, image_base)
         if not labels:
             return 0
 
@@ -674,7 +769,8 @@ class LabelService:
                     count += 1
 
         if count > 0:
-            self._storage.mark_dirty(channel, image_base)
+            storage.mark_dirty(channel, image_base)
+            self._save_and_invalidate(storage, channel, image_base)
         return count
 
     def mark_all_reviewed(
@@ -684,6 +780,36 @@ class LabelService:
     ) -> int:
         """Mark all AUTO annotations as REVIEWED."""
         return self.mark_reviewed(image_base, channel, indices=None)
+
+    def accept_annotation(
+        self,
+        image_base: str,
+        channel: str,
+        annotation_id: int,
+    ) -> bool:
+        """Accept a single AUTO annotation by its annotation_id.
+
+        Convenience wrapper around mark_reviewed that finds the list
+        index for the given annotation_id.
+
+        Returns:
+            True if annotation was accepted, False if not found or not AUTO
+        """
+        storage, image_base = self._resolve(image_base)
+        if not storage:
+            raise RuntimeError("LabelService not initialized")
+        labels = storage.load_labels(channel, image_base)
+        if not labels:
+            return False
+        for i, ann in enumerate(labels.annotations):
+            if ann.annotation_id == annotation_id:
+                if ann.source == AnnotationSource.AUTO:
+                    ann.source = AnnotationSource.REVIEWED
+                    storage.mark_dirty(channel, image_base)
+                    self._save_and_invalidate(storage, channel, image_base)
+                    return True
+                return False
+        return False
 
     def reject_annotation(
         self,
@@ -768,7 +894,8 @@ class LabelService:
         """
         if not self._detector:
             raise RuntimeError("No detector configured. Call set_detector() first.")
-        if not self._storage:
+        storage, local_base = self._resolve(image_base)
+        if not storage:
             raise RuntimeError("LabelService not initialized")
 
         # Run detection
@@ -784,6 +911,34 @@ class LabelService:
         for ann in annotations:
             ann.attributes["model"] = model_info.name
             ann.attributes["model_version"] = model_info.version
+            # Auto-detect truncation when bbox touches image edges
+            _auto_set_truncation(ann)
+
+        # ── Per-class confidence filtering ──
+        # If the label config defines min_confidence per class, discard
+        # annotations that passed the detector's global threshold but
+        # fall below their class-specific minimum.
+        if self._config:
+            before = len(annotations)
+            filtered: List[Annotation] = []
+            for ann in annotations:
+                cls_def = self._config.classes.get(ann.class_id)
+                if cls_def and cls_def.min_confidence is not None:
+                    if ann.confidence < cls_def.min_confidence:
+                        log_debug(
+                            f"Filtered {ann.class_id} ({ann.confidence:.0%} "
+                            f"< min {cls_def.min_confidence:.0%})",
+                            "DETECTION",
+                        )
+                        continue
+                filtered.append(ann)
+            annotations = filtered
+            dropped = before - len(annotations)
+            if dropped:
+                log_debug(
+                    f"Per-class confidence filter removed {dropped} annotation(s)",
+                    "DETECTION",
+                )
 
         # ── Skip if existing AUTO labels already match ──
         if replace_existing_auto:
@@ -801,6 +956,8 @@ class LabelService:
 
         # Add new annotations
         self.add_annotations(image_base, channel, annotations)
+        # Flush to disk so label report / workspace table see the change
+        self._save_and_invalidate(storage, channel, local_base)
 
         return annotations
 
@@ -913,10 +1070,11 @@ class LabelService:
         """
         if not self.can_project:
             raise RuntimeError("Projection not configured. Call set_projection_params()")
-        if not self._storage:
+        storage, local_base = self._resolve(image_base)
+        if not storage:
             raise RuntimeError("LabelService not initialized")
 
-        # Get source annotations
+        # Get source annotations  (use original base — get_labels resolves)
         source_labels = self.get_labels(image_base, source_channel)
         if not source_labels or not source_labels.annotations:
             return []
@@ -996,9 +1154,10 @@ class LabelService:
         Returns:
             True if saved successfully
         """
-        if not self._storage:
+        storage, image_base = self._resolve(image_base)
+        if not storage:
             return False
-        return self._storage.save_labels(channel, image_base)
+        return self._save_and_invalidate(storage, channel, image_base)
 
     def save_all(self, force: bool = False) -> int:
         """Save all dirty labels.
@@ -1009,24 +1168,28 @@ class LabelService:
         Returns:
             Number of files saved
         """
-        if not self._storage:
-            return 0
-        return self._storage.save_all_dirty()
+        saved = 0
+        for storage in self._all_storages():
+            saved += storage.save_all_dirty()
+        if saved:
+            self.invalidate_labels_summary_cache()
+        return saved
 
     def save_all_sync(self) -> int:
         """Synchronously save all dirty labels.
 
         Use this before shutdown to ensure all data is persisted.
         """
-        if not self._storage:
-            return 0
-        return self._storage.save_all_dirty()
+        saved = 0
+        for storage in self._all_storages():
+            saved += storage.save_all_dirty()
+        if saved:
+            self.invalidate_labels_summary_cache()
+        return saved
 
     def has_unsaved_changes(self) -> bool:
         """Check if there are unsaved label changes."""
-        if not self._storage:
-            return False
-        return self._storage.has_dirty()
+        return any(s.has_dirty() for s in self._all_storages())
 
     # =========================================================================
     # Statistics
@@ -1038,7 +1201,8 @@ class LabelService:
         Returns:
             Dict with stats like total_annotations, by_class, by_source, etc.
         """
-        if not self._storage:
+        storages = self._all_storages()
+        if not storages:
             return {}
 
         stats: Dict[str, Any] = {
@@ -1049,26 +1213,91 @@ class LabelService:
             "by_class": {},
         }
 
-        # LabelStorage cache key is (channel, base)
-        for (channel, image_base), labels in self._storage._cache.items():
-            if not labels.annotations:
-                continue
+        # Iterate all active storages (main + per-child)
+        for storage in self._all_storages():
+            for (channel, image_base), labels in storage._cache.items():
+                if not labels.annotations:
+                    continue
 
-            stats["images_with_labels"] += 1
-            stats["by_channel"][channel] = stats["by_channel"].get(channel, 0) + len(labels.annotations)
+                stats["images_with_labels"] += 1
+                stats["by_channel"][channel] = stats["by_channel"].get(channel, 0) + len(labels.annotations)
 
-            for ann in labels.annotations:
-                stats["total_annotations"] += 1
+                for ann in labels.annotations:
+                    stats["total_annotations"] += 1
 
-                # By source
-                source_key = ann.source.value
-                stats["by_source"][source_key] = stats["by_source"].get(source_key, 0) + 1
+                    # By source
+                    source_key = ann.source.value
+                    stats["by_source"][source_key] = stats["by_source"].get(source_key, 0) + 1
 
-                # By class
-                class_id = ann.class_id
-                stats["by_class"][class_id] = stats["by_class"].get(class_id, 0) + 1
+                    # By class
+                    class_id = ann.class_id
+                    stats["by_class"][class_id] = stats["by_class"].get(class_id, 0) + 1
 
         return stats
+
+    def get_labels_summary(self, force_rebuild: bool = False) -> Dict[str, Any]:
+        """Get label summary for the dataset (cached to disk).
+
+        Uses ``.labels_summary_cache.yaml`` following the same cache pattern as
+        the main summary cache.  Pass *force_rebuild=True* to re-derive from
+        individual label YAML files on disk.
+
+        In collection mode, derives from each child and merges.
+        """
+        from backend.services.labels.label_summary_derivation import (
+            derive_labels_summary_from_disk,
+            load_labels_summary_cache,
+            save_labels_summary_cache,
+        )
+
+        if not self._dataset_path:
+            return {}
+
+        # Collection mode: aggregate child summaries
+        if self._collection_children:
+            from backend.services.labels.label_summary_derivation import merge_labels_summaries
+            child_summaries = []
+            for child_path in self._collection_children.values():
+                child_summaries.append(
+                    derive_labels_summary_from_disk(child_path, config_path=self._config_path)
+                )
+            return merge_labels_summaries(child_summaries)
+
+        if not force_rebuild:
+            cached = load_labels_summary_cache(self._dataset_path)
+            if cached is not None:
+                return cached
+
+        summary = derive_labels_summary_from_disk(self._dataset_path,
+                                                  config_path=self._config_path)
+        save_labels_summary_cache(self._dataset_path, summary)
+        return summary
+
+    def invalidate_labels_summary_cache(self) -> None:
+        """Delete the cached label summary so it is rebuilt on next request.
+
+        In collection mode, also invalidates per-child caches since
+        workspace-level tools read those directly.
+        """
+        from backend.services.labels.label_summary_derivation import (
+            LABELS_SUMMARY_CACHE_FILENAME,
+        )
+
+        if not self._dataset_path:
+            return
+
+        paths_to_invalidate = [self._dataset_path]
+        if self._collection_children:
+            paths_to_invalidate.extend(self._collection_children.values())
+
+        for path in paths_to_invalidate:
+            cache_path = path / LABELS_SUMMARY_CACHE_FILENAME
+            if cache_path.exists():
+                try:
+                    cache_path.unlink()
+                    log_debug(f"Invalidated labels summary cache: {path.name}", "LABEL_SUMMARY")
+                except OSError:
+                    pass
 
     # =========================================================================
     # Cleanup
@@ -1076,9 +1305,9 @@ class LabelService:
 
     def shutdown(self) -> None:
         """Shutdown service, saving any pending changes."""
-        if self._storage:
-            self._storage.save_all_dirty()
-            log_info("LabelService shutdown complete")
+        for storage in self._all_storages():
+            storage.save_all_dirty()
+        log_info("LabelService shutdown complete")
 
         # Unload detector if needed
         if self._detector:
@@ -1093,11 +1322,13 @@ class LabelService:
         self,
         image_base: str,
         channel: str,
-    ) -> List[Tuple[str, float, float, float, float, Tuple[int, int, int]]]:
+    ) -> List[Tuple[str, float, float, float, float, Tuple[int, int, int], bool]]:
         """Get annotations formatted for UI overlay rendering.
 
-        Returns list of tuples: (display_name, x_center, y_center, width, height, (r, g, b))
-        All coordinates normalized [0,1].
+        Returns list of tuples:
+            (display_name, x_center, y_center, width, height, (r,g,b), is_auto)
+        All coordinates normalized [0,1].  *is_auto* is True when the
+        annotation has source AUTO (pending review).
         """
         from backend.utils.labels import class_color
 
@@ -1107,7 +1338,12 @@ class LabelService:
         # Internal / separately-rendered attributes that should not appear
         # in the overlay text.  'confidence' and 'source' are shown via
         # their own dedicated formatting, not through the attribute list.
-        _HIDDEN_ATTRS = {"model", "model_version", "raw_label", "confidence", "source"}
+        # Universal attributes (occlusion, truncation) are hidden too —
+        # only class-specific attributes add value on the overlay.
+        _HIDDEN_ATTRS = {
+            "model", "model_version", "raw_label", "confidence", "source",
+            "occlusion", "truncation",
+        }
 
         for ann in annotations:
             # Get class name from config or use ID
@@ -1135,15 +1371,19 @@ class LabelService:
             # Get color from class name
             color = class_color(cls_name)
 
-            result.append((display, ann.x_center, ann.y_center, ann.width, ann.height, color))
+            is_auto = ann.source == AnnotationSource.AUTO
+            result.append((display, ann.x_center, ann.y_center, ann.width, ann.height, color, is_auto))
 
         return result
 
     def label_file_path(self, image_base: str, channel: str) -> Path:
         """Get the path where labels for this image/channel would be stored."""
+        storage, local_base = self._resolve(image_base)
+        if storage:
+            return storage.dataset_path / "labels" / channel / f"{local_base}.yaml"
         if not self._dataset_path:
             raise RuntimeError("Dataset path not set")
-        return self._dataset_path / "labels" / channel / f"{channel}_{image_base}.yaml"
+        return self._dataset_path / "labels" / channel / f"{image_base}.yaml"
 
     def label_signature(
         self,
@@ -1168,7 +1408,7 @@ class LabelService:
         # Compact representation for comparison
         compact = tuple(
             (a.class_id, round(a.x_center, 4), round(a.y_center, 4),
-             round(a.width, 4), round(a.height, 4))
+             round(a.width, 4), round(a.height, 4), a.source.value)
             for a in labels.annotations
         )
         return (mtime, compact)
@@ -1327,8 +1567,9 @@ class LabelService:
         )
         self.add_annotation(image_base, channel, ann)
         # Save immediately for manual edits
-        if self._storage:
-            self._storage.save_labels(channel, image_base)
+        storage, local_base = self._resolve(image_base)
+        if storage:
+            self._save_and_invalidate(storage, channel, local_base)
 
     def clear_labels(self, image_base: str) -> None:
         """Clear all labels for an image (both channels)."""
@@ -1337,9 +1578,9 @@ class LabelService:
 
     def clear_cache(self) -> None:
         """Clear internal caches (for reload scenarios)."""
-        if self._storage:
-            self._storage._cache.clear()
-            self._storage._dirty.clear()
+        for storage in self._all_storages():
+            storage._cache.clear()
+            storage._dirty.clear()
 
     # =========================================================================
     # Class Management - UI helpers
@@ -1401,19 +1642,3 @@ class LabelService:
                     return cls_id
 
         return None
-
-    def copy_config_to_dataset(self, source_path: Path) -> None:
-        """Copy a config YAML to the dataset's labels directory."""
-        if not self._dataset_path:
-            return
-
-        dst = self._dataset_path / "labels" / "labels.yaml"
-        try:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            # Only write if different
-            if dst.exists():
-                if dst.read_text(encoding="utf-8") == source_path.read_text(encoding="utf-8"):
-                    return
-            dst.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
-        except Exception:
-            pass  # Non-fatal

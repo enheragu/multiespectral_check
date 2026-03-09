@@ -102,6 +102,7 @@ class LabelEditDialog(QDialog):
         self._p2_y_spin: Optional[QSpinBox] = None
 
         self._ok_button: Optional[QWidget] = None
+        self._delete_requested: bool = False
 
         # Block signals during setup
         self._setup_in_progress = True
@@ -325,6 +326,18 @@ class LabelEditDialog(QDialog):
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+
+        # Delete button (only when editing an existing annotation)
+        if not self.is_new:
+            from PyQt6.QtWidgets import QPushButton
+            delete_btn = QPushButton("Delete")
+            delete_btn.setStyleSheet(
+                "QPushButton { color: #cc3333; font-weight: bold; }"
+                "QPushButton:hover { background-color: #ffdddd; }"
+            )
+            buttons.addButton(delete_btn, QDialogButtonBox.ButtonRole.DestructiveRole)
+            delete_btn.clicked.connect(self._handle_delete)
+
         layout.addWidget(buttons)
 
         # Connect class change AFTER setup to avoid spurious updates
@@ -664,6 +677,20 @@ class LabelEditDialog(QDialog):
             return
         super().accept()
 
+    def _handle_delete(self) -> None:
+        """Handle Delete button with confirmation."""
+        from PyQt6.QtWidgets import QMessageBox
+        reply = QMessageBox.question(
+            self,
+            "Delete annotation",
+            "Are you sure you want to delete this annotation?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._delete_requested = True
+            self.reject()  # Close dialog — caller checks _delete_requested
+
     def get_class_id(self) -> Optional[str]:
         """Get the selected class ID (validated against config)."""
         return self._resolve_class_id(self._class_combo.currentText())
@@ -728,7 +755,9 @@ class LabelEditDialog(QDialog):
         """Show dialog to edit an existing annotation.
 
         Returns:
-            Dict with 'class_id', 'bbox', and 'attributes' if accepted, None if cancelled
+            Dict with 'class_id', 'bbox', and 'attributes' if accepted,
+            Dict with 'deleted': True if user chose to delete,
+            None if cancelled.
         """
         dialog = cls(
             parent, config,
@@ -737,7 +766,10 @@ class LabelEditDialog(QDialog):
             image_size=image_size,
             on_bbox_changed=on_bbox_changed,
         )
-        if dialog.exec() == QDialog.DialogCode.Accepted:
+        result_code = dialog.exec()
+        if dialog._delete_requested:
+            return {"deleted": True}
+        if result_code == QDialog.DialogCode.Accepted:
             return {
                 "class_id": dialog.get_class_id(),
                 "bbox": dialog.get_bbox(),

@@ -62,13 +62,10 @@ def derive_summary_from_entry(entry: DatasetCache) -> Dict[str, Any]:
     auto_reasons: Dict[str, int] = {}
 
     for base, mark_entry in marks.items():
-        if isinstance(mark_entry, dict):
-            reason = mark_entry.get("reason", "")
-            is_auto = mark_entry.get("auto", False)
-        else:
-            # Legacy format fallback
-            reason = str(mark_entry) if mark_entry else ""
-            is_auto = False
+        if not isinstance(mark_entry, dict):
+            continue
+        reason = mark_entry.get("reason", "")
+        is_auto = mark_entry.get("auto", False)
 
         if not reason:
             continue

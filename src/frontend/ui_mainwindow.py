@@ -361,6 +361,7 @@ class Ui_MainWindow(object):
         self.action_label_detection_channel.setToolTip(
             "Toggle which image channel is used for auto-detection (Visible / LWIR)"
         )
+        self.action_label_report = QtGui.QAction("Label report…", MainWindow)
         self.action_filter_all = QtGui.QAction("Show all images", MainWindow)
         self.action_filter_calibration_any = QtGui.QAction("Calibration candidates", MainWindow)
         self.action_filter_calibration_both = QtGui.QAction("Calibration with both detections", MainWindow)
@@ -409,6 +410,7 @@ class Ui_MainWindow(object):
         self.action_run_quality_scan.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay))
         self.action_run_pattern_scan.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay))
         self.action_clear_empty_datasets.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_TrashIcon))
+        self.action_label_report.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogDetailedView))
 
         # Delete action icons
         self.action_delete_duplicates.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_TrashIcon))
@@ -559,6 +561,8 @@ class Ui_MainWindow(object):
         self.menu_labelling.addAction(self.action_label_auto_mode)
         self.menu_labelling.addSeparator()
         self.menu_labelling.addAction(self.action_label_detection_channel)
+        self.menu_labelling.addSeparator()
+        self.menu_labelling.addAction(self.action_label_report)
         self.menu_help.addAction(self.action_show_help)
         self.menubar.addAction(self.menu_file.menuAction())
         self.menubar.addAction(self.menu_view.menuAction())

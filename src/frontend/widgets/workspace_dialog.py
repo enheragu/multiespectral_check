@@ -565,7 +565,7 @@ class WorkspacePanel(QWidget):
         available = self.table.viewport().width() - 4
 
         # Columns that can wrap (indices)
-        wrappable_cols = {3, 4, 5}  # Delete Reasons, Tagged to delete, Calibration
+        wrappable_cols = {3, 4, 6}  # Delete Reasons, Tagged to delete, Calibration
         min_col_width = 80  # Minimum width for any column
 
         # Calculate ideal widths based on content
@@ -590,7 +590,7 @@ class WorkspacePanel(QWidget):
             # Give extra space to last column
             extra = available - total_ideal
             if extra > 0:
-                header.resizeSection(6, ideal_widths[6] + extra)
+                header.resizeSection(7, ideal_widths[7] + extra)
         else:
             # Need to shrink wrappable columns
             # First, calculate fixed columns total
@@ -664,13 +664,14 @@ class WorkspacePanel(QWidget):
         header_row.addWidget(self.open_button)
         layout.addLayout(header_row)
 
-        self.table = QTableWidget(0, 7, self)  # 7 columns
+        self.table = QTableWidget(0, 8, self)  # 8 columns
         self.table.setHorizontalHeaderLabels([
             "Dataset",
             "Pairs",
             "Deleted",
             "Delete Reasons",
             "Tagged to delete",
+            "Labels",
             "Calibration",
             "Sweeps",
         ])
@@ -715,7 +716,7 @@ class WorkspacePanel(QWidget):
             self.refresh_button.setEnabled(False)
         self.table.setRowCount(1)
         self.table.setItem(0, 0, QTableWidgetItem("Scanning workspace..."))
-        for col in range(1, 4):
+        for col in range(1, self.table.columnCount()):
             self.table.setItem(0, col, QTableWidgetItem(""))
         self.note_edit.clear()
         self._note_status("Workspace saved")
@@ -1050,6 +1051,13 @@ class WorkspacePanel(QWidget):
         """Format calibration statistics (delegate to stats)."""
         return info.stats.format_calibration(compact=True)
 
+    def _format_labels(self, info: WorkspaceDatasetInfo) -> str:
+        """Format total annotation count for the Labels column."""
+        total = info.labels_total
+        if total == 0:
+            return "–"
+        return str(total)
+
     def _format_sweeps(self, info: WorkspaceDatasetInfo) -> str:
         """Format sweep status as compact single line with checkmarks."""
         parts = []
@@ -1325,9 +1333,10 @@ class WorkspacePanel(QWidget):
             self.table.setItem(row, 2, QTableWidgetItem(indent_text(self._format_removed(info), child_prefix)))
             self.table.setItem(row, 3, QTableWidgetItem(indent_text(self._format_reasons(info), child_prefix)))
             self.table.setItem(row, 4, QTableWidgetItem(indent_text(self._format_tagged(info), child_prefix)))
-            self.table.setItem(row, 5, QTableWidgetItem(indent_text(self._format_calibration(info), child_prefix)))
-            self.table.setItem(row, 6, QTableWidgetItem(indent_text(self._format_sweeps(info), child_prefix)))
-            for col in range(7):
+            self.table.setItem(row, 5, QTableWidgetItem(indent_text(self._format_labels(info), child_prefix)))
+            self.table.setItem(row, 6, QTableWidgetItem(indent_text(self._format_calibration(info), child_prefix)))
+            self.table.setItem(row, 7, QTableWidgetItem(indent_text(self._format_sweeps(info), child_prefix)))
+            for col in range(8):
                 item = self.table.item(row, col)
                 if item:
                     if info.is_collection or info.name == "Workspace total":
@@ -1390,12 +1399,15 @@ class WorkspacePanel(QWidget):
 
         from backend.services.stats_manager import DatasetStats
         total_stats = DatasetStats()
+        labels_total = 0
         for info in leaves:
             total_stats.merge(info.stats)
+            labels_total += info.labels_total
 
         return WorkspaceDatasetInfo(
             name="Workspace total",
             path=self.workspace_dir,
             note="",
             stats=total_stats,
+            labels_total=labels_total,
         )

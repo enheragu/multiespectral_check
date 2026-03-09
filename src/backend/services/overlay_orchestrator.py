@@ -39,7 +39,7 @@ class OverlayOrchestrator(QObject):
         session: "DatasetSession",
         state: "ViewerState",
         *,
-        get_label_boxes: Callable[[str, str], List[Tuple[str, float, float, float, float, QColor]]],
+        get_label_boxes: Callable[[str, str], List[Tuple[str, float, float, float, float, QColor, bool]]],
         get_label_signature: Callable[[str, str, List], Optional[Tuple[Any, ...]]],
         get_error_thresholds: Callable[[], Dict[str, float]],
         parent: Optional[QObject] = None,
@@ -150,9 +150,9 @@ class OverlayOrchestrator(QObject):
         stereo_error = cd["extrinsic_errors"].get(base)
 
         # Label data (only if showing labels)
-        # Format: (display_name, x_center, y_center, width, height, color, is_projected)
-        label_boxes_lwir: List[Tuple[str, float, float, float, float, QColor, bool]] = []
-        label_boxes_vis: List[Tuple[str, float, float, float, float, QColor, bool]] = []
+        # Format: (display_name, x_center, y_center, width, height, color, is_projected, is_auto)
+        label_boxes_lwir: List[Tuple[str, float, float, float, float, QColor, bool, bool]] = []
+        label_boxes_vis: List[Tuple[str, float, float, float, float, QColor, bool, bool]] = []
         label_sig_lwir: Optional[Tuple[Any, ...]] = None
         label_sig_vis: Optional[Tuple[Any, ...]] = None
 
@@ -161,9 +161,9 @@ class OverlayOrchestrator(QObject):
             raw_lwir = self._get_label_boxes(base, "lwir")
             raw_vis = self._get_label_boxes(base, "visible")
 
-            # Add is_projected=False flag to direct labels
-            label_boxes_lwir = [(d, x, y, w, h, c, False) for d, x, y, w, h, c in raw_lwir]
-            label_boxes_vis = [(d, x, y, w, h, c, False) for d, x, y, w, h, c in raw_vis]
+            # Add is_projected=False flag to direct labels, keep is_auto
+            label_boxes_lwir = [(d, x, y, w, h, c, False, auto) for d, x, y, w, h, c, auto in raw_lwir]
+            label_boxes_vis = [(d, x, y, w, h, c, False, auto) for d, x, y, w, h, c, auto in raw_vis]
 
             # Project labels from other channel (is_projected=True)
             # vis -> lwir projection
@@ -337,18 +337,18 @@ class OverlayOrchestrator(QObject):
 
     def _project_labels(
         self,
-        labels: List[Tuple[str, float, float, float, float, QColor]],
+        labels: List[Tuple[str, float, float, float, float, QColor, bool]],
         source_channel: str,
         target_channel: str,
         base: str,
-    ) -> List[Tuple[str, float, float, float, float, QColor, bool]]:
+    ) -> List[Tuple[str, float, float, float, float, QColor, bool, bool]]:
         """Project labels from one channel to the other using calibration.
 
         Uses the homography computed for stereo alignment to project bbox coordinates.
         All returned labels have is_projected=True.
 
         Args:
-            labels: List of (display_name, x_center, y_center, width, height, color)
+            labels: List of (display_name, x_center, y_center, width, height, color, is_auto)
             source_channel: 'visible' or 'lwir' - where labels were annotated
             target_channel: 'visible' or 'lwir' - where to project
             base: Image base name
@@ -396,9 +396,9 @@ class OverlayOrchestrator(QObject):
         # Import here to avoid circular imports
         from backend.services.labels.bbox_transform import project_bbox_with_homography
 
-        projected: List[Tuple[str, float, float, float, float, QColor, bool]] = []
+        projected: List[Tuple[str, float, float, float, float, QColor, bool, bool]] = []
 
-        for display_name, xc, yc, w, h, color in labels:
+        for display_name, xc, yc, w, h, color, is_auto in labels:
             bbox = (xc, yc, w, h)
             proj_bbox = project_bbox_with_homography(
                 bbox, homography, source_size, target_size
@@ -406,7 +406,7 @@ class OverlayOrchestrator(QObject):
             if proj_bbox:
                 proj_xc, proj_yc, proj_w, proj_h = proj_bbox
                 # Use same color but with is_projected=True
-                projected.append((display_name, proj_xc, proj_yc, proj_w, proj_h, color, True))
+                projected.append((display_name, proj_xc, proj_yc, proj_w, proj_h, color, True, is_auto))
 
         if projected:
             log_debug(
@@ -500,10 +500,6 @@ class OverlayOrchestrator(QObject):
         if mode != self.grid_mode:
             self.grid_mode = mode
             self.invalidate()
-
-    def set_show_grid(self, show: bool) -> None:
-        """Set whether to show grid overlay (backwards compatibility)."""
-        self.set_grid_mode("thirds" if show else "off")
 
     def set_show_labels(self, show: bool) -> None:
         """Set whether to show label box overlays."""

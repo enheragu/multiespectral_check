@@ -71,16 +71,6 @@ class ViewStateController(QObject):
             self.viewStateChanged.emit()
 
     @property
-    def show_grid(self) -> bool:
-        """Get grid display state (backwards compatibility)."""
-        return self._grid_mode != "off"
-
-    @show_grid.setter
-    def show_grid(self, value: bool) -> None:
-        """Set grid display state (backwards compatibility)."""
-        self.grid_mode = "thirds" if value else "off"
-
-    @property
     def show_labels(self) -> bool:
         """Get label display state."""
         return self._show_labels
@@ -137,14 +127,6 @@ class ViewStateController(QObject):
             self.statusMessage.emit(msg, 3000)
             self.viewStateChanged.emit()
 
-    def toggle_grid(self, enabled: bool) -> None:
-        """Toggle grid display.
-
-        Args:
-            enabled: True to show grid
-        """
-        self.show_grid = enabled
-
     def toggle_labels(self, enabled: bool) -> None:
         """Toggle label display.
 
@@ -173,23 +155,17 @@ class ViewStateController(QObject):
 
     def load_preferences(
         self,
-        show_grid: bool = False,
         show_labels: bool = False,
         show_overlays: bool = True,
-        grid_mode: str = "",
+        grid_mode: str = "off",
     ) -> None:
         """Load view preferences without triggering cache invalidation.
 
         Args:
-            show_grid: Initial grid display state (legacy, overridden by grid_mode)
             show_labels: Initial label display state
             show_overlays: Initial info overlay display state (default True)
             grid_mode: Grid display mode ("off", "thirds", "detailed")
         """
-        # Use grid_mode if provided, otherwise fall back to legacy show_grid
-        if grid_mode in ("off", "thirds", "detailed"):
-            self._grid_mode = grid_mode
-        else:
-            self._grid_mode = "thirds" if show_grid else "off"
+        self._grid_mode = grid_mode if grid_mode in ("off", "thirds", "detailed") else "off"
         self._show_labels = show_labels
         self._show_overlays = show_overlays

@@ -23,9 +23,10 @@ from common.log_utils import log_debug
 if TYPE_CHECKING:
     from backend.utils.stereo_alignment import AlignmentTransform
 
-# LabelOverlay: (display_name, x_center, y_center, width, height, color, is_projected)
+# LabelOverlay: (display_name, x_center, y_center, width, height, color, is_projected, is_auto)
 # is_projected=True means label was computed from other channel, shown with dashed line
-LabelOverlay = Tuple[str, float, float, float, float, QColor, bool]
+# is_auto=True means label is auto-detected and pending review
+LabelOverlay = Tuple[str, float, float, float, float, QColor, bool, bool]
 CALIBRATION_BORDER_COLOR = QColor("#00ffea")
 CALIBRATION_ERROR_COLOR = QColor("#dc3545")
 WARNING_LABEL_COLOR = QColor("#ffb347")
@@ -198,7 +199,7 @@ class OverlayWorkflow:
 
         transformed: List[LabelOverlay] = []
 
-        for display_name, xc, yc, w, h, color, is_projected in label_boxes:
+        for display_name, xc, yc, w, h, color, is_projected, is_auto in label_boxes:
             # Convert center-format bbox corners to pixel coords
             # We transform all 4 corners and recompute the bbox
             half_w, half_h = w / 2, h / 2
@@ -274,7 +275,7 @@ class OverlayWorkflow:
             new_w_norm = new_w / disp_w
             new_h_norm = new_h / disp_h
 
-            transformed.append((display_name, new_xc, new_yc, new_w_norm, new_h_norm, color, is_projected))
+            transformed.append((display_name, new_xc, new_yc, new_w_norm, new_h_norm, color, is_projected, is_auto))
 
         return transformed
 

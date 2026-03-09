@@ -196,8 +196,7 @@ class MarkingController:
         if not base:
             return
         mark_entry = self.state.cache_data["marks"].get(base)
-        # Extract reason from dict format {"reason": ..., "auto": ...} or legacy string
-        current_reason = mark_entry.get("reason") if isinstance(mark_entry, dict) else mark_entry
+        current_reason = mark_entry.get("reason") if isinstance(mark_entry, dict) else None
         if current_reason == reason:
             # Toggle off: same reason pressed again
             self.apply_mark_reason(base, None)
