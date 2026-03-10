@@ -2,7 +2,23 @@
 
 GUI for multispectral dataset review, calibration, and labeling for detection tasks.
 
-![Image of the GUI with calibration images loaded](./docs/media/gui_general_view.png)
+¿Are there any other labelling softwares? Yes. A lot. But I needed a multiespectral labelling software. In this case two images can be handled at the same time, and once the calibration is computed (intrinsinc and extrinsic), both images can be aligned and labels can be reprojected between them.
+
+<p align="center">
+  <img
+    src="./docs/media/gui_general_view.png"
+    alt="Image of the GUI with calibration images loaded, in both images the calibration pattern is detected, the corners are highligted and the result of the calibration reprojection error displayed in the overlay."
+    title="General view of the GUI with calibration results."
+    width="45%"
+  />
+  <img
+    src="./docs/media/gui_general_view_labelling.png"
+    alt="Image of the GUI with labelling mode, a set of labels are displayed in both images."
+    title="General view of the GUI with labelling results."
+    width="45%"
+  />
+</p>
+
 
 ## ⚙️ Requirements
 
@@ -77,9 +93,9 @@ Note that collections are optional and can be used to group specific sets (all c
 - ✅ Tag calibration image pairs (those with chessboard pattern) either manually or through calibration search sweep. Chessboard detection with subpixel corner adjustment (not always better, check thoroughly).
 - ✅ Generate intrinsic and extrinsic calibration, with option to filter outliers (auto-detected or manually selected) to refine calibration.
 - ✅ Different options to check image rectification to match images field of view through calibration.
-- ✅ Manual labelling with bounding box drawing, class selection (autocomplete), and per-label editing/deletion. Check `config/labels_mmultiespectral_dataset.yaml` for an example of label configuration.
-- ⏳ [TBD] Automatic label suggestion using configurable detection models. Run on individual images or batch across the full dataset.
-- ⏳ [TBD] Dataset statistics and visualization of label distribution.
+- ✅ Manual labelling with bounding box drawing (crosshair guides), class selection (autocomplete), and per-label editing/deletion. Check `config/labels_multiespectral_dataset.yaml` for an example of label configuration.
+- ✅  Automatic label suggestion using configurable detection models. Run on individual images or batch across the full dataset (based on [GroundingDino](https://github.com/IDEA-Research/Grounding-DINO-1.5-API), [Ultralitics-YOLO](https://github.com/ultralytics/ultralytics) and with template to integrate other detectors). Includes acceptance workflow (auto/reviewed/manual), ensemble mode (GDINO + YOLO with IoU fusion).
+- ✅ Label report with per-class statistics, channel/source breakdown, attribute distributions, and YOLO-style charts (class histogram, bbox overlay, centre heatmap, size distribution heatmap). Available at dataset and workspace level with per-class filtering.
 - ⏳ [TBD] Dataset export with matching images and specific label format (YOLO, PascalVOC, etc).
 - ⏳ [TBD] Coverage and log for debug tracking and code quality control.
 
@@ -87,7 +103,7 @@ Note that collections are optional and can be used to group specific sets (all c
 ## 📚 Extra documentation
 
 - [GUI_FUNCTIONALITIES.md](docs/GUI_FUNCTIONALITIES.md) — Detailed information about the functionalities included in the GUI.
-- [DESIGN_PHILOSOPHY.md](docs/DESIGN_PHILOSOPHY.md) — Design and coding philosophy followed in this project.
+- [DESIGN_PHILOSOPHY.md](docs/DESIGN_PHILOSOPHY.md) — Design and coding philosophy followed (at least tried to) in this project.
 
 ## 🐛 Bug reports & Contact
 
