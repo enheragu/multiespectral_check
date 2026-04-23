@@ -152,19 +152,35 @@ def load_corners(dataset_path: Path, image_base: str) -> Optional[Dict[str, Any]
 def load_corners_for_dataset(dataset_path: Path) -> Dict[str, Dict[str, Optional[List[List[float]]]]]:
     """Load all corners for all images in a dataset or collection.
 
+    Uses parallel I/O to speed up loading when many corner files exist.
+
     Args:
         dataset_path: Path to the dataset or collection root
 
     Returns:
         Dict mapping base names to corner dicts {"lwir": [...], "visible": [...]}
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     result: Dict[str, Dict[str, Optional[List[List[float]]]]] = {}
     bases = list_images_with_corners(dataset_path)
+    if not bases:
+        return result
 
-    for base in bases:
-        corners = load_corners(dataset_path, base)
-        if corners:
-            result[base] = corners
+    def _load_one(base: str) -> Tuple[str, Optional[Dict[str, Any]]]:
+        return base, load_corners(dataset_path, base)
+
+    # Cap workers so we don't overwhelm the OS file descriptors
+    workers = min(8, len(bases))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_load_one, b): b for b in bases}
+        for future in as_completed(futures):
+            try:
+                base, corners = future.result()
+                if corners:
+                    result[base] = corners
+            except Exception:  # noqa: BLE001
+                pass
 
     return result
 

@@ -59,17 +59,47 @@ class Ui_MainWindow(object):
         header_row.addWidget(self.label_dataset_path)
         header_row.addStretch(1)
 
+        qt_nav_style = MainWindow.style()
+
+        self.btn_prev_fast = QtWidgets.QPushButton(self.tab_dataset)
+        self.btn_prev_fast.setIcon(qt_nav_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaSkipBackward))
+        self.btn_prev_fast.setText("×5")
+        self.btn_prev_fast.setToolTip("Previous ×5  (Shift + ←)")
+        self.btn_prev_fast.setEnabled(False)
+        self.btn_prev_fast.setObjectName("btn_prev_fast")
+        header_row.addWidget(self.btn_prev_fast)
+
         self.btn_prev = QtWidgets.QPushButton(self.tab_dataset)
-        self.btn_prev.setText("◀  Previous")
+        self.btn_prev.setIcon(qt_nav_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ArrowBack))
+        self.btn_prev.setText("Previous")
+        self.btn_prev.setToolTip("Previous image  (←)")
         self.btn_prev.setEnabled(False)
         self.btn_prev.setObjectName("btn_prev")
         header_row.addWidget(self.btn_prev)
 
+        self.btn_goto = QtWidgets.QPushButton(self.tab_dataset)
+        self.btn_goto.setIcon(qt_nav_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_CommandLink))
+        self.btn_goto.setText("Go to…")
+        self.btn_goto.setToolTip("Jump to image number  (Ctrl+G)")
+        self.btn_goto.setEnabled(False)
+        self.btn_goto.setObjectName("btn_goto")
+        header_row.addWidget(self.btn_goto)
+
         self.btn_next = QtWidgets.QPushButton(self.tab_dataset)
-        self.btn_next.setText("Next  ▶")
+        self.btn_next.setIcon(qt_nav_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ArrowForward))
+        self.btn_next.setText("Next")
+        self.btn_next.setToolTip("Next image  (→ / Space)")
         self.btn_next.setEnabled(False)
         self.btn_next.setObjectName("btn_next")
         header_row.addWidget(self.btn_next)
+
+        self.btn_next_fast = QtWidgets.QPushButton(self.tab_dataset)
+        self.btn_next_fast.setIcon(qt_nav_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaSkipForward))
+        self.btn_next_fast.setText("×5")
+        self.btn_next_fast.setToolTip("Next ×5  (Shift + →)")
+        self.btn_next_fast.setEnabled(False)
+        self.btn_next_fast.setObjectName("btn_next_fast")
+        header_row.addWidget(self.btn_next_fast)
 
         self.btn_delete_marked = QtWidgets.QPushButton(self.tab_dataset)
         self.btn_delete_marked.setText("Delete selected")
@@ -214,6 +244,7 @@ class Ui_MainWindow(object):
         self.action_load_recent = QtWidgets.QMenu("Load recent", self.menu_dataset)
         self.action_save_status = QtGui.QAction("Save current status", MainWindow)
         self.action_save_status.setShortcut(QtGui.QKeySequence("Ctrl+S"))
+        self.action_open_workspace_config = QtGui.QAction("Open Workspace Config…", MainWindow)
         self.action_run_duplicate_scan = QtGui.QAction("Run duplicate sweep", MainWindow)
         self.action_run_pattern_scan = QtGui.QAction("Run pattern sweep", MainWindow)
         self.action_delete_selected = QtGui.QAction("Delete selected pairs", MainWindow)
@@ -289,6 +320,10 @@ class Ui_MainWindow(object):
         self.align_action_group.addAction(self.action_align_fov_focus)
         self.align_action_group.addAction(self.action_align_max_overlap)
         self.align_action_group.setExclusive(True)
+        self.action_apply_parallax = QtGui.QAction("Apply Parallax Correction", MainWindow)
+        self.action_apply_parallax.setCheckable(True)
+        self.action_apply_parallax.setChecked(True)
+        self.action_reset_parallax = QtGui.QAction("Reset Parallax", MainWindow)
 
         # Corner Display submenu
         self.menu_corner_display = QtWidgets.QMenu("Corner Display", MainWindow)
@@ -324,6 +359,14 @@ class Ui_MainWindow(object):
         self.action_label_manual_mode = QtGui.QAction("Manual labelling mode", MainWindow)
         self.action_label_manual_mode.setCheckable(True)
         self.action_label_manual_mode.setShortcut(QtGui.QKeySequence("Ctrl+L"))
+        self.action_label_auto_mode = QtGui.QAction("Auto labelling mode", MainWindow)
+        self.action_label_auto_mode.setCheckable(True)
+        self.action_label_auto_mode.setShortcut(QtGui.QKeySequence("Ctrl+Shift+L"))
+        self.action_label_detection_channel = QtGui.QAction("Detection channel: Visible", MainWindow)
+        self.action_label_detection_channel.setToolTip(
+            "Toggle which image channel is used for auto-detection (Visible / LWIR)"
+        )
+        self.action_label_report = QtGui.QAction("Label report…", MainWindow)
         self.action_filter_all = QtGui.QAction("Show all images", MainWindow)
         self.action_filter_calibration_any = QtGui.QAction("Calibration candidates", MainWindow)
         self.action_filter_calibration_both = QtGui.QAction("Calibration with both detections", MainWindow)
@@ -372,6 +415,7 @@ class Ui_MainWindow(object):
         self.action_run_quality_scan.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay))
         self.action_run_pattern_scan.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay))
         self.action_clear_empty_datasets.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_TrashIcon))
+        self.action_label_report.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogDetailedView))
 
         # Delete action icons
         self.action_delete_duplicates.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_TrashIcon))
@@ -406,6 +450,8 @@ class Ui_MainWindow(object):
         self.action_auto_calibration_search.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay))
 
         self.menu_file.addAction(self.action_save_status)
+        self.menu_file.addSeparator()
+        self.menu_file.addAction(self.action_open_workspace_config)
         self.menu_file.addSeparator()
         self.menu_file.addAction(self.action_exit)
 
@@ -468,6 +514,9 @@ class Ui_MainWindow(object):
         self.menu_stereo_alignment.addAction(self.action_align_full)
         self.menu_stereo_alignment.addAction(self.action_align_fov_focus)
         self.menu_stereo_alignment.addAction(self.action_align_max_overlap)
+        self.menu_stereo_alignment.addSeparator()
+        self.menu_stereo_alignment.addAction(self.action_apply_parallax)
+        self.menu_stereo_alignment.addAction(self.action_reset_parallax)
         self.menu_view.addMenu(self.menu_stereo_alignment)
 
         # Corner Display submenu
@@ -519,6 +568,11 @@ class Ui_MainWindow(object):
         self.menu_labelling.addAction(self.action_label_clear_current)
         self.menu_labelling.addSeparator()
         self.menu_labelling.addAction(self.action_label_manual_mode)
+        self.menu_labelling.addAction(self.action_label_auto_mode)
+        self.menu_labelling.addSeparator()
+        self.menu_labelling.addAction(self.action_label_detection_channel)
+        self.menu_labelling.addSeparator()
+        self.menu_labelling.addAction(self.action_label_report)
         self.menu_help.addAction(self.action_show_help)
         self.menubar.addAction(self.menu_file.menuAction())
         self.menubar.addAction(self.menu_view.menuAction())

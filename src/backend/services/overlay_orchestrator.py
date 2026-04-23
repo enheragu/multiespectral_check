@@ -39,7 +39,7 @@ class OverlayOrchestrator(QObject):
         session: "DatasetSession",
         state: "ViewerState",
         *,
-        get_label_boxes: Callable[[str, str], List[Tuple[str, float, float, float, float, QColor]]],
+        get_label_boxes: Callable[[str, str], List[Tuple[str, float, float, float, float, QColor, bool]]],
         get_label_signature: Callable[[str, str, List], Optional[Tuple[Any, ...]]],
         get_error_thresholds: Callable[[], Dict[str, float]],
         parent: Optional[QObject] = None,
@@ -78,6 +78,13 @@ class OverlayOrchestrator(QObject):
         self._cached_lwir_calib_size: Optional[Tuple[int, int]] = None
         self._cached_vis_calib_size: Optional[Tuple[int, int]] = None
         self._cached_extrinsic_id: Optional[int] = None  # Track if extrinsic changed
+        self._cached_parallax_h: float = 0.0  # Track parallax used for cached H
+        self._cached_parallax_v: float = 0.0
+
+        # User-adjustable parallax correction (horizontal / vertical pixels)
+        self.parallax_h: float = 0.0
+        self.parallax_v: float = 0.0
+        self.apply_parallax_correction: bool = True
 
         # Cached aligned pixmaps: {base: (mode, view_rectified, lwir_pixmap, vis_pixmap)}
         # Only cache the last one to avoid memory bloat
@@ -150,9 +157,9 @@ class OverlayOrchestrator(QObject):
         stereo_error = cd["extrinsic_errors"].get(base)
 
         # Label data (only if showing labels)
-        # Format: (display_name, x_center, y_center, width, height, color, is_projected)
-        label_boxes_lwir: List[Tuple[str, float, float, float, float, QColor, bool]] = []
-        label_boxes_vis: List[Tuple[str, float, float, float, float, QColor, bool]] = []
+        # Format: (display_name, x_center, y_center, width, height, color, is_projected, is_auto)
+        label_boxes_lwir: List[Tuple[str, float, float, float, float, QColor, bool, bool]] = []
+        label_boxes_vis: List[Tuple[str, float, float, float, float, QColor, bool, bool]] = []
         label_sig_lwir: Optional[Tuple[Any, ...]] = None
         label_sig_vis: Optional[Tuple[Any, ...]] = None
 
@@ -161,9 +168,9 @@ class OverlayOrchestrator(QObject):
             raw_lwir = self._get_label_boxes(base, "lwir")
             raw_vis = self._get_label_boxes(base, "visible")
 
-            # Add is_projected=False flag to direct labels
-            label_boxes_lwir = [(d, x, y, w, h, c, False) for d, x, y, w, h, c in raw_lwir]
-            label_boxes_vis = [(d, x, y, w, h, c, False) for d, x, y, w, h, c in raw_vis]
+            # Add is_projected=False flag to direct labels, keep is_auto
+            label_boxes_lwir = [(d, x, y, w, h, c, False, auto) for d, x, y, w, h, c, auto in raw_lwir]
+            label_boxes_vis = [(d, x, y, w, h, c, False, auto) for d, x, y, w, h, c, auto in raw_vis]
 
             # Project labels from other channel (is_projected=True)
             # vis -> lwir projection
@@ -199,6 +206,7 @@ class OverlayOrchestrator(QObject):
         # Apply stereo alignment if enabled (any mode except "disabled")
         alignment_transform = None
         if self.align_mode != "disabled" and display_lwir and display_vis:
+            effective_h, effective_v = self._effective_parallax()
             # Check alignment cache
             cache = self._aligned_cache
             if (
@@ -206,10 +214,12 @@ class OverlayOrchestrator(QObject):
                 and cache[0] == base
                 and cache[1] == self.align_mode
                 and cache[2] == self.view_rectified
+                and cache[5] == effective_h
+                and cache[6] == effective_v
             ):
                 # Cache hit - use cached aligned pixmaps
                 display_lwir, display_vis = cache[3], cache[4]
-                alignment_transform = cache[5]
+                alignment_transform = cache[7]
                 log_debug(f"Alignment cache hit for {base}", "ALIGN")
             else:
                 # Cache miss - compute alignment
@@ -221,7 +231,9 @@ class OverlayOrchestrator(QObject):
                 # Cache the result
                 self._aligned_cache = (
                     base, self.align_mode, self.view_rectified,
-                    display_lwir, display_vis, alignment_transform
+                    display_lwir, display_vis,
+                    effective_h, effective_v,
+                    alignment_transform,
                 )
                 log_debug(f"Alignment cache miss for {base}, cached", "ALIGN")
 
@@ -337,18 +349,18 @@ class OverlayOrchestrator(QObject):
 
     def _project_labels(
         self,
-        labels: List[Tuple[str, float, float, float, float, QColor]],
+        labels: List[Tuple[str, float, float, float, float, QColor, bool]],
         source_channel: str,
         target_channel: str,
         base: str,
-    ) -> List[Tuple[str, float, float, float, float, QColor, bool]]:
+    ) -> List[Tuple[str, float, float, float, float, QColor, bool, bool]]:
         """Project labels from one channel to the other using calibration.
 
         Uses the homography computed for stereo alignment to project bbox coordinates.
         All returned labels have is_projected=True.
 
         Args:
-            labels: List of (display_name, x_center, y_center, width, height, color)
+            labels: List of (display_name, x_center, y_center, width, height, color, is_auto)
             source_channel: 'visible' or 'lwir' - where labels were annotated
             target_channel: 'visible' or 'lwir' - where to project
             base: Image base name
@@ -396,9 +408,9 @@ class OverlayOrchestrator(QObject):
         # Import here to avoid circular imports
         from backend.services.labels.bbox_transform import project_bbox_with_homography
 
-        projected: List[Tuple[str, float, float, float, float, QColor, bool]] = []
+        projected: List[Tuple[str, float, float, float, float, QColor, bool, bool]] = []
 
-        for display_name, xc, yc, w, h, color in labels:
+        for display_name, xc, yc, w, h, color, is_auto in labels:
             bbox = (xc, yc, w, h)
             proj_bbox = project_bbox_with_homography(
                 bbox, homography, source_size, target_size
@@ -406,7 +418,7 @@ class OverlayOrchestrator(QObject):
             if proj_bbox:
                 proj_xc, proj_yc, proj_w, proj_h = proj_bbox
                 # Use same color but with is_projected=True
-                projected.append((display_name, proj_xc, proj_yc, proj_w, proj_h, color, True))
+                projected.append((display_name, proj_xc, proj_yc, proj_w, proj_h, color, True, is_auto))
 
         if projected:
             log_debug(
@@ -450,6 +462,8 @@ class OverlayOrchestrator(QObject):
         if not source_size:
             return None
 
+        effective_h, effective_v = self._effective_parallax()
+
         try:
             homography = compute_alignment_homography(
                 source_matrix=source_mat,
@@ -458,6 +472,8 @@ class OverlayOrchestrator(QObject):
                 translation=extrinsic.get("translation") or extrinsic.get("T"),
                 image_size=source_size,
                 source_is_lwir=source_is_lwir,
+                parallax_h=effective_h,
+                parallax_v=effective_v,
             )
             return homography
         except Exception as e:
@@ -493,6 +509,29 @@ class OverlayOrchestrator(QObject):
             self.align_mode = mode
             self.invalidate()
 
+    def set_parallax_correction(self, h: float, v: float) -> None:
+        """Set the parallax correction in pixels (horizontal / vertical).
+
+        Changing either component invalidates the cached homography so
+        the next render recomputes it.
+        """
+        if h != self.parallax_h or v != self.parallax_v:
+            self.parallax_h = h
+            self.parallax_v = v
+            # Force homography recomputation (parallax changes the matrix)
+            self._cached_homography = None
+            self._aligned_cache = None
+            self.invalidate()
+
+    def set_apply_parallax_correction(self, enabled: bool) -> None:
+        """Enable or disable additive parallax correction without disabling calibration reprojection."""
+        enabled = bool(enabled)
+        if enabled != self.apply_parallax_correction:
+            self.apply_parallax_correction = enabled
+            self._cached_homography = None
+            self._aligned_cache = None
+            self.invalidate()
+
     def set_grid_mode(self, mode: str) -> None:
         """Set grid display mode: 'off', 'thirds', or 'detailed'."""
         if mode not in ("off", "thirds", "detailed"):
@@ -501,9 +540,11 @@ class OverlayOrchestrator(QObject):
             self.grid_mode = mode
             self.invalidate()
 
-    def set_show_grid(self, show: bool) -> None:
-        """Set whether to show grid overlay (backwards compatibility)."""
-        self.set_grid_mode("thirds" if show else "off")
+    def _effective_parallax(self) -> Tuple[float, float]:
+        """Get parallax actually applied in homography computations."""
+        if self.apply_parallax_correction:
+            return self.parallax_h, self.parallax_v
+        return 0.0, 0.0
 
     def set_show_labels(self, show: bool) -> None:
         """Set whether to show label box overlays."""
@@ -642,11 +683,14 @@ class OverlayOrchestrator(QObject):
 
         # Use cached homography if valid (extrinsic data hasn't changed)
         extrinsic_id = id(extrinsic)
+        effective_h, effective_v = self._effective_parallax()
         if (
             self._cached_homography is not None
             and self._cached_extrinsic_id == extrinsic_id
             and self._cached_lwir_calib_size == lwir_calib_size
             and self._cached_vis_calib_size == vis_calib_size
+            and self._cached_parallax_h == effective_h
+            and self._cached_parallax_v == effective_v
         ):
             homography = self._cached_homography
             log_debug("Using cached homography", "ALIGN")
@@ -658,12 +702,16 @@ class OverlayOrchestrator(QObject):
                 extrinsic.get("translation") or extrinsic.get("T"),
                 lwir_calib_size,
                 source_is_lwir=True,
+                parallax_h=effective_h,
+                parallax_v=effective_v,
             )
             if homography is not None:
                 self._cached_homography = homography
                 self._cached_extrinsic_id = extrinsic_id
                 self._cached_lwir_calib_size = lwir_calib_size
                 self._cached_vis_calib_size = vis_calib_size
+                self._cached_parallax_h = effective_h
+                self._cached_parallax_v = effective_v
                 log_debug("Computed and cached new homography", "ALIGN")
 
         if homography is None:

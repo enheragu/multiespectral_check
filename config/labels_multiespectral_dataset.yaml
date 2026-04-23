@@ -5,7 +5,7 @@
 # urban detection datasets. It separates Permanent Infrastructure from Dynamic Agents
 # and includes universal + class-specific attributes for bias analysis.
 
-schema_version: "1.0.0"
+schema_version: "1.1.0"
 
 dataset_meta:
   name: multiespectral_urban_dataset
@@ -55,13 +55,13 @@ classes:
     attributes:
       role:
         type: enum
-        options: [pedestrian, rider, worker]
+        options: [pedestrian, rider]
       age_group:
         type: enum
         options: [adult, child]
       activity:
         type: enum
-        options: [standing, walking, sitting, cycling, running, lying]
+        options: [standing, sitting, lying]
       perceived_gender:
         type: enum
         options: [male, female, unknown]
@@ -69,14 +69,15 @@ classes:
     name: car
     group: dynamic
     aliases: [vehicle, automobile]
+    min_confidence: 0.35
     attributes:
       type:
         type: enum
-        options: [sedan, suv, van, hatchback, pickup, coupe, utility, unknown]
-        description: utility includes similar small utility vehicles for paths/terrain
-      special_service:
-        type: enum
-        options: [none, taxi, police, ambulance, vtc]
+        options: [small, large, van, utility, unknown]
+        description: >
+          small: sedan, hatchback, coupe, etc.
+          large: SUV, pickup, etc.
+          utility: small utility vehicles for paths/terrain
       state:
         type: enum
         options: [moving, stopped, parked]
@@ -84,14 +85,11 @@ classes:
   - id: 3
     name: heavy_vehicle
     group: dynamic
-    aliases: [bus, truck, lorry]
+    aliases: [city bus, truck, lorry]
     attributes:
       class:
         type: enum
-        options: [bus, truck, construction, mobile_crane]
-      special_service:
-        type: enum
-        options: [none, fire_dept, ambulance, police, military]
+        options: [city_bus, truck, construction, mobile_crane]
       state:
         type: enum
         options: [moving, stopped, parked]
@@ -130,9 +128,6 @@ classes:
       type:
         type: enum
         options: [dog, cat, bird, wildlife]
-      restrained:
-        type: bool
-        description: Whether the animal appears restrained (leash, cage, etc.)
 
   - id: 7
     name: loose_object
@@ -144,20 +139,18 @@ classes:
     attributes:
       type:
         type: enum
-        options: [trash_bag, box, cone, debris, bag, cart, trolley]
+        options: [trash_bag, box, cone, debris, bag, cart, trolley, umbrella]
         description: bag covers backpacks, handbags, suitcases, etc.
       carried:
         type: bool
         description: Whether the object is being carried/worn by a person
-      location:
-        type: enum
-        options: [road, sidewalk, terrain]
 
   - id: 8
     name: emergency_vehicle
     description: Emergency service vehicles with priority (lights/sirens)
     group: dynamic
     aliases: [police_car, ambulance, fire_truck]
+    min_confidence: 0.40
     attributes:
       service:
         type: enum
@@ -173,14 +166,11 @@ classes:
     name: construction_element
     description: Temporary construction/works elements
     group: dynamic
-    aliases: [scaffolding, construction_barrier]
+    aliases: [scaffolding, construction_barrier, construction_fence]
     attributes:
       type:
         type: enum
         options: [scaffolding, container, portable_fence, excavation, machinery]
-      location:
-        type: enum
-        options: [road, sidewalk, building]
 
   # -----------------------------------------------------#
   #  GROUP 2: Infrastructure (permanent static objects)  #
@@ -214,73 +204,62 @@ classes:
         type: enum
         options: [stop, yield, warning, limit, prohibition, info, electronic_vms]
         description: VMS = Variable Message Sign (electronic display)
-      cleanliness:
-        type: enum
-        options: [clean, dirty_graffiti]
 
   - id: 12
     name: street_furniture
-    description: Fixed objects on sidewalk
+    description: Fixed objects on sidewalk / public way
     group: infrastructure
-    aliases: [bench, parking meter, parking_meter, fire hydrant, fire_hydrant]
+    aliases: [bench, parking meter, parking_meter, fire hydrant, fire_hydrant, fire extinguisher, fire hose]
     attributes:
       type:
         type: enum
-        options: [bench, trash_bin, lamp_post, utility_pole, parking_meter, bus_shelter, ad_panel, bike_rack]
-      condition:
-        type: enum
-        options: [good, damaged]
-
+        options: [bench, trash_bin, lamp_post, utility_pole, parking_meter, fire_hydrant, fire_extinguisher, fire_hose, bus_shelter, ad_panel, bike_rack, chair]
+      
   - id: 13
     name: barrier
-    description: Objects designed to block path
+    description: Permanent objects designed to block path
     group: infrastructure
+    aliases: [guardrail, bollard]
     attributes:
       type:
         type: enum
-        options: [fence, bollard, guardrail, jersey_barrier]
-      material:
-        type: enum
-        options: [metal, concrete, plastic]
+        options: [metal_fence, bollard, guardrail, jersey_barrier]
 
   - id: 14
     name: vegetation
     description: >
-      Vegetation elements. Split trunks and canopies for better localization handling.
+      Discrete vegetation elements (NOT ground cover like grass/lawn).
+      Always assign a type — generic "vegetation" detections without a
+      specific type should be discarded (ground cover is segmentation scope).
     group: infrastructure
+    aliases: [tree, palm tree, plant, shrub, bush]
+    min_confidence: 0.40
     attributes:
       type:
         type: enum
-        options: [tree_trunk, tree_canopy, hedge, bush]
+        required: true
+        options: [tree_trunk, tree_canopy, hedge, bush, potted_plant]
       foliage_state:
         type: enum
-        options: [bare, sparse, dense, blooming]
-        description: "bare=winter/dead, dense=summer/evergreen"
+        options: [bare, sparse, dense]
+        description: >
+          Thermal signature varies significantly by season:
+          bare = winter/dead (visible trunk, no leaf mass)
+          sparse = partial foliage
+          dense = full canopy (summer/evergreen)
   - id: 15
     name: doorway
     description: >
-      Door and entrances to buildings.
+      Doors and entrances to buildings.
     group: infrastructure
-    attributes:
-      state:
-        type: enum
-        options: [open, closed, blocked]
-      material:
-        type: enum
-        options: [wood, metal, glass, composite]
 
   - id: 16
-    name: road_marking
-    description: Painted markings on road surface
+    name: crosswalk
+    description: >
+      Pedestrian crossings painted on road surface.
+      Other road markings (lane lines, arrows, etc.) are segmentation scope.
     group: infrastructure
-    attributes:
-      type:
-        type: enum
-        options: [crosswalk, stop_line, lane_arrow, lane_line, bike_lane, parking_spot]
-      visibility:
-        type: enum
-        options: [clear, faded, obscured]
-        description: How visible/readable is the marking
+    aliases: [road_marking, zebra_crossing, pedestrian_crossing]
 
 
   # -------------------------------------------#

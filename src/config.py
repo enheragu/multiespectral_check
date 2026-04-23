@@ -22,6 +22,8 @@ class AppConfig:
 
     # Calibration settings
     chessboard_size: Tuple[int, int] = (7, 7)
+    chessboard_square_size_mm: float = 60.0  # Physical side length of each chessboard square
+    default_parallax_depth_m: float = 15.0   # Assumed scene depth for auto-parallax (metres)
     calibration_prefetch_limit: int = 6
     calibration_toggle_shortcut: str = "Ctrl+Shift+C"
 
@@ -29,7 +31,7 @@ class AppConfig:
     overlay_cache_limit: int = 24
 
     # Duplicate detection
-    signature_threshold: float = 0.003  # Lower = more strict (fewer duplicates), Higher = less strict
+    signature_threshold: float = 0.001  # Lower = more strict (fewer duplicates), Higher = less strict
     signature_size: int = 64
 
     # Cache settings
@@ -57,6 +59,8 @@ class AppConfig:
     progress_task_workspace_reset: str = "workspace-reset"
     progress_task_quality: str = "quality-scan"
     progress_task_patterns: str = "pattern-scan"
+    progress_task_label_detect: str = "label-detect"
+    progress_task_label_dataset: str = "label-dataset"
 
     # Cancel action labels
     @property
@@ -73,6 +77,8 @@ class AppConfig:
             self.progress_task_workspace_reset: "Cancelling workspace reset",
             self.progress_task_quality: "Cancelling quality sweep",
             self.progress_task_patterns: "Cancelling pattern sweep",
+            self.progress_task_label_detect: "Cancelling detection",
+            self.progress_task_label_dataset: "Cancelling dataset labelling",
         }
 
     # Calibration files
@@ -82,6 +88,7 @@ class AppConfig:
 
     # Cache files
     summary_cache_filename: str = ".summary_cache.yaml"
+    labels_summary_cache_filename: str = ".labels_summary_cache.yaml"
 
 
 # Global singleton instance

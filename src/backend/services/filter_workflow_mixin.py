@@ -97,7 +97,6 @@ class FilterWorkflowMixin:
         if persist:
             self._persist_preferences(
                 filter_mode=mode,
-                filter_calibration_only=(mode == FILTER_CAL_ANY),
             )
         self._update_filter_checks()
         if refresh and self.session.has_images():

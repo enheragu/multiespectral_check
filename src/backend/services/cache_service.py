@@ -99,23 +99,18 @@ def _distribute_collection_marks(dataset_path: Path, entry: DatasetCache) -> Non
             existing_marks.update(marks_to_add)
             child_entry["marks"] = existing_marks
 
-            # Remove legacy auto_marks field if present
-            if "auto_marks" in child_entry:
-                del child_entry["auto_marks"]
-
         # Only save and notify if there were actual changes
         if not has_changes:
             if debug:
                 log_debug(f"Child {child_name}: no new marks to distribute (already has them)", "CACHE")
             continue
 
-        # Update reason_counts (read from unified format)
+        # Update reason_counts
         reason_counts: Dict[str, int] = {}
         for base, mark_entry in existing_marks.items():
-            if isinstance(mark_entry, dict):
-                reason = mark_entry.get("reason", "")
-            else:
-                reason = mark_entry  # Legacy: just string
+            if not isinstance(mark_entry, dict):
+                continue
+            reason = mark_entry.get("reason", "")
             if reason:
                 reason_counts[reason] = reason_counts.get(reason, 0) + 1
 

@@ -49,6 +49,11 @@ class LabelEditDialog(QDialog):
     # Threshold for auto-detecting truncation at image edges
     EDGE_THRESHOLD = 0.02  # 2% of image dimension
 
+    # Placeholder text for enum combos when no value has been set.
+    # Annotations whose attribute is still at this value are considered
+    # "not reviewed" and the attribute is omitted from the saved dict.
+    _UNSET_PLACEHOLDER = "\u2014"  # em-dash  —
+
     # Signal emitted when bbox changes (for live preview)
     # Emits: (x1, y1, x2, y2) as normalized corner coordinates
     bboxChanged = pyqtSignal(float, float, float, float)
@@ -97,6 +102,7 @@ class LabelEditDialog(QDialog):
         self._p2_y_spin: Optional[QSpinBox] = None
 
         self._ok_button: Optional[QWidget] = None
+        self._delete_requested: bool = False
 
         # Block signals during setup
         self._setup_in_progress = True
@@ -320,6 +326,18 @@ class LabelEditDialog(QDialog):
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+
+        # Delete button (only when editing an existing annotation)
+        if not self.is_new:
+            from PyQt6.QtWidgets import QPushButton
+            delete_btn = QPushButton("Delete")
+            delete_btn.setStyleSheet(
+                "QPushButton { color: #cc3333; font-weight: bold; }"
+                "QPushButton:hover { background-color: #ffdddd; }"
+            )
+            buttons.addButton(delete_btn, QDialogButtonBox.ButtonRole.DestructiveRole)
+            delete_btn.clicked.connect(self._handle_delete)
+
         layout.addWidget(buttons)
 
         # Connect class change AFTER setup to avoid spurious updates
@@ -458,17 +476,21 @@ class LabelEditDialog(QDialog):
         """Populate class-specific attribute widgets."""
         for attr_name, widget in self._class_attr_widgets.items():
             value = attrs.get(attr_name)
-            if value is None:
-                continue
 
             if isinstance(widget, QComboBox):
+                if value is None:
+                    # Leave at placeholder (index 0 = "—")
+                    widget.setCurrentIndex(0)
+                    continue
                 idx = widget.findText(str(value))
                 if idx >= 0:
                     widget.setCurrentIndex(idx)
             elif isinstance(widget, QCheckBox):
-                widget.setChecked(bool(value))
+                if value is not None:
+                    widget.setChecked(bool(value))
             elif isinstance(widget, QDoubleSpinBox):
-                widget.setValue(float(value))
+                if value is not None:
+                    widget.setValue(float(value))
 
     def _populate_advanced_attrs(self, attrs: Dict[str, Any]) -> None:
         """Put non-standard attributes in advanced YAML section."""
@@ -575,7 +597,13 @@ class LabelEditDialog(QDialog):
 
         if attr_def.attr_type == AttributeType.ENUM and attr_def.options:
             combo = QComboBox()
+            # First item is a placeholder meaning "not reviewed yet".
+            # It will be skipped by get_attributes() when saving.
+            combo.addItem(self._UNSET_PLACEHOLDER)
             combo.addItems(attr_def.options)
+            combo.setCurrentIndex(0)  # Start at placeholder
+            # Grey-out the placeholder item so it looks distinct
+            combo.setItemData(0, combo.palette().placeholderText(), Qt.ItemDataRole.ForegroundRole)
             return combo
 
         elif attr_def.attr_type == AttributeType.BOOL:
@@ -649,6 +677,20 @@ class LabelEditDialog(QDialog):
             return
         super().accept()
 
+    def _handle_delete(self) -> None:
+        """Handle Delete button with confirmation."""
+        from PyQt6.QtWidgets import QMessageBox
+        reply = QMessageBox.question(
+            self,
+            "Delete annotation",
+            "Are you sure you want to delete this annotation?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._delete_requested = True
+            self.reject()  # Close dialog — caller checks _delete_requested
+
     def get_class_id(self) -> Optional[str]:
         """Get the selected class ID (validated against config)."""
         return self._resolve_class_id(self._class_combo.currentText())
@@ -676,10 +718,12 @@ class LabelEditDialog(QDialog):
         attrs["occlusion"] = self._occlusion_combo.currentText()
         attrs["truncation"] = self._truncation_check.isChecked()
 
-        # Class-specific attributes
+        # Class-specific attributes (skip unset placeholders)
         for attr_name, widget in self._class_attr_widgets.items():
             if isinstance(widget, QComboBox):
-                attrs[attr_name] = widget.currentText()
+                value = widget.currentText()
+                if value and value != self._UNSET_PLACEHOLDER:
+                    attrs[attr_name] = value
             elif isinstance(widget, QCheckBox):
                 attrs[attr_name] = widget.isChecked()
             elif isinstance(widget, QDoubleSpinBox):
@@ -711,7 +755,9 @@ class LabelEditDialog(QDialog):
         """Show dialog to edit an existing annotation.
 
         Returns:
-            Dict with 'class_id', 'bbox', and 'attributes' if accepted, None if cancelled
+            Dict with 'class_id', 'bbox', and 'attributes' if accepted,
+            Dict with 'deleted': True if user chose to delete,
+            None if cancelled.
         """
         dialog = cls(
             parent, config,
@@ -720,7 +766,10 @@ class LabelEditDialog(QDialog):
             image_size=image_size,
             on_bbox_changed=on_bbox_changed,
         )
-        if dialog.exec() == QDialog.DialogCode.Accepted:
+        result_code = dialog.exec()
+        if dialog._delete_requested:
+            return {"deleted": True}
+        if result_code == QDialog.DialogCode.Accepted:
             return {
                 "class_id": dialog.get_class_id(),
                 "bbox": dialog.get_bbox(),

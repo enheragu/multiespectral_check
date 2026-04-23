@@ -62,7 +62,10 @@ HELP_MENU_SECTIONS: Sequence[Tuple[str, Sequence[Tuple[str, str]]]] = [
             (
                 "Stereo Alignment",
                 "Control how stereo-rectified images are displayed: Disabled, Full View, "
-                "FOV Focus, or Max Overlap.",
+                "FOV Focus, or Max Overlap. Calibration-based reprojection remains active "
+                "as the base geometry. The optional parallax adjustment is an additive "
+                "manual offset (Apply Parallax Correction toggle); disable it to use pure "
+                "calibration reprojection. Reset Parallax clears only that additive offset.",
             ),
             (
                 "Corner Display",
@@ -98,7 +101,7 @@ HELP_MENU_SECTIONS: Sequence[Tuple[str, Sequence[Tuple[str, str]]]] = [
             ("Configure model…", "Select the YOLO model file to use for automatic labelling."),
             (
                 "Configure labels YAML…",
-                "Load a labels YAML (e.g., COCO); it is copied to labels/labels.yaml so the dataset remembers class ids/names.",
+                "Load a labels YAML (e.g., COCO); it is saved to the workspace root as labels_config.yaml.",
             ),
             ("Reload labels config from source", "Re-read the labels YAML configuration from disk."),
             ("Run labelling on current", "Run the model on the displayed pair for the active channel."),
@@ -108,6 +111,11 @@ HELP_MENU_SECTIONS: Sequence[Tuple[str, Sequence[Tuple[str, str]]]] = [
                 "Manual labelling mode",
                 "Click two corners (rubber band) to draw a box; pick a class via id:name autocomplete; "
                 "right-click a box to delete it; Esc cancels the selection (Ctrl+L).",
+            ),
+            (
+                "Label report…",
+                "Opens a dialog with label statistics: total annotations, images labeled, "
+                "per-channel / per-source breakdown, and per-class counts with attribute distributions.",
             ),
         ],
     ),
@@ -145,8 +153,14 @@ HELP_MENU_SECTIONS: Sequence[Tuple[str, Sequence[Tuple[str, str]]]] = [
                 "Manage workspace-wide default calibration: Set from current dataset, Clear default, "
                 "or Show calibration info.",
             ),
+            (
+                "Label report…",
+                "Aggregated label statistics across all workspace datasets — total annotations, "
+                "per-class counts, channel/source breakdown.",
+            ),
             ("Reset selected dataset…", "Reset the selected dataset state (dangerous)."),
             ("Reset workspace…", "Reset all datasets in the workspace (dangerous)."),
+
         ],
     ),
 ]
@@ -178,7 +192,7 @@ HELP_CONTEXT_MENUS: Sequence[Tuple[str, Sequence[Tuple[str, str]]]] = [
                 "Delete reason marks",
                 "Toggle delete marks: Manual (Del), Duplicate (Ctrl+Shift+D), "
                 "Blurry (Ctrl+Shift+B), Motion-blur (Ctrl+Shift+M), Sync-mismatch (Ctrl+Shift+S), "
-                "or Missing-pair. The current mark appears checked.",
+                "Pattern match (Ctrl+Shift+P), or Missing-pair. The current mark appears checked.",
             ),
             ("Mark as calibration candidate", "Toggle calibration candidate flag (Ctrl+Shift+C)."),
             (
@@ -187,29 +201,37 @@ HELP_CONTEXT_MENUS: Sequence[Tuple[str, Sequence[Tuple[str, str]]]] = [
                 "Only available for images already marked as calibration candidates.",
             ),
             ("Enter manual labelling mode", "Switch to manual label drawing mode (Ctrl+L)."),
+            ("Enter auto labelling mode", "Switch to automatic label detection mode (Ctrl+Shift+L)."),
             ("Copy image path", "Copy the LWIR or Visible image path to clipboard."),
         ],
     ),
     (
-        "Manual Labelling Mode (Right-click on label)",
+        "Labelling Mode (Right-click on label)",
         [
+            ("Accept label", "Accept an auto-detected label (changes from pending to reviewed). Editing also auto-accepts."),
+            ("Accept all labels", "Accept all pending auto-detected labels on the current image."),
             ("Edit label", "Change the class or bounding box of an existing label."),
             ("Delete label", "Remove the label under the cursor."),
-            ("Exit manual labelling mode", "Return to normal viewing mode (Ctrl+L)."),
+            ("Switch / Exit labelling mode", "Switch between manual and auto labelling, or return to normal view."),
         ],
     ),
 ]
 
 HELP_SHORTCUTS: Sequence[Tuple[str, str]] = [
     ("← / → / Space", "Browse the dataset"),
+    ("Shift+← / Shift+→", "Navigate ×5 images"),
+    ("Ctrl+G", "Jump to a specific image number"),
+    ("F11", "Toggle fullscreen"),
     ("Ctrl+S", "Save current dataset status"),
     ("Ctrl+Q", "Exit the application"),
     ("Ctrl+H", "Open the help dialog"),
     ("Ctrl+L", "Toggle manual labelling mode"),
-    ("Ctrl+Shift+C", "Toggle calibration candidate for the current pair"),
+    ("Ctrl+Shift+L", "Toggle auto labelling mode"),
+    ("C", "Toggle calibration candidate"),
+    ("Ctrl+Shift+C", "Toggle calibration candidate (alternative)"),
     ("Delete", "Toggle the manual delete mark"),
     ("Esc", "Cancel a manual label selection in progress"),
-    ("Ctrl+Shift+D / B / M / S", "Assign duplicate, blurry, motion, or sync reasons"),
+    ("Ctrl+Shift+D / B / M / S / P", "Assign duplicate, blurry, motion, sync, or pattern-match reasons"),
     ("Ctrl+Shift+R", "Re-run calibration detection for the current tagged pair"),
 ]
 

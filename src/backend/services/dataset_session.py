@@ -649,13 +649,12 @@ class DatasetSession:
         total = len(targets)
         calib = self.state.cache_data.setdefault("calibration", {})
         for idx, (base, mark_entry) in enumerate(targets, start=1):
-            # Check if this mark is auto (unified format)
+            # Extract reason and auto flag from unified dict format
             if isinstance(mark_entry, dict):
                 reason = mark_entry.get("reason", "")
                 is_auto = mark_entry.get("auto", False)
             else:
-                reason = mark_entry  # Legacy string format
-                is_auto = False
+                continue  # skip invalid entries
             if not self.loader.delete_entry(base, reason, auto=is_auto):
                 failed.append(base)
                 continue
@@ -741,6 +740,7 @@ class DatasetSession:
             config.calibration_intrinsic_filename,  # calibration_intrinsic.yaml
             config.calibration_extrinsic_filename,  # calibration_extrinsic.yaml
             config.summary_cache_filename,  # .summary_cache.yaml
+            config.labels_summary_cache_filename,  # .labels_summary_cache.yaml
         ]
 
         for filename in cache_files_to_remove:
@@ -877,9 +877,17 @@ class DatasetSession:
                 return None
 
             if not img_path or not img_path.exists():
+                log_warning(f"Missing {channel} image for base '{base}'", "SESSION")
                 return None
 
             pixmap: Optional[QPixmap] = QPixmap(str(img_path))
+            if pixmap is None or pixmap.isNull():
+                log_warning(
+                    f"Failed to decode {channel} image for base '{base}': {img_path}",
+                    "SESSION",
+                )
+                return None
+
             if view_rectified:
                 matrices = self.state.cache_data["_matrices"].get(channel)
                 if matrices:
@@ -1062,6 +1070,10 @@ class DatasetSession:
                         if isinstance(channel_data, dict):
                             self.state.cache_data["_matrices"][channel] = channel_data
                     log_info(f"Loaded intrinsic calibration from {intrinsic_path.name}: {list(channels.keys())}", "SESSION")
+                # Store square_size if present (for parallax auto-computation)
+                sq = data.get("square_size") or data.get("square_length")
+                if sq is not None:
+                    self.state.cache_data["_square_size_mm"] = float(sq)
             except (OSError, yaml.YAMLError) as e:
                 log_warning(f"Failed to load intrinsic calibration: {e}", "SESSION")
 

@@ -1,7 +1,7 @@
 """Statistics manager for dataset/collection stats.
 
 Centralizes all statistics tracking and formatting logic.
-Uses dict-based internal storage - NO properties, NO legacy formats.
+Uses dict-based internal storage.
 """
 
 from __future__ import annotations
@@ -110,7 +110,6 @@ class DatasetStats:
 
     # ============================================================================
     # GETTERS: Convenience accessors for common paths (read-only)
-    # These are NOT legacy - they access the new format directly
     # ============================================================================
 
     def get(self, path: str, default: Any = 0) -> Any:

@@ -81,25 +81,38 @@ class DatasetLoader:
     def get_image_path(self, base: str, type_dir: str) -> Optional[Path]:
         img_dir = self.lwir_dir if type_dir == "lwir" else self.vis_dir
         base_path = Path(base)
+
+        # Resolve by stem and accept extension case variants (.jpg/.JPG, etc.).
+        def _resolve_by_stem(stem_path: Path) -> Optional[Path]:
+            parent = stem_path.parent
+            if not parent.exists():
+                return None
+            pattern = f"{stem_path.name}.*"
+            for candidate in parent.glob(pattern):
+                if candidate.is_file() and candidate.suffix.lower() in IMAGE_EXTS:
+                    return candidate
+            return None
+
         # Try relative path first (supports nested dirs)
-        for ext in IMAGE_EXTS:
-            candidate = (img_dir / base_path).with_suffix(ext)
-            if candidate.exists():
-                return candidate
+        resolved = _resolve_by_stem(img_dir / base_path)
+        if resolved is not None:
+            return resolved
+
         # Try prefixed filename variants
         prefixed_name = f"{type_dir}_{base_path.name}"
-        for ext in IMAGE_EXTS:
-            candidate = (img_dir / base_path.parent / prefixed_name).with_suffix(ext)
-            if candidate.exists():
-                return candidate
+        resolved = _resolve_by_stem(img_dir / base_path.parent / prefixed_name)
+        if resolved is not None:
+            return resolved
+
         # Fallback to flat bare names at root
-        for ext in IMAGE_EXTS:
-            candidate = img_dir / f"{type_dir}_{base}{ext}"
-            if candidate.exists():
-                return candidate
-            candidate = img_dir / f"{base}{ext}"
-            if candidate.exists():
-                return candidate
+        resolved = _resolve_by_stem(img_dir / f"{type_dir}_{base}")
+        if resolved is not None:
+            return resolved
+
+        resolved = _resolve_by_stem(img_dir / base)
+        if resolved is not None:
+            return resolved
+
         return None
 
 

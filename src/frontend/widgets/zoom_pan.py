@@ -43,6 +43,7 @@ class ZoomPanView(QScrollArea):
         self._drag_origin: Optional[QPointF] = None
         self._suppress_emit = False
         self._labeling_mode = False
+        self._auto_label_mode = False   # right-click edit only (no rubber-band)
         self._label_start: Optional[QPointF] = None
         self._label_start_px: Optional[QPoint] = None
         self._label_current_px: Optional[QPoint] = None
@@ -52,14 +53,19 @@ class ZoomPanView(QScrollArea):
         # Edit highlight bbox (for live preview during editing)
         self._edit_highlight: Optional[tuple] = None  # (x1, y1, x2, y2) normalized
 
+        # Crosshair tracking (for labeling mode)
+        self._crosshair_pos: Optional[QPoint] = None  # pixel pos on label widget
+
     def eventFilter(self, obj, event: QEvent) -> bool:
-        """Paint highlight overlay after the label paints itself."""
+        """Paint highlight overlay and crosshair after the label paints itself."""
         if obj is self._label and event.type() == QEvent.Type.Paint:
             # Let the label paint itself first
             self._label.event(event)
             # Then paint our highlight overlay
             if self._edit_highlight:
                 self._paint_edit_highlight()
+            if self._labeling_mode and self._crosshair_pos is not None:
+                self._paint_crosshair()
             return True
         return super().eventFilter(obj, event)
 
@@ -143,7 +149,7 @@ class ZoomPanView(QScrollArea):
                 self._update_rubber_band()
             event.accept()
             return
-        if self._labeling_mode and event.button() == Qt.MouseButton.RightButton:
+        if (self._labeling_mode or self._auto_label_mode) and event.button() == Qt.MouseButton.RightButton:
             pos = self._image_pos(event)
             if pos:
                 self.labelDeleteRequested.emit(pos.x(), pos.y(), event.globalPosition().toPoint())
@@ -158,6 +164,11 @@ class ZoomPanView(QScrollArea):
 
     def mouseMoveEvent(self, event):  # noqa: N802
         if self._labeling_mode:
+            # Always update crosshair position
+            ch_pos = self._label_pos(event, clamp=True)
+            if ch_pos != self._crosshair_pos:
+                self._crosshair_pos = ch_pos
+                self._label.update()  # Trigger repaint for crosshair
             if self._label_start is not None:
                 # Use clamp=True to allow drawing boxes at image edges
                 pos_px = self._label_pos(event, clamp=True)
@@ -196,14 +207,18 @@ class ZoomPanView(QScrollArea):
         super().mouseReleaseEvent(event)
 
     def leaveEvent(self, event):  # noqa: N802
+        if self._labeling_mode and self._crosshair_pos is not None:
+            self._crosshair_pos = None
+            self._label.update()
         if self._drag_origin is not None:
             self._drag_origin = None
             self.unsetCursor()
         super().leaveEvent(event)
 
     def contextMenuEvent(self, event):  # noqa: N802
-        # In labeling mode, right-click is handled by mousePressEvent (labelDeleteRequested)
-        if self._labeling_mode:
+        # In labeling/auto-label mode, right-click is handled by
+        # mousePressEvent (labelDeleteRequested)
+        if self._labeling_mode or self._auto_label_mode:
             event.accept()
             return
         self.contextRequested.emit(event.globalPos())
@@ -222,8 +237,20 @@ class ZoomPanView(QScrollArea):
         self._label_start_px = None
         self._label_current_px = None
         self._rubber_band.hide()
-        if not enabled:
+        if enabled:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+            self.setMouseTracking(True)
+            self._label.setMouseTracking(True)
+        else:
+            self._crosshair_pos = None
+            self.setMouseTracking(False)
+            self._label.setMouseTracking(False)
             self.unsetCursor()
+            self._label.update()  # Clear crosshair
+
+    def set_auto_label_mode(self, enabled: bool) -> None:
+        """Enable right-click label editing without rubber-band drawing."""
+        self._auto_label_mode = enabled
 
     def set_edit_highlight(self, bbox: Optional[tuple]) -> None:
         """Set a bbox to highlight during editing (x1, y1, x2, y2 normalized).
@@ -423,6 +450,31 @@ class ZoomPanView(QScrollArea):
         # P2 label
         painter.setPen(QPen(Qt.GlobalColor.white))
         painter.drawText(px2 - 25, py2 - 10, "P2")
+
+        painter.end()
+
+    def _paint_crosshair(self) -> None:
+        """Paint crosshair lines at the current mouse position on the label widget."""
+        if self._crosshair_pos is None or not self._label.pixmap():
+            return
+        pix = self._label.pixmap()
+        if pix.isNull():
+            return
+        px, py = self._crosshair_pos.x(), self._crosshair_pos.y()
+        img_w, img_h = pix.width(), pix.height()
+
+        painter = QPainter(self._label)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+        pen = QPen(QColor(0, 255, 255, 160))  # Cyan, semi-transparent
+        pen.setWidth(1)
+        pen.setStyle(Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+
+        # Vertical line
+        painter.drawLine(px, 0, px, img_h)
+        # Horizontal line
+        painter.drawLine(0, py, img_w, py)
 
         painter.end()
 

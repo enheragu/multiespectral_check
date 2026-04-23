@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import List, Tuple
 
 @dataclass
 class YoloBox:
@@ -41,28 +41,12 @@ def write_yolo_file(path: Path, boxes: List[YoloBox]) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def class_color(cls_name: str) -> Tuple[int, int, int]:
-    seed = sum(ord(c) for c in cls_name) or 1
+def class_color(cls_name) -> Tuple[int, int, int]:
+    """Deterministic RGB colour from a class name (or anything stringable)."""
+    name = cls_name if isinstance(cls_name, str) else str(cls_name)
+    seed = sum(ord(c) for c in name) or 1
     r = (seed * 37) % 255
     g = (seed * 57) % 255
     b = (seed * 97) % 255
     return r, g, b
 
-
-def load_class_map(yaml_path: Optional[Path]) -> Dict[str, str]:
-    if not yaml_path or not yaml_path.exists():
-        return {}
-    try:
-        from common.yaml_utils import load_yaml, save_yaml  # type: ignore
-    except Exception:
-        return {}
-    try:
-        data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
-    except Exception:
-        return {}
-    names = data.get("names")
-    if isinstance(names, list):
-        return {str(i): name for i, name in enumerate(names)}
-    if isinstance(names, dict):
-        return {str(k): str(v) for k, v in names.items()}
-    return {}

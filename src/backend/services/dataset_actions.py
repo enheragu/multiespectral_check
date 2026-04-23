@@ -281,13 +281,8 @@ class DatasetActions:
         marks = state.cache_data["marks"]
         targets = []
         for base, entry in marks.items():
-            if isinstance(entry, dict):
-                if entry.get("reason") == reason:
-                    targets.append(base)
-            else:
-                # Legacy format
-                if entry == reason:
-                    targets.append(base)
+            if isinstance(entry, dict) and entry.get("reason") == reason:
+                targets.append(base)
         if not targets:
             QMessageBox.information(viewer, "Delete", "No images marked with that reason.")
             return

@@ -14,6 +14,9 @@ from typing import Any, Dict, Tuple, Union
 
 import yaml
 
+# Prefer the C-extension SafeLoader when available (much faster parsing).
+_SafeLoader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
 
 def get_timestamp_fields() -> Dict[str, Any]:
     """Generate last_updated timestamp fields for YAML persistence.
@@ -110,7 +113,7 @@ def load_yaml(file_path: Union[str, Path]) -> dict:
     """
     try:
         with open(file_path, "r", encoding="utf-8") as f:
-            result = yaml.safe_load(f)
+            result = yaml.load(f, Loader=_SafeLoader)
             return result if isinstance(result, dict) else {}
     except (OSError, yaml.YAMLError):
         return {}

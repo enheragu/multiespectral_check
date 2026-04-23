@@ -13,10 +13,10 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from PyQt6.QtCore import QEventLoop, QRunnable, Qt, QTimer
 from PyQt6.QtGui import (QAction, QActionGroup, QColor, QIcon, QKeySequence,
-                         QPixmap)
-from PyQt6.QtWidgets import (QComboBox, QCompleter, QDialog, QFileDialog,
-                             QInputDialog, QMainWindow, QMenu, QMessageBox,
-                             QStyle, QVBoxLayout)
+                         QPixmap, QShortcut)
+from PyQt6.QtWidgets import (QApplication, QComboBox, QCompleter, QDialog,
+                             QFileDialog, QInputDialog, QMainWindow, QMenu,
+                             QMessageBox, QStyle, QVBoxLayout)
 from tqdm import tqdm
 
 # Backend services (no Qt dependencies)
@@ -75,6 +75,7 @@ from frontend.widgets.calibration_check_dialog import CalibrationCheckDialog
 from frontend.widgets.calibration_outliers_dialog import \
     CalibrationOutliersDialog
 from frontend.widgets.help_dialog import HelpDialog
+from frontend.widgets.label_report_dialog import LabelReportDialog
 from frontend.widgets.progress_panel import ProgressPanel
 from frontend.widgets.stats_panel import StatsPanel
 from frontend.widgets.workspace_dialog import WorkspacePanel
@@ -219,30 +220,27 @@ class ImageViewer(QMainWindow):
         self.view_rectified = bool(preferences.get("view_rectified", False))
 
         pref_mode = preferences.get("filter_mode")
-        legacy_filter = preferences.get("filter_calibration_only", False)
         self._initial_filter_mode = FILTER_ALL
         if isinstance(pref_mode, str) and pref_mode in FILTER_ACTION_NAMES:
             self._initial_filter_mode = pref_mode
-        elif legacy_filter:
-            self._initial_filter_mode = FILTER_CAL_ANY
 
         self._view_prefs = {
-            "show_grid": bool(preferences.get("show_grid", True)),
             "show_labels": bool(preferences.get("show_labels", False)),
             "show_overlays": bool(preferences.get("show_overlays", True)),  # Default: show info overlays
             "grid_mode": preferences.get("grid_mode") or "thirds",  # Default to thirds
         }
 
         # Stereo alignment mode: "disabled", "full", "fov_focus", "max_overlap"
-        # Migrate from legacy view_aligned boolean if needed
-        legacy_view_aligned = preferences.get("view_aligned", False)
         saved_align_mode = preferences.get("align_mode", "")
         valid_align_modes = ("disabled", "full", "fov_focus", "max_overlap")
-        if saved_align_mode in valid_align_modes:
-            self._align_mode = saved_align_mode
-        else:
-            # Migrate from legacy or use default
-            self._align_mode = "full" if legacy_view_aligned else "disabled"
+        self._align_mode = saved_align_mode if saved_align_mode in valid_align_modes else "disabled"
+
+        # Parallax correction (horizontal / vertical pixels)
+        self._parallax_h: float = float(preferences.get("parallax_h", 0.0))
+        self._parallax_v: float = float(preferences.get("parallax_v", 0.0))
+        self._apply_parallax_correction: bool = bool(
+            preferences.get("apply_parallax_correction", True)
+        )
 
         # Corner display mode: "original", "subpixel", "both"
         saved_corner_mode = preferences.get("corner_display_mode", "")
@@ -281,7 +279,13 @@ class ImageViewer(QMainWindow):
             filter_accepts=lambda base: self.filter_controller.filter_accepts_base(base) if base else False,
             parent=self,
         )
-        self.navigation.indexChanged.connect(self.load_current)
+        # Debounced navigation: rapid key-repeat only updates the index;
+        # the expensive load_current runs once the user stops pressing.
+        self._nav_debounce_timer = QTimer(self)
+        self._nav_debounce_timer.setSingleShot(True)
+        self._nav_debounce_timer.setInterval(80)  # ms
+        self._nav_debounce_timer.timeout.connect(self.load_current)
+        self.navigation.indexChanged.connect(self._schedule_deferred_load)
         self.navigation.navigationBlocked.connect(lambda msg: self._safe_status_message(msg, 3000))
 
         self.event_handler = UIEventHandler(self)
@@ -394,12 +398,15 @@ class ImageViewer(QMainWindow):
             calibration_shortcut=config.calibration_toggle_shortcut,
             get_image_path=lambda base, channel: str(p) if (p := self.session.get_image_path(base, channel)) else None,
             enter_labelling_mode=lambda: self._toggle_manual_label_mode(True),
+            enter_auto_labelling_mode=lambda: self._toggle_auto_label_mode(True),
         )
 
         self._setup_calibration_outlier_action()
 
         self.label_service: Optional[LabelService] = None
         self._manual_label_mode = False
+        self._auto_label_active = False
+        self._auto_detected_bases: set[tuple[str, str]] = set()  # (base, channel) already processed
 
     def _init_calibration_pipeline(self) -> None:
         """Initialize calibration pipeline: debugger, controllers, solvers, and workflow."""
@@ -499,12 +506,14 @@ class ImageViewer(QMainWindow):
         self._syncing_actions = True
 
         try:
-            # Legacy toggles (backwards compatibility)
+            # Sync boolean toggle actions
             toggles = [
                 (getattr(self.ui, "action_toggle_rectified", None), self.view_rectified),
                 (getattr(self.ui, "action_show_labels", None), self.view_state.show_labels),
                 (getattr(self.ui, "action_show_overlays", None), self.view_state.show_overlays),
+                (getattr(self.ui, "action_apply_parallax", None), self._apply_parallax_correction),
                 (getattr(self.ui, "action_label_manual_mode", None), self._manual_label_mode),
+                (getattr(self.ui, "action_label_auto_mode", None), self._auto_label_active),
             ]
             for action, state in toggles:
                 if not action:
@@ -575,10 +584,25 @@ class ImageViewer(QMainWindow):
         )
 
     def connect_signals(self) -> None:
+        if hasattr(self.ui, "btn_prev_fast"):
+            self.ui.btn_prev_fast.clicked.connect(lambda: self.prev_image(step=5))
         if hasattr(self.ui, "btn_prev"):
             self.ui.btn_prev.clicked.connect(self.prev_image)
+        if hasattr(self.ui, "btn_goto"):
+            self.ui.btn_goto.clicked.connect(self._handle_goto_image)
         if hasattr(self.ui, "btn_next"):
             self.ui.btn_next.clicked.connect(self.next_image)
+        if hasattr(self.ui, "btn_next_fast"):
+            self.ui.btn_next_fast.clicked.connect(lambda: self.next_image(step=5))
+
+        # Window-level shortcuts (bypass QScrollArea key grab)
+        QShortcut(QKeySequence("Shift+Left"), self).activated.connect(
+            lambda: self.prev_image(step=5))
+        QShortcut(QKeySequence("Shift+Right"), self).activated.connect(
+            lambda: self.next_image(step=5))
+        QShortcut(QKeySequence("Ctrl+G"), self).activated.connect(
+            self._handle_goto_image)
+
         if hasattr(self.ui, "btn_delete_marked"):
             self.ui.btn_delete_marked.clicked.connect(self.delete_marked_images)
         if hasattr(self.ui, "action_load_dataset"):
@@ -664,6 +688,12 @@ class ImageViewer(QMainWindow):
             self.ui.action_align_fov_focus.triggered.connect(lambda: self._set_align_mode("fov_focus"))
         if hasattr(self.ui, "action_align_max_overlap"):
             self.ui.action_align_max_overlap.triggered.connect(lambda: self._set_align_mode("max_overlap"))
+        if hasattr(self.ui, "action_apply_parallax"):
+            self.ui.action_apply_parallax.toggled.connect(self._handle_apply_parallax_toggle)
+        if hasattr(self.ui, "action_reset_parallax"):
+            self.ui.action_reset_parallax.triggered.connect(self._reset_parallax)
+        if hasattr(self.ui, "action_open_workspace_config"):
+            self.ui.action_open_workspace_config.triggered.connect(self._open_workspace_config)
 
         # Corner display submenu actions - use triggered (QActionGroup handles exclusivity)
         if hasattr(self.ui, "action_corners_original"):
@@ -711,6 +741,13 @@ class ImageViewer(QMainWindow):
             self.ui.action_label_clear_current.triggered.connect(self._handle_clear_labels_current)
         if hasattr(self.ui, "action_label_manual_mode"):
             self.ui.action_label_manual_mode.toggled.connect(self._handle_manual_label_mode_toggle)
+        if hasattr(self.ui, "action_label_auto_mode"):
+            self.ui.action_label_auto_mode.toggled.connect(self._handle_auto_label_mode_toggle)
+        if hasattr(self.ui, "action_label_detection_channel"):
+            self.ui.action_label_detection_channel.triggered.connect(self._handle_toggle_detection_channel)
+            self._sync_detection_channel_action()
+        if hasattr(self.ui, "action_label_report"):
+            self.ui.action_label_report.triggered.connect(self._handle_label_report)
         if hasattr(self.ui, "action_show_help"):
             self.ui.action_show_help.triggered.connect(self.show_help_dialog)
         if hasattr(self.ui, "action_exit"):
@@ -807,17 +844,6 @@ class ImageViewer(QMainWindow):
             menu_bar = self.menuBar()
             if menu_bar is not None and action not in menu_bar.actions():
                 menu_bar.addAction(action)
-
-    # Dark mode toggle - not implemented yet
-    # def _setup_theme_toggle(self) -> None:
-    #     menu = getattr(self.ui, "menu_view", None)
-    #     action = QAction("Dark mode (Fusion palette)", self)
-    #     action.setCheckable(True)
-    #     action.toggled.connect(self._handle_toggle_dark_mode)
-    #     if isinstance(menu, QMenu):
-    #         menu.addSeparator()
-    #         menu.addAction(action)
-    #     self.action_dark_mode = action
 
     def _setup_fullscreen_toggle(self) -> None:
         view_menu = getattr(self.ui, "menu_view", None)
@@ -1018,6 +1044,9 @@ class ImageViewer(QMainWindow):
         add_action("Show calibration info…", QStyle.StandardPixmap.SP_FileDialogInfoView, self._handle_show_workspace_calibration_info, calib_menu)
 
         self.menu_workspace.addSeparator()
+        add_action("Label report…", QStyle.StandardPixmap.SP_FileDialogDetailedView, self._handle_workspace_label_report)
+
+        self.menu_workspace.addSeparator()
         add_action("Reset selected dataset (dangerous)…", QStyle.StandardPixmap.SP_MessageBoxWarning, self._handle_workspace_reset_selected)
         add_action("Reset workspace (dangerous)…", QStyle.StandardPixmap.SP_MessageBoxWarning, self._handle_workspace_reset_all)
 
@@ -1139,6 +1168,15 @@ class ImageViewer(QMainWindow):
     def _workspace_root(self) -> str:
         return str(self.workspace_dir) if self.workspace_dir else str(config.default_dataset_dir)
 
+    def _workspace_label_config_path(self) -> Optional[Path]:
+        """Return the workspace-level ``labels_config.yaml`` if it exists."""
+        if self.workspace_dir:
+            from backend.services.labels.label_storage import WORKSPACE_CONFIG_FILENAME
+            p = Path(self.workspace_dir) / WORKSPACE_CONFIG_FILENAME
+            if p.exists():
+                return p
+        return None
+
     def _update_workspace_label(self) -> None:
         panel = getattr(self, "workspace_panel", None)
         if panel:
@@ -1247,6 +1285,17 @@ class ImageViewer(QMainWindow):
             if not handled and self.isFullScreen():
                 self._toggle_fullscreen()
                 handled = True
+        elif event.key() in (
+            Qt.Key.Key_W, Qt.Key.Key_A, Qt.Key.Key_S, Qt.Key.Key_D,
+        ) and event.modifiers() == Qt.KeyboardModifier.ShiftModifier:
+            dh, dv = {
+                Qt.Key.Key_A: (-1.0,  0.0),
+                Qt.Key.Key_D: ( 1.0,  0.0),
+                Qt.Key.Key_W: ( 0.0, -1.0),
+                Qt.Key.Key_S: ( 0.0,  1.0),
+            }[event.key()]
+            self._adjust_parallax(dh, dv)
+            handled = True
 
         if handled:
             event.accept()
@@ -1952,15 +2001,16 @@ class ImageViewer(QMainWindow):
 
         # Initialize LabelService for this dataset
         self.label_service = LabelService(dataset_path=dir_path)
-        # Try to load config from: 1) dataset local, 2) user preference, 3) default
-        config_path = dir_path / "labels" / "labels.yaml"
-        if not config_path.exists() and self.label_yaml_path:
-            config_path = Path(self.label_yaml_path)
-        if not config_path.exists() and self._default_label_yaml_path.exists():
+        # Config resolution: 1) workspace level, 2) user preference, 3) repo default
+        config_path = self._workspace_label_config_path()
+        if not config_path and self.label_yaml_path:
+            candidate = Path(self.label_yaml_path)
+            if candidate.exists():
+                config_path = candidate
+        if not config_path and self._default_label_yaml_path.exists():
             config_path = self._default_label_yaml_path
-        if config_path.exists():
+        if config_path:
             self.label_service.load_config(config_path)
-            self.label_yaml_path = str(config_path)
             self._on_class_map_updated()
         else:
             self.label_yaml_path = None
@@ -1983,6 +2033,9 @@ class ImageViewer(QMainWindow):
         self.invalidate_overlay_cache()
         self.ui.btn_prev.setEnabled(True)
         self.ui.btn_next.setEnabled(True)
+        self.ui.btn_prev_fast.setEnabled(True)
+        self.ui.btn_next_fast.setEnabled(True)
+        self.ui.btn_goto.setEnabled(True)
         self._update_dataset_window_title(force=True)
         self._update_dataset_label()
         self._update_delete_button()
@@ -2041,16 +2094,21 @@ class ImageViewer(QMainWindow):
         self.filter_controller.reconcile_filter_state(show_warning=False)
 
         # Initialize LabelService for collection with default config
-        # Collections can have labels stored per-child-dataset, but we need a service
-        # to read/write them and to know the class definitions
+        # Collections store labels per-child-dataset; configure collection routing
         self.label_service = LabelService(dataset_path=dir_path)
-        # Try to load config from collection, then user preference, then default
-        config_path = dir_path / "labels" / "labels.yaml"
-        if not config_path.exists() and self.label_yaml_path:
-            config_path = Path(self.label_yaml_path)
-        if not config_path.exists() and self._default_label_yaml_path.exists():
+        if self.session.collection:
+            self.label_service.set_collection_children(
+                dict(self.session.collection._child_dirs)
+            )
+        # Config resolution: 1) workspace level, 2) user preference, 3) repo default
+        config_path = self._workspace_label_config_path()
+        if not config_path and self.label_yaml_path:
+            candidate = Path(self.label_yaml_path)
+            if candidate.exists():
+                config_path = candidate
+        if not config_path and self._default_label_yaml_path.exists():
             config_path = self._default_label_yaml_path
-        if config_path.exists():
+        if config_path:
             self.label_service.load_config(config_path)
             log_debug(f"Loaded label config for collection: {config_path}", "VIEWER")
             self._on_class_map_updated()
@@ -2068,6 +2126,9 @@ class ImageViewer(QMainWindow):
         self.load_current()
         self.ui.btn_prev.setEnabled(True)
         self.ui.btn_next.setEnabled(True)
+        self.ui.btn_prev_fast.setEnabled(True)
+        self.ui.btn_next_fast.setEnabled(True)
+        self.ui.btn_goto.setEnabled(True)
         self._update_dataset_window_title(force=True)
         self._update_dataset_label()
         self._update_delete_button()
@@ -2088,6 +2149,17 @@ class ImageViewer(QMainWindow):
         """Called when filter mode changes. Persists preferences."""
         self.session.cache_service.set_preference("filter_mode", self.filter_controller.filter_mode)
 
+    def _schedule_deferred_load(self, _index: int = 0) -> None:
+        """Restart the navigation debounce timer.
+
+        Called on every ``indexChanged`` signal.  Instead of loading the
+        image immediately (which includes expensive alignment/overlay
+        rendering), we (re)start a short timer.  When the user stops
+        pressing arrow keys the timer fires and ``load_current`` runs
+        exactly once for the final index.
+        """
+        self._nav_debounce_timer.start()  # restart if already running
+
     def load_current(self):
         base = self._current_base()
         if not base:
@@ -2097,6 +2169,8 @@ class ImageViewer(QMainWindow):
         self.load_image_pair(base)
         self._update_stats_panel()
         self.signature_manager.schedule_index(self.current_index)
+        if self._auto_label_active:
+            self._run_auto_label_on_current()
 
     # ============================================================================
     # IMAGE DISPLAY & OVERLAYS
@@ -2144,6 +2218,8 @@ class ImageViewer(QMainWindow):
         # Sync view settings via setters (they handle cache invalidation if changed)
         self.overlay_orchestrator.set_view_rectified(self.view_rectified)
         self.overlay_orchestrator.set_align_mode(self._align_mode)
+        self.overlay_orchestrator.set_apply_parallax_correction(self._apply_parallax_correction)
+        self.overlay_orchestrator.set_parallax_correction(self._parallax_h, self._parallax_v)
         self.overlay_orchestrator.set_grid_mode(self.view_state.grid_mode)
         self.overlay_orchestrator.set_show_labels(self.view_state.show_labels)
         self.overlay_orchestrator.set_show_overlays(self.view_state.show_overlays)
@@ -2151,17 +2227,31 @@ class ImageViewer(QMainWindow):
 
         return self.overlay_orchestrator.render_pair(base)
 
-    def prev_image(self):
-        log_debug(f"prev_image called. has_images={self.session.has_images()}, current_index={self.navigation.current_index}", "NAV")
+    def prev_image(self, step: int = 1):
+        log_debug(f"prev_image called (step={step}). has_images={self.session.has_images()}, current_index={self.navigation.current_index}", "NAV")
         message_label = FILTER_MESSAGE_LABELS.get(self.filter_controller.filter_mode, "filtered images")
-        result = self.navigation.prev(message_label)
+        result = self.navigation.prev(message_label, step=step)
         log_debug(f"prev_image result={result}, new_index={self.navigation.current_index}", "NAV")
 
-    def next_image(self):
-        log_debug(f"next_image called. has_images={self.session.has_images()}, current_index={self.navigation.current_index}", "NAV")
+    def next_image(self, step: int = 1):
+        log_debug(f"next_image called (step={step}). has_images={self.session.has_images()}, current_index={self.navigation.current_index}", "NAV")
         message_label = FILTER_MESSAGE_LABELS.get(self.filter_controller.filter_mode, "filtered images")
-        result = self.navigation.next(message_label)
+        result = self.navigation.next(message_label, step=step)
         log_debug(f"next_image result={result}, new_index={self.navigation.current_index}", "NAV")
+
+    def _handle_goto_image(self):
+        """Open a dialog to jump to a specific image number."""
+        total = self.session.total_pairs()
+        if total <= 0:
+            return
+        from PyQt6.QtWidgets import QInputDialog
+        current_1based = self.navigation.current_index + 1
+        number, ok = QInputDialog.getInt(
+            self, "Go to image", f"Image number (1 – {total}):",
+            value=current_1based, min=1, max=total, step=1,
+        )
+        if ok:
+            self.navigation.jump_to(number - 1)
 
     def _ensure_overlay_cached(self, base: str) -> None:
         # Silent check - don't show popup, just return if no images
@@ -2236,20 +2326,70 @@ class ImageViewer(QMainWindow):
             self.progress_tracker.finish(config.progress_task_save)
 
     def _handle_configure_label_model(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Select YOLO model", self._workspace_root(), "Model (*.pt *.pth)")
-        if not path:
+        """Let the user pick a detection model from the factory registry."""
+        from backend.services.labels.detection.detector_factory import (
+            list_available_models,
+        )
+
+        specs = list_available_models()
+        display_names = [s.display_name for s in specs]
+
+        choice, ok = QInputDialog.getItem(
+            self, "Select Detection Model", "Model:", display_names, 0, False,
+        )
+        if not ok:
             return
-        self.label_model_path = path
-        self._persist_preferences(label_model=path)
-        if self.label_service:
-            # Configure YOLOv8 detector with the selected model
-            try:
-                self.label_service.load_yolov8_detector(model_path=path)
-                self._safe_status_message("Label model configured.", 3000)
-            except Exception as e:
-                QMessageBox.warning(self, "Model Error", f"Failed to load model: {e}")
-        else:
-            self._safe_status_message("Label model path saved.", 3000)
+
+        spec = specs[display_names.index(choice)]
+
+        # If the model needs a weights file, ask for it
+        file_path: str | None = None
+        if spec.needs_file:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Select model weights", self._workspace_root(),
+                "Model (*.pt *.pth)",
+            )
+            if not path:
+                return
+            file_path = path
+
+        # Must have label_service ready (and config for models that need it)
+        if not self.label_service:
+            QMessageBox.information(
+                self, "Detection Model",
+                "Load a dataset and configure a labels YAML first.",
+            )
+            return
+        if spec.needs_config and not self.label_service.config:
+            QMessageBox.information(
+                self, "Detection Model",
+                "This model requires a label schema.\n\n"
+                "Configure a labels YAML first.",
+            )
+            return
+
+        # Get image dimensions from the currently loaded dataset so the
+        # detector can process at full resolution instead of downscaling.
+        image_size: tuple[int, int] | None = None
+        base = self._current_base()
+        if base:
+            ch = self._label_channel()
+            image_size = self.session.get_original_image_size(base, ch)
+
+        try:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            self.label_service.load_detector(
+                spec.key, file_path=file_path, image_size=image_size,
+            )
+            self.label_model_path = file_path or spec.key
+            self._persist_preferences(label_model=self.label_model_path)
+            self._safe_status_message(f"Model loaded: {spec.display_name}", 3000)
+        except Exception as e:
+            QMessageBox.warning(
+                self, "Model Error", f"Failed to load model:\n{e}",
+            )
+        finally:
+            QApplication.restoreOverrideCursor()
 
     def _handle_configure_label_yaml(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Select labels YAML", self._workspace_root(), "YAML (*.yaml *.yml)")
@@ -2257,16 +2397,21 @@ class ImageViewer(QMainWindow):
             return
         self.label_yaml_path = path
         self._persist_preferences(label_yaml=path)
+        # Copy config to workspace level (single authoritative location)
+        if self.workspace_dir:
+            import shutil
+            from backend.services.labels.label_storage import WORKSPACE_CONFIG_FILENAME
+            ws_config = Path(self.workspace_dir) / WORKSPACE_CONFIG_FILENAME
+            shutil.copy2(path, str(ws_config))
         if not self.label_service and self.session.dataset_path:
             self.label_service = LabelService(dataset_path=Path(self.session.dataset_path))
         if self.label_service:
             self.label_service.load_config(Path(path))
-            self.label_service.copy_config_to_dataset(Path(path))
             self._on_class_map_updated()
-        self._safe_status_message("Label classes loaded and copied to dataset.", 3000)
+        self._safe_status_message("Label classes loaded and saved to workspace.", 3000)
 
     def _handle_reload_label_config(self) -> None:
-        """Reload label config from source, overwriting dataset's local copy."""
+        """Reload label config from source, updating workspace copy."""
         if not self.label_yaml_path:
             QMessageBox.information(
                 self, "Reload Config",
@@ -2288,13 +2433,12 @@ class ImageViewer(QMainWindow):
             QMessageBox.information(self, "Reload Config", "No dataset loaded.")
             return
 
-        # Confirm overwrite
-        dataset_config = self.label_service._dataset_path / "labels" / "labels.yaml" if self.label_service._dataset_path else None
-        if dataset_config and dataset_config.exists():
+        # Confirm overwrite of workspace config
+        ws_config = self._workspace_label_config_path()
+        if ws_config:
             reply = QMessageBox.question(
                 self, "Reload Config",
-                f"This will overwrite the dataset's label config with:\n{source_path}\n\n"
-                "Any local changes to the dataset's config will be lost.\n\n"
+                f"This will reload the workspace label config from:\n{source_path}\n\n"
                 "Continue?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No
@@ -2302,9 +2446,13 @@ class ImageViewer(QMainWindow):
             if reply != QMessageBox.StandardButton.Yes:
                 return
 
-        # Force reload and copy
+        # Force reload and copy to workspace
         self.label_service.load_config(source_path)
-        self.label_service.copy_config_to_dataset(source_path)
+        if self.workspace_dir:
+            import shutil
+            from backend.services.labels.label_storage import WORKSPACE_CONFIG_FILENAME
+            ws_dst = Path(self.workspace_dir) / WORKSPACE_CONFIG_FILENAME
+            shutil.copy2(str(source_path), str(ws_dst))
         self._on_class_map_updated()
         self._safe_status_message("Label config reloaded from source.", 3000)
 
@@ -2320,13 +2468,33 @@ class ImageViewer(QMainWindow):
         return "lwir" if self.label_input_mode == "lwir" else "visible"
 
     def _label_image_path(self, base: str) -> Optional[Path]:
-        if not self.session.loader:  # Keep original - returns value, not bool
-            return None
-        return self.session.loader.get_image_path(base, self._label_channel())
+        return self.session.get_image_path(base, self._label_channel())
+
+    def _handle_toggle_detection_channel(self) -> None:
+        """Toggle detection input between visible and lwir."""
+        if self.label_input_mode == "lwir":
+            self.label_input_mode = "visible"
+        else:
+            self.label_input_mode = "lwir"
+        self._persist_preferences(label_input_mode=self.label_input_mode)
+        self._sync_detection_channel_action()
+        self._safe_status_message(
+            f"Detection channel set to: {self.label_input_mode}", 3000,
+        )
+
+    def _sync_detection_channel_action(self) -> None:
+        """Update menu action text to reflect current channel."""
+        if hasattr(self.ui, "action_label_detection_channel"):
+            ch = self.label_input_mode.upper()
+            self.ui.action_label_detection_channel.setText(
+                f"Detection channel: {ch}"
+            )
 
     def _update_labeling_views(self) -> None:
         self.vis_view.set_labeling_mode(self._manual_label_mode)
         self.lwir_view.set_labeling_mode(self._manual_label_mode)
+        self.vis_view.set_auto_label_mode(self._auto_label_active)
+        self.lwir_view.set_auto_label_mode(self._auto_label_active)
 
     def _handle_manual_label_mode_toggle(self, enabled: bool) -> None:
         if enabled and not require_images(self, "Manual labels"):
@@ -2334,6 +2502,8 @@ class ImageViewer(QMainWindow):
             self._update_labeling_views()
             self._sync_action_states()
             return
+        if enabled and self._auto_label_active:
+            self._toggle_auto_label_mode(False)
         self._manual_label_mode = enabled
         self._update_labeling_views()
         self._sync_action_states()
@@ -2347,6 +2517,99 @@ class ImageViewer(QMainWindow):
             )
         else:
             self._safe_status_message("Manual label mode off.", 2000)
+
+    def _handle_auto_label_mode_toggle(self, enabled: bool) -> None:
+        """Handle auto-labelling mode toggle from menu / context menu."""
+        if enabled and not require_images(self, "Auto labelling"):
+            self._auto_label_active = False
+            self._sync_action_states()
+            return
+        if enabled:
+            # Ensure detector is configured; if not, open model picker directly
+            if not self._ensure_label_service() or not self.label_service:
+                QMessageBox.information(
+                    self, "Auto Labelling",
+                    "Configure a labels YAML first.",
+                )
+                self._auto_label_active = False
+                self._sync_action_states()
+                return
+            if not self.label_service.has_detector:
+                self._auto_label_active = False
+                self._sync_action_states()
+                self._handle_configure_label_model()
+                # Re-check after model selection
+                if not self.label_service or not self.label_service.has_detector:
+                    return
+                self._auto_label_active = True
+                self._sync_action_states()
+            # Deactivate manual mode if it was active (mutual exclusion)
+            if self._manual_label_mode:
+                self._toggle_manual_label_mode(False)
+        self._auto_label_active = enabled
+        self._update_labeling_views()
+        self._sync_action_states()
+        if enabled:
+            self._auto_detected_bases.clear()
+            if not self.view_state.show_labels:
+                self.view_state.show_labels = True
+                self._persist_preferences(show_labels=True)
+            self._safe_status_message(
+                "Auto label mode: detection runs on every navigation. Right-click labels to edit/delete.",
+                5000,
+            )
+            # Run detection on the current image immediately
+            self._run_auto_label_on_current()
+        else:
+            self._safe_status_message("Auto label mode off.", 2000)
+
+    def _toggle_auto_label_mode(self, enabled: bool) -> None:
+        """Toggle auto-labelling mode programmatically."""
+        if hasattr(self.ui, "action_label_auto_mode"):
+            self.ui.action_label_auto_mode.setChecked(enabled)
+
+    def _run_auto_label_on_current(self) -> None:
+        """Run detection on the current image (silent, no popups).
+
+        Called automatically in auto-label mode after every navigation.
+        Each (base, channel) is processed at most once per auto-label
+        session so that user deletions are not overwritten on re-visit.
+        """
+        if not self._auto_label_active:
+            return
+        if not self._ensure_label_service() or not self.label_service:
+            return
+        if not self.label_service.has_detector:
+            return
+        base = self._current_base()
+        if not base:
+            return
+        channel = self._label_channel()
+        # Skip images already processed in this auto-label session
+        key = (base, channel)
+        if key in self._auto_detected_bases:
+            return
+        img_path = self._label_image_path(base)
+        if not img_path or not img_path.exists():
+            return
+        import cv2
+        image = cv2.imread(str(img_path))
+        if image is None:
+            return
+        task_id = config.progress_task_label_detect
+        self.progress_tracker.set_busy(task_id, "Auto-detecting\u2026")
+        QApplication.processEvents()
+        try:
+            annotations = self.label_service.auto_detect(base, channel, image)
+        finally:
+            self.progress_tracker.finish(task_id)
+        self._auto_detected_bases.add(key)
+        if annotations:
+            self._safe_status_message(
+                f"Auto-detected {len(annotations)} objects.", 2000,
+            )
+            self.invalidate_overlay_cache(base)
+            self.load_image_pair(base)
 
     def _handle_manual_selection_canceled(self, channel: str) -> None:  # noqa: ARG002
         if self._manual_label_mode:
@@ -2778,7 +3041,7 @@ class ImageViewer(QMainWindow):
         self._safe_status_message(f"Added label to {channel}:{base}.", 3000)
 
     def _handle_manual_delete_request(self, channel: str, x_norm: float, y_norm: float, global_pos) -> None:
-        if not self._manual_label_mode:
+        if not self._manual_label_mode and not self._auto_label_active:
             return
         base = self._current_base()
         if not base or not self.session.dataset_path:
@@ -2787,49 +3050,169 @@ class ImageViewer(QMainWindow):
         # Build context menu
         menu = QMenu(self)
 
-        # Check if there's an annotation near click
-        annotation = None
+        # Collect ALL overlapping annotations at click point
+        overlapping: list = []
         if self.label_service:
-            result = self.label_service.find_annotation_at(base, channel, x_norm, y_norm)
-            if result:
-                _, annotation = result
+            overlapping = self.label_service.find_all_annotations_at(
+                base, channel, x_norm, y_norm
+            )
 
-        if annotation:
-            # Format display name
-            cls_name = annotation.class_id
+        # --- Helper to format display name ---
+        _HIDDEN = {"model", "model_version", "raw_label", "confidence", "source",
+                    "occlusion", "truncation"}
+
+        def _display_name(ann, short: bool = False) -> str:
+            cls_name = ann.class_id
             if self.label_service and self.label_service.config:
-                cls_def = self.label_service.config.classes.get(annotation.class_id)
+                cls_def = self.label_service.config.classes.get(ann.class_id)
                 if cls_def:
                     cls_name = cls_def.name
-            cls_display = f"{annotation.class_id}: {cls_name}" if annotation.class_id != cls_name else cls_name
+            label = f"{ann.class_id}: {cls_name}" if ann.class_id != cls_name else cls_name
+            if not short:
+                # Append class-specific attributes for disambiguation
+                visible_attrs = [
+                    str(v) for k, v in ann.attributes.items()
+                    if k not in _HIDDEN and v not in (None, "", "unknown")
+                ]
+                if visible_attrs:
+                    label += f"  ({', '.join(visible_attrs)})"
+                # Confidence for auto detections
+                if ann.source.value == "auto" and ann.confidence < 1.0:
+                    label += f"  {ann.confidence:.0%}"
+            return label
 
-            edit_action = menu.addAction(f"Edit label {cls_display}")
-            delete_action = menu.addAction(f"Delete label {cls_display}")
+        # Build edit / delete / accept actions for each overlapping annotation
+        edit_actions: list = []    # (QAction, idx, annotation)
+        delete_actions: list = []  # (QAction, idx, annotation)
+        accept_actions: list = []  # (QAction, idx, annotation)
+
+        # Determine which annotations are unreviewed (source=AUTO)
+        auto_anns = [ann for _, ann in overlapping if ann.source.value == "auto"]
+
+        if len(overlapping) == 1:
+            # Single annotation — flat menu (same UX as before)
+            idx, ann = overlapping[0]
+            cls_display = _display_name(ann)
+            if ann.source.value == "auto":
+                aa = menu.addAction(f"✓ Accept label  {cls_display}")
+                accept_actions.append((aa, idx, ann))
+            ea = menu.addAction(f"Edit label  {cls_display}")
+            da = menu.addAction(f"Delete label  {cls_display}")
+            edit_actions.append((ea, idx, ann))
+            delete_actions.append((da, idx, ann))
+            # Accept-all shortcut when there are auto annotations
+            if auto_anns:
+                menu.addSeparator()
+                accept_all_action = menu.addAction(f"✓ Accept all labels on this image")
+            else:
+                accept_all_action = None
+            menu.addSeparator()
+        elif len(overlapping) > 1:
+            # Multiple overlapping annotations — sub-menus
+            # Accept sub-menu (only shown if there are auto annotations)
+            if auto_anns:
+                accept_menu = menu.addMenu(f"✓ Accept label  ({len(auto_anns)} pending)")
+                for idx, ann in overlapping:
+                    if ann.source.value == "auto":
+                        cls_display = _display_name(ann)
+                        aa = accept_menu.addAction(cls_display)
+                        accept_actions.append((aa, idx, ann))
+            edit_menu = menu.addMenu(f"Edit label  ({len(overlapping)} overlapping)")
+            delete_menu = menu.addMenu(f"Delete label  ({len(overlapping)} overlapping)")
+            for idx, ann in overlapping:
+                cls_display = _display_name(ann)
+                ea = edit_menu.addAction(cls_display)
+                da = delete_menu.addAction(cls_display)
+                edit_actions.append((ea, idx, ann))
+                delete_actions.append((da, idx, ann))
+            if auto_anns:
+                menu.addSeparator()
+                accept_all_action = menu.addAction(f"✓ Accept all labels on this image")
+            else:
+                accept_all_action = None
             menu.addSeparator()
         else:
-            edit_action = None
-            delete_action = None
+            accept_all_action = None
 
-        exit_mode_action = menu.addAction("Exit manual labelling mode")
-        if exit_mode_action:
+        # Always show "Accept all" when there are unreviewed AUTO labels
+        # on this image, even if no annotation was under the cursor
+        if accept_all_action is None and self.label_service and self.label_service.has_unreviewed(base, channel):
+            accept_all_action = menu.addAction("✓ Accept all labels on this image")
+            menu.addSeparator()
+
+        # Mode switching and exit actions
+        switch_action = None
+        if self._manual_label_mode:
+            switch_action = menu.addAction("Switch to auto labelling mode")
+            if switch_action is not None:
+                switch_action.setShortcut("Ctrl+Shift+L")
+                switch_action.setShortcutVisibleInContextMenu(True)
+            exit_mode_action = menu.addAction("Exit manual labelling mode")
             exit_mode_action.setShortcut("Ctrl+L")
             exit_mode_action.setShortcutVisibleInContextMenu(True)
+        elif self._auto_label_active:
+            switch_action = menu.addAction("Switch to manual labelling mode")
+            if switch_action is not None:
+                switch_action.setShortcut("Ctrl+L")
+                switch_action.setShortcutVisibleInContextMenu(True)
+            exit_mode_action = menu.addAction("Exit auto labelling mode")
+            exit_mode_action.setShortcut("Ctrl+Shift+L")
+            exit_mode_action.setShortcutVisibleInContextMenu(True)
+        else:
+            exit_mode_action = None
         menu.addSeparator()
         menu.addAction("Cancel")
 
         chosen = menu.exec(global_pos)
 
-        if chosen is edit_action and annotation:
-            self._edit_annotation(base, channel, annotation)
-        elif chosen is delete_action and annotation and self.label_service:
-            removed = self.label_service.delete_annotation_at(base, channel, x_norm, y_norm)
-            if removed:
+        # --- Dispatch accept actions (individual) ---
+        for aa, idx, ann in accept_actions:
+            if chosen is aa and self.label_service:
+                count = self.label_service.mark_reviewed(base, channel, indices=[idx])
+                if count:
+                    self.invalidate_overlay_cache(base)
+                    self.load_current()
+                    self._safe_status_message(f"Accepted label {_display_name(ann)}.", 2000)
+                return
+
+        # --- Dispatch accept-all ---
+        if accept_all_action is not None and chosen is accept_all_action and self.label_service:
+            count = self.label_service.mark_all_reviewed(base, channel)
+            if count:
                 self.invalidate_overlay_cache(base)
                 self.load_current()
-                cls_display = f"{annotation.class_id}"
-                self._safe_status_message(f"Deleted label {cls_display}.", 2000)
+                self._safe_status_message(f"Accepted {count} label(s).", 2000)
+            return
+
+        # --- Dispatch edit actions ---
+        for ea, idx, ann in edit_actions:
+            if chosen is ea:
+                self._edit_annotation(base, channel, ann)
+                return
+
+        # --- Dispatch delete actions ---
+        for da, idx, ann in delete_actions:
+            if chosen is da and self.label_service:
+                removed = self.label_service.remove_annotation(base, channel, idx)
+                if removed:
+                    self.invalidate_overlay_cache(base)
+                    self.load_current()
+                    self._safe_status_message(f"Deleted label {_display_name(ann)}.", 2000)
+                return
+
+        # --- Mode switching ---
+        if chosen is switch_action:
+            if self._manual_label_mode:
+                self._toggle_manual_label_mode(False)
+                self._toggle_auto_label_mode(True)
+            elif self._auto_label_active:
+                self._toggle_auto_label_mode(False)
+                self._toggle_manual_label_mode(True)
         elif chosen is exit_mode_action:
-            self._toggle_manual_label_mode(False)
+            if self._manual_label_mode:
+                self._toggle_manual_label_mode(False)
+            elif self._auto_label_active:
+                self._toggle_auto_label_mode(False)
 
     def _edit_annotation(self, base: str, channel: str, annotation) -> None:
         """Open dialog to edit an existing annotation.
@@ -2892,6 +3275,26 @@ class ImageViewer(QMainWindow):
             view.clear_edit_highlight()
 
         if result:
+            # Handle delete request from the edit dialog
+            if result.get("deleted"):
+                if self.label_service:
+                    # Find list index for this annotation_id
+                    anns = self.label_service.get_annotations(base, channel)
+                    idx = next(
+                        (i for i, a in enumerate(anns)
+                         if a.annotation_id == annotation.annotation_id),
+                        None,
+                    )
+                    if idx is not None:
+                        removed = self.label_service.remove_annotation(
+                            base, channel, idx,
+                        )
+                        if removed:
+                            self.invalidate_overlay_cache(base)
+                            self.load_current()
+                            self._safe_status_message("Deleted annotation.", 2000)
+                return
+
             cls_value = result.get("class_id")
             new_display_bbox = result.get("bbox")  # In DISPLAY coordinates
             new_attrs = result.get("attributes", {})
@@ -2927,6 +3330,11 @@ class ImageViewer(QMainWindow):
             if self.label_service.update_annotation(
                 base, channel, annotation.annotation_id, new_class_id, new_attrs, new_bbox
             ):
+                # Auto-accept: editing an AUTO annotation implies review
+                if annotation.source.value == "auto":
+                    self.label_service.accept_annotation(
+                        base, channel, annotation.annotation_id,
+                    )
                 self.invalidate_overlay_cache(base)
                 self.load_current()
                 self._safe_status_message(f"Updated label to class {new_class_id}.", 2000)
@@ -2946,8 +3354,9 @@ class ImageViewer(QMainWindow):
             QMessageBox.information(self, "Labelling", "Configure a model and labels YAML first.")
             return
         if not self.label_service.has_detector:
-            QMessageBox.information(self, "Labelling", "Configure a detection model first.")
-            return
+            self._handle_configure_label_model()
+            if not self.label_service or not self.label_service.has_detector:
+                return
         img_path = self._label_image_path(base)
         if not img_path or not img_path.exists():
             QMessageBox.information(self, "Labelling", "No image available for the selected channel.")
@@ -2958,7 +3367,15 @@ class ImageViewer(QMainWindow):
         if image is None:
             QMessageBox.warning(self, "Labelling", "Failed to load image.")
             return
-        annotations = self.label_service.auto_detect(base, channel, image)
+        # Show progress while detection runs (blocks the UI thread but
+        # the progress bar gives visual feedback before the heavy work).
+        task_id = config.progress_task_label_detect
+        self.progress_tracker.set_busy(task_id, "Running detection model\u2026")
+        QApplication.processEvents()  # flush so the bar appears
+        try:
+            annotations = self.label_service.auto_detect(base, channel, image)
+        finally:
+            self.progress_tracker.finish(task_id)
         self._safe_status_message(f"Detected {len(annotations)} objects for {channel}:{base}.", 3000)
         self.invalidate_overlay_cache(base)
         self.load_current()
@@ -2970,26 +3387,39 @@ class ImageViewer(QMainWindow):
             QMessageBox.information(self, "Labelling", "Configure a model and labels YAML first.")
             return
         if not self.label_service.has_detector:
-            QMessageBox.information(self, "Labelling", "Configure a detection model first.")
-            return
+            self._handle_configure_label_model()
+            if not self.label_service or not self.label_service.has_detector:
+                return
         loader = self.session.loader
         if loader is None:
             return
         channel = self._label_channel()
-        total = self.session.total_pairs()
-        done = 0
+        bases = list(loader.image_bases)
+        total = len(bases)
+        task_id = self.config.progress_task_label_dataset
+        self.progress_tracker.start(task_id, "Labelling dataset…", total)
+        QApplication.processEvents()
+
         import cv2
-        for base in list(loader.image_bases):
-            img_path = loader.get_image_path(base, channel)
+
+        def _load_image(base: str, ch: str):
+            img_path = loader.get_image_path(base, ch)
             if not img_path or not img_path.exists():
-                continue
-            image = cv2.imread(str(img_path))
-            if image is None:
-                continue
-            self.label_service.auto_detect(base, channel, image)
-            done += 1
-            if done % 10 == 0:
-                self._safe_status_message(f"Labelled {done}/{total} images…", 2000)
+                return None
+            return cv2.imread(str(img_path))
+
+        def _on_progress(current: int, total_count: int, _base: str) -> None:
+            self.progress_tracker.update(task_id, current)
+            if current % 5 == 0:
+                QApplication.processEvents()
+
+        try:
+            results = self.label_service.auto_detect_batch(
+                bases, channel, _load_image, progress_callback=_on_progress,
+            )
+        finally:
+            self.progress_tracker.finish(task_id)
+        done = sum(1 for v in results.values() if v > 0)
         self.label_service.save_all()
         self._safe_status_message(f"Labelling finished for channel {channel} ({done}/{total}).", 4000)
         self.invalidate_overlay_cache()
@@ -3080,23 +3510,24 @@ class ImageViewer(QMainWindow):
     def invalidate_overlay_cache(self, base: Optional[str] = None) -> None:
         self.overlay_workflow.invalidate(base)
 
-    def _read_label_boxes(self, base: str, channel: str) -> List[Tuple[str, float, float, float, float, QColor]]:
+    def _read_label_boxes(self, base: str, channel: str) -> List[Tuple[str, float, float, float, float, QColor, bool]]:
         """Get direct labels for a channel (not projected).
 
-        Note: Returns 6-tuple without is_projected flag.
-        The OverlayOrchestrator adds the flag and handles projection.
+        Note: Returns 7-tuple: (display, x, y, w, h, color, is_auto).
+        The OverlayOrchestrator adds the is_projected flag.
         """
         if not self.label_service:
             return []
         overlay_boxes = self.label_service.get_overlay_boxes(base, channel)
-        # Convert (r,g,b) tuple to QColor
-        return [(display, x, y, w, h, QColor(r, g, b)) for display, x, y, w, h, (r, g, b) in overlay_boxes]
+        # Convert (r,g,b) tuple to QColor, keep is_auto
+        return [(display, x, y, w, h, QColor(r, g, b), is_auto)
+                for display, x, y, w, h, (r, g, b), is_auto in overlay_boxes]
 
     def _label_signature(
         self,
         base: str,
         channel: str,
-        boxes: List[Tuple[str, float, float, float, float, QColor]],  # noqa: ARG002
+        boxes: List[Tuple[str, float, float, float, float, QColor, bool]],  # noqa: ARG002
     ) -> Optional[Tuple[Any, ...]]:
         if not self.label_service:
             return None
@@ -4022,6 +4453,7 @@ class ImageViewer(QMainWindow):
             intrinsic_path=self._calibration_intrinsic_path(),
             extrinsic_path=self._calibration_extrinsic_path(),
             dataset_paths=self._get_dataset_paths_for_calibration_dialog(),
+            dataset_path=self.session.dataset_path,
         )
         dialog.setModal(False)
         dialog.setWindowModality(Qt.WindowModality.NonModal)
@@ -4041,7 +4473,122 @@ class ImageViewer(QMainWindow):
             intrinsic_path=self._calibration_intrinsic_path(),
             extrinsic_path=self._calibration_extrinsic_path(),
             dataset_paths=self._get_dataset_paths_for_calibration_dialog(),
+            dataset_path=self.session.dataset_path,
         )
+
+    # ------------------------------------------------------------------
+    # Label report
+    # ------------------------------------------------------------------
+
+    def _handle_label_report(self) -> None:
+        """Open a label report dialog for the current dataset/collection."""
+        if not require_dataset(self, "Label report"):
+            return
+        summary = self._build_label_summary(force=False)
+        title = f"Label report — {self.session.dataset_path.name}" if self.session.dataset_path else "Label report"
+        dialog = LabelReportDialog(self, summary=summary, title=title)
+        dialog._refresh_callback = lambda: self._refresh_label_report(dialog)
+        dialog.setModal(False)
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.show()
+        self._label_report_dialog = dialog
+        dialog.destroyed.connect(lambda _obj=None: setattr(self, "_label_report_dialog", None))
+
+    def _handle_workspace_label_report(self) -> None:
+        """Open a label report aggregated across all workspace datasets."""
+        if not self.workspace_dir:
+            QMessageBox.information(self, "Label report", "Open a workspace first.")
+            return
+        from backend.services.labels.label_summary_derivation import (
+            derive_labels_summary_from_disk,
+            load_labels_summary_cache,
+            merge_labels_summaries,
+            save_labels_summary_cache,
+        )
+        from backend.services.workspace_inspector import _is_dataset_dir
+        workspace_path = Path(self.workspace_dir)
+        summaries = []
+        for entry in sorted(workspace_path.iterdir()):
+            if not entry.is_dir():
+                continue
+            # Check child datasets (collections)
+            children = [p for p in entry.iterdir() if p.is_dir() and _is_dataset_dir(p)]
+            if children:
+                for child in children:
+                    summaries.append(self._get_or_derive_label_summary(child))
+            elif _is_dataset_dir(entry):
+                summaries.append(self._get_or_derive_label_summary(entry))
+
+        merged = merge_labels_summaries(summaries) if summaries else {}
+        title = f"Label report — Workspace ({workspace_path.name})"
+        dialog = LabelReportDialog(self, summary=merged, title=title)
+        dialog._refresh_callback = lambda: self._refresh_workspace_label_report(dialog, workspace_path)
+        dialog.setModal(False)
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.show()
+
+    def _get_or_derive_label_summary(self, dataset_path: Path) -> Dict[str, Any]:
+        """Load cached or derive label summary for a dataset path."""
+        from backend.services.labels.label_summary_derivation import (
+            derive_labels_summary_from_disk,
+            load_labels_summary_cache,
+            save_labels_summary_cache,
+        )
+        cached = load_labels_summary_cache(dataset_path)
+        if cached is not None:
+            return cached
+        ws_cfg = self._workspace_label_config_path()
+        summary = derive_labels_summary_from_disk(dataset_path, config_path=ws_cfg)
+        if summary.get("total_annotations", 0) > 0:
+            save_labels_summary_cache(dataset_path, summary)
+        return summary
+
+    def _build_label_summary(self, force: bool = False) -> Dict[str, Any]:
+        """Build label summary for the active dataset/collection."""
+        if self.label_service:
+            return self.label_service.get_labels_summary(force_rebuild=force)
+        # Fallback: derive directly from disk
+        if self.session.dataset_path:
+            from backend.services.labels.label_summary_derivation import (
+                derive_labels_summary_from_disk,
+            )
+            # For collections, merge child summaries
+            ws_cfg = self._workspace_label_config_path()
+            if self.session.collection:
+                from backend.services.labels.label_summary_derivation import merge_labels_summaries
+                child_summaries = []
+                for child_path in self.session.collection._child_dirs.values():
+                    child_summaries.append(derive_labels_summary_from_disk(child_path, config_path=ws_cfg))
+                return merge_labels_summaries(child_summaries)
+            return derive_labels_summary_from_disk(self.session.dataset_path, config_path=ws_cfg)
+        return {}
+
+    def _refresh_label_report(self, dialog: LabelReportDialog) -> None:
+        """Refresh an existing dataset label report dialog."""
+        summary = self._build_label_summary(force=True)
+        dialog.refresh(summary)
+
+    def _refresh_workspace_label_report(self, dialog: LabelReportDialog, workspace_path: Path) -> None:
+        """Refresh an existing workspace label report dialog."""
+        from backend.services.labels.label_summary_derivation import (
+            derive_labels_summary_from_disk,
+            merge_labels_summaries,
+        )
+        from backend.services.workspace_inspector import _is_dataset_dir
+        ws_cfg = self._workspace_label_config_path()
+        summaries = []
+        for entry in sorted(workspace_path.iterdir()):
+            if not entry.is_dir():
+                continue
+            children = [p for p in entry.iterdir() if p.is_dir() and _is_dataset_dir(p)]
+            if children:
+                for child in children:
+                    summaries.append(derive_labels_summary_from_disk(child, config_path=ws_cfg))
+            elif _is_dataset_dir(entry):
+                summaries.append(derive_labels_summary_from_disk(entry, config_path=ws_cfg))
+        merged = merge_labels_summaries(summaries) if summaries else {}
+        title = f"Label report — Workspace ({workspace_path.name})"
+        dialog.refresh(merged, title=title)
 
     def _handle_rectified_toggle(self, enabled: bool) -> None:
         success = self.view_state.toggle_rectified(enabled)
@@ -4095,6 +4642,11 @@ class ImageViewer(QMainWindow):
         self._align_mode = mode
         self.overlay_orchestrator.set_align_mode(mode)
         self.session.cache_service.set_preference("align_mode", mode)
+
+        # Auto-compute parallax when first activating alignment
+        if mode != "disabled" and self._parallax_h == 0.0 and self._parallax_v == 0.0:
+            self._try_auto_parallax()
+
         self.invalidate_overlay_cache()
 
         base = self._current_base()
@@ -4128,6 +4680,161 @@ class ImageViewer(QMainWindow):
             for action in align_actions.values():
                 if action:
                     action.blockSignals(False)
+
+    def _adjust_parallax(self, dh: float, dv: float) -> None:
+        """Adjust the parallax correction by *(dh, dv)* pixels.
+
+        Only effective when stereo alignment is active (any mode other
+        than 'disabled').  Use Ctrl+Alt+Arrow keys for ±1 px.
+        """
+        if self._align_mode == "disabled":
+            self._safe_status_message("Parallax adjustment requires stereo alignment enabled", 2000)
+            return
+
+        self._parallax_h += dh
+        self._parallax_v += dv
+        self.overlay_orchestrator.set_parallax_correction(self._parallax_h, self._parallax_v)
+        self.session.cache_service.set_preference("parallax_h", self._parallax_h)
+        self.session.cache_service.set_preference("parallax_v", self._parallax_v)
+        self.invalidate_overlay_cache()
+
+        base = self._current_base()
+        if base:
+            self.load_image_pair(base)
+
+        self._safe_status_message(
+            f"Parallax: h={self._parallax_h:+.0f} v={self._parallax_v:+.0f} px  (Shift+WASD)",
+            3000,
+        )
+
+    def _reset_parallax(self) -> None:
+        """Reset parallax correction to (0, 0) and re-run auto-computation."""
+        self._parallax_h = 0.0
+        self._parallax_v = 0.0
+        self.overlay_orchestrator.set_parallax_correction(0.0, 0.0)
+        self.session.cache_service.set_preference("parallax_h", 0.0)
+        self.session.cache_service.set_preference("parallax_v", 0.0)
+        self.invalidate_overlay_cache()
+
+        # Re-run auto-parallax if alignment is active
+        if self._align_mode != "disabled":
+            self._try_auto_parallax()
+
+        base = self._current_base()
+        if base:
+            self.load_image_pair(base)
+
+        if self._parallax_h == 0.0 and self._parallax_v == 0.0:
+            self._safe_status_message("Parallax reset to 0", 2000)
+
+    def _open_workspace_config(self) -> None:
+        """Open the workspace config YAML file in the system default editor."""
+        import subprocess
+        from backend.services.workspace_config import get_workspace_config_service
+
+        ws = get_workspace_config_service()
+        config_path = ws._get_config_path()
+        if not config_path:
+            self._safe_status_message("No workspace loaded", 2000)
+            return
+
+        # Ensure file exists (save defaults if needed)
+        if not config_path.exists():
+            ws.save()
+
+        try:
+            subprocess.Popen(["xdg-open", str(config_path)])
+            self._safe_status_message(f"Opened {config_path.name}", 2000)
+        except Exception as e:
+            self._safe_status_message(f"Cannot open config: {e}", 3000)
+
+    def _try_auto_parallax(self) -> None:
+        """Auto-compute parallax correction from calibration data.
+
+        Requires:
+          - Extrinsic calibration (T vector) in cache_data["_extrinsic"]
+          - Visible camera matrix in cache_data["_matrices"]["visible"]
+          - Chessboard square size (from intrinsic YAML, workspace config,
+            or user input dialog)
+
+        If square_size is not known, prompts the user with an input dialog.
+        Computes parallax for a default depth of 30 m and applies it.
+        """
+        from backend.utils.stereo_alignment import compute_auto_parallax
+        from backend.services.workspace_config import get_workspace_config_service
+
+        extrinsic = self.state.cache_data.get("_extrinsic")
+        vis_matrices = self.state.cache_data.get("_matrices", {}).get("visible")
+        if not extrinsic or not vis_matrices:
+            return
+
+        translation = extrinsic.get("translation") or extrinsic.get("T")
+        if not translation:
+            return
+
+        # Resolve square_size_mm from multiple sources
+        square_size_mm: Optional[float] = None
+
+        # 1. From app config (always available)
+        from config import get_config as _get_config
+        app_cfg = _get_config()
+        if app_cfg.chessboard_square_size_mm > 0:
+            square_size_mm = app_cfg.chessboard_square_size_mm
+
+        # 2. From intrinsic YAML (overrides config if present)
+        sq = self.state.cache_data.get("_square_size_mm")
+        if sq:
+            square_size_mm = float(sq)
+
+        # 3. From workspace config (overrides if set)
+        if square_size_mm is None:
+            ws = get_workspace_config_service()
+            calib = ws.config.calibration
+            if calib.square_size_mm:
+                square_size_mm = calib.square_size_mm
+
+        # 4. Ask the user as last resort
+        if square_size_mm is None:
+            from PyQt6.QtWidgets import QInputDialog
+            val, ok = QInputDialog.getDouble(
+                self,
+                "Chessboard Square Size",
+                "Enter chessboard square side length (mm).\n"
+                "This is needed to auto-compute the parallax correction\n"
+                "for stereo alignment.",
+                25.0,   # default
+                1.0,    # min
+                500.0,  # max
+                1,      # decimals
+            )
+            if not ok:
+                return
+            square_size_mm = val
+            # Persist in workspace config
+            ws = get_workspace_config_service()
+            ws.config.calibration.square_size_mm = square_size_mm
+            ws.save()
+
+        default_depth_m = app_cfg.default_parallax_depth_m
+        auto_h, auto_v = compute_auto_parallax(
+            target_matrix=vis_matrices,
+            translation=translation,
+            square_size_mm=square_size_mm,
+            depth_m=default_depth_m,
+        )
+
+        if abs(auto_h) > 0.1 or abs(auto_v) > 0.1:
+            self._parallax_h = round(auto_h, 1)
+            self._parallax_v = round(auto_v, 1)
+            self.overlay_orchestrator.set_parallax_correction(self._parallax_h, self._parallax_v)
+            self.session.cache_service.set_preference("parallax_h", self._parallax_h)
+            self.session.cache_service.set_preference("parallax_v", self._parallax_v)
+            self._safe_status_message(
+                f"Auto-parallax: h={self._parallax_h:+.1f} v={self._parallax_v:+.1f} px "
+                f"(~{default_depth_m:.0f} m, {square_size_mm:.0f} mm). "
+                f"Fine-tune: Shift+WASD",
+                5000,
+            )
 
     def _set_corner_display_mode(self, mode: str) -> None:
         """Set corner display mode.
@@ -4202,6 +4909,20 @@ class ImageViewer(QMainWindow):
 
     def _handle_show_labels_toggle(self, enabled: bool) -> None:
         self.view_state.toggle_labels(enabled)
+
+    def _handle_apply_parallax_toggle(self, enabled: bool) -> None:
+        """Enable/disable additive parallax correction while keeping calibration reprojection active."""
+        self._apply_parallax_correction = enabled
+        self.overlay_orchestrator.set_apply_parallax_correction(enabled)
+        self.session.cache_service.set_preference("apply_parallax_correction", enabled)
+        self.invalidate_overlay_cache()
+
+        base = self._current_base()
+        if base:
+            self.load_image_pair(base)
+
+        status = "enabled" if enabled else "disabled"
+        self._safe_status_message(f"Parallax correction: {status}", 2000)
 
     def _handle_show_overlays_toggle(self, enabled: bool) -> None:
         """Toggle visibility of image info overlays (status text, calibration markers, etc.)."""
@@ -4327,6 +5048,9 @@ class ImageViewer(QMainWindow):
         self.ui.text_metadata_vis.clear()
         self.ui.btn_prev.setEnabled(False)
         self.ui.btn_next.setEnabled(False)
+        self.ui.btn_prev_fast.setEnabled(False)
+        self.ui.btn_next_fast.setEnabled(False)
+        self.ui.btn_goto.setEnabled(False)
         self.setWindowTitle("Image Viewer")
         self.state.signatures = {}
         self.state.calibration_marked.clear()

@@ -39,7 +39,6 @@ def _get_yolo_class():
                 "ultralytics not installed. Install with: pip install ultralytics"
             ) from exc
     return _lazy_import_cache["YOLO"]
-    return _YOLO
 
 
 class YoloV8Detector(DetectionModel):
@@ -193,6 +192,7 @@ class YoloV8Detector(DetectionModel):
                     class_name=class_name,
                     bbox=(x_center, y_center, width, height),
                     confidence=conf_score,
+                    attributes={"raw_label": class_name},
                 ))
 
         log_debug(f"YOLOv8 detected {len(detections)} objects", "DETECTION")
@@ -235,36 +235,3 @@ class YoloV8Detector(DetectionModel):
             return ultralytics.__version__
         except (ImportError, AttributeError):
             return "unknown"
-
-    def detect_and_convert(
-        self,
-        image: np.ndarray,
-        confidence_threshold: Optional[float] = None,
-    ) -> List["Annotation"]:
-        """Detect objects and convert to Annotations with source=AUTO.
-
-        Convenience method that combines detect() + class mapping.
-
-        Args:
-            image: Input image
-            confidence_threshold: Override confidence threshold
-
-        Returns:
-            List of Annotations with source=AUTO, mapped to schema classes
-        """
-        from backend.services.labels.label_types import Annotation, AnnotationSource
-
-        detections = self.detect(image, confidence_threshold)
-        annotations: List[Annotation] = []
-
-        for det in detections:
-            schema_class = self.class_mapper.to_schema(det.class_id)
-            if schema_class is not None:
-                annotations.append(Annotation(
-                    class_id=schema_class,
-                    bbox=det.bbox,
-                    source=AnnotationSource.AUTO,
-                    attributes={"confidence": det.confidence},
-                ))
-
-        return annotations
