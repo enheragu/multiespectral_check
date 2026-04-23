@@ -87,6 +87,75 @@ def calculate_fov(
     return (fov_h, fov_v)
 
 
+def compute_auto_parallax(
+    target_matrix: Dict[str, Any],
+    translation: Dict[str, Any],
+    square_size_mm: float,
+    depth_m: float = 30.0,
+) -> float:
+    """Compute the parallax correction for a given scene depth.
+
+    The infinite-plane homography (from ``stereoRectify``) is exact for
+    objects at infinity.  For objects at finite depth *d*, there is a
+    residual shift whose magnitude in the **target** image is:
+
+    .. math::
+
+        \\Delta = \\frac{\\|\\mathbf{e}\\|}{Z}
+
+    where:
+
+    * :math:`\\mathbf{e} = (K_2 \\mathbf{T})_{xy}` — the first two
+      components of the epipole (baseline projected into pixel space).
+    * :math:`Z = d / s` — depth expressed in the same units as *T*
+      (chessboard squares), with *s* being the physical square size.
+
+    Substituting:
+
+    .. math::
+
+        \\text{parallax\\_correction} = \\frac{\\|\\mathbf{e}\\| \\cdot s}{d}
+
+    Args:
+        target_matrix: Target camera intrinsic matrix (visible).
+        translation:   Extrinsic translation vector T (3×1, in square units).
+        square_size_mm: Chessboard square side length in **millimetres**.
+        depth_m:        Representative scene depth in **metres** (default 30 m).
+
+    Returns:
+        Tuple ``(parallax_h, parallax_v)`` — horizontal and vertical
+        corrections in pixels.
+    """
+    if np is None or depth_m <= 0 or square_size_mm <= 0:
+        return (0.0, 0.0)
+
+    K2 = _dict_to_matrix(target_matrix, (3, 3))
+    T = _dict_to_matrix(translation, (3, 1))
+
+    if K2 is None or T is None:
+        return (0.0, 0.0)
+
+    epipole = (K2 @ T).flatten()            # [fx*tx+cx*tz, fy*ty+cy*tz, tz]
+    e_2d = epipole[:2]                       # pixel-space baseline
+    e_norm = float(np.linalg.norm(e_2d))
+
+    if e_norm < 1e-6:
+        return (0.0, 0.0)
+
+    square_size_m = square_size_mm / 1000.0
+    scale = square_size_m / depth_m
+    h = float(e_2d[0]) * scale
+    v = float(e_2d[1]) * scale
+
+    log_debug(
+        f"Auto parallax: ||e||={e_norm:.1f}px, "
+        f"square={square_size_mm:.1f}mm, depth={depth_m:.0f}m "
+        f"→ h={h:.1f}px, v={v:.1f}px",
+        "ALIGN",
+    )
+    return (h, v)
+
+
 def compute_alignment_homography(
     source_matrix: Dict[str, Any],
     target_matrix: Dict[str, Any],
@@ -94,11 +163,17 @@ def compute_alignment_homography(
     translation: Dict[str, Any],
     image_size: Tuple[int, int],
     source_is_lwir: bool = True,
+    parallax_h: float = 0.0,
+    parallax_v: float = 0.0,
 ) -> Optional[Any]:
     """Compute homography to align source image to target image coordinate system.
 
     Uses stereo rectification to compute the transformation between cameras.
     The homography maps points from SOURCE coordinates to TARGET coordinates.
+
+    Optional ``parallax_h`` / ``parallax_v`` (in pixels) shift the result
+    horizontally / vertically, compensating for the depth-dependent
+    parallax that a pure infinite-plane homography cannot capture.
 
     Args:
         source_matrix: Source camera intrinsic matrix (larger FOV)
@@ -107,6 +182,8 @@ def compute_alignment_homography(
         translation: Translation vector (3x1) from cam1 to cam2
         image_size: Image dimensions as (width, height)
         source_is_lwir: True if source is LWIR (helps determine R,T direction)
+        parallax_h: Horizontal pixel shift (positive = right).
+        parallax_v: Vertical pixel shift (positive = down).
 
     Returns:
         3x3 homography matrix (numpy array) or None if computation fails
@@ -187,6 +264,17 @@ def compute_alignment_homography(
         # Combined: source -> target = H2_inv @ H1
         H2_inv = np.linalg.inv(H2)
         H = H2_inv @ H1
+
+        # ── Parallax correction (independent H / V offsets) ──
+        if parallax_h != 0.0 or parallax_v != 0.0:
+            T_shift = np.eye(3)
+            T_shift[0, 2] = parallax_h
+            T_shift[1, 2] = parallax_v
+            H = T_shift @ H
+            log_debug(
+                f"Alignment: parallax h={parallax_h:+.1f}px, v={parallax_v:+.1f}px",
+                "ALIGN",
+            )
 
         # Log the transformation details
         fx1, fy1 = K1[0, 0], K1[1, 1]

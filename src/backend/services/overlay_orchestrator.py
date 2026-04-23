@@ -78,6 +78,12 @@ class OverlayOrchestrator(QObject):
         self._cached_lwir_calib_size: Optional[Tuple[int, int]] = None
         self._cached_vis_calib_size: Optional[Tuple[int, int]] = None
         self._cached_extrinsic_id: Optional[int] = None  # Track if extrinsic changed
+        self._cached_parallax_h: float = 0.0  # Track parallax used for cached H
+        self._cached_parallax_v: float = 0.0
+
+        # User-adjustable parallax correction (horizontal / vertical pixels)
+        self.parallax_h: float = 0.0
+        self.parallax_v: float = 0.0
 
         # Cached aligned pixmaps: {base: (mode, view_rectified, lwir_pixmap, vis_pixmap)}
         # Only cache the last one to avoid memory bloat
@@ -206,10 +212,12 @@ class OverlayOrchestrator(QObject):
                 and cache[0] == base
                 and cache[1] == self.align_mode
                 and cache[2] == self.view_rectified
+                and cache[5] == self.parallax_h
+                and cache[6] == self.parallax_v
             ):
                 # Cache hit - use cached aligned pixmaps
                 display_lwir, display_vis = cache[3], cache[4]
-                alignment_transform = cache[5]
+                alignment_transform = cache[7]
                 log_debug(f"Alignment cache hit for {base}", "ALIGN")
             else:
                 # Cache miss - compute alignment
@@ -221,7 +229,9 @@ class OverlayOrchestrator(QObject):
                 # Cache the result
                 self._aligned_cache = (
                     base, self.align_mode, self.view_rectified,
-                    display_lwir, display_vis, alignment_transform
+                    display_lwir, display_vis,
+                    self.parallax_h, self.parallax_v,
+                    alignment_transform,
                 )
                 log_debug(f"Alignment cache miss for {base}, cached", "ALIGN")
 
@@ -458,6 +468,8 @@ class OverlayOrchestrator(QObject):
                 translation=extrinsic.get("translation") or extrinsic.get("T"),
                 image_size=source_size,
                 source_is_lwir=source_is_lwir,
+                parallax_h=self.parallax_h,
+                parallax_v=self.parallax_v,
             )
             return homography
         except Exception as e:
@@ -491,6 +503,20 @@ class OverlayOrchestrator(QObject):
             mode = "disabled"
         if mode != self.align_mode:
             self.align_mode = mode
+            self.invalidate()
+
+    def set_parallax_correction(self, h: float, v: float) -> None:
+        """Set the parallax correction in pixels (horizontal / vertical).
+
+        Changing either component invalidates the cached homography so
+        the next render recomputes it.
+        """
+        if h != self.parallax_h or v != self.parallax_v:
+            self.parallax_h = h
+            self.parallax_v = v
+            # Force homography recomputation (parallax changes the matrix)
+            self._cached_homography = None
+            self._aligned_cache = None
             self.invalidate()
 
     def set_grid_mode(self, mode: str) -> None:
@@ -643,6 +669,8 @@ class OverlayOrchestrator(QObject):
             and self._cached_extrinsic_id == extrinsic_id
             and self._cached_lwir_calib_size == lwir_calib_size
             and self._cached_vis_calib_size == vis_calib_size
+            and self._cached_parallax_h == self.parallax_h
+            and self._cached_parallax_v == self.parallax_v
         ):
             homography = self._cached_homography
             log_debug("Using cached homography", "ALIGN")
@@ -654,12 +682,16 @@ class OverlayOrchestrator(QObject):
                 extrinsic.get("translation") or extrinsic.get("T"),
                 lwir_calib_size,
                 source_is_lwir=True,
+                parallax_h=self.parallax_h,
+                parallax_v=self.parallax_v,
             )
             if homography is not None:
                 self._cached_homography = homography
                 self._cached_extrinsic_id = extrinsic_id
                 self._cached_lwir_calib_size = lwir_calib_size
                 self._cached_vis_calib_size = vis_calib_size
+                self._cached_parallax_h = self.parallax_h
+                self._cached_parallax_v = self.parallax_v
                 log_debug("Computed and cached new homography", "ALIGN")
 
         if homography is None:

@@ -49,10 +49,12 @@ Title format: "Collection: {name}" or "Dataset: {name}"
 
 Both images (LWIR and Visible) appear side by side, each expanded to 50% of width independently of resolution (can differ between images).
 
-**Stereo Alignment Modes** (requires calibration):
+**Stereo Alignment Modes** (requires extrinsic calibration):
 - **Full View**: Each image shown in its original aspect ratio, no cropping
 - **FOV Focus**: Centers on the LWIR field of view projected onto the visible image
 - **Max Overlap**: Crops to the maximum overlapping region between cameras
+
+See [Stereo Alignment — Technical Details](#stereo-alignment--technical-details) for the underlying geometry and parallax correction.
 
 **Zoom & Pan**:
 - Ctrl + Mouse Wheel: Zoom in/out
@@ -105,6 +107,8 @@ Additionally, images can be marked as **calibration candidates** (independent fr
 - Shift + Left / Shift + Right: Navigate ×5
 - Ctrl+G: Go to image number
 - C: Toggle calibration mark
+- `[` / `]`: Adjust parallax correction ±1 px (stereo alignment modes only)
+- Shift + `[` / `]`: Adjust parallax correction ±5 px
 - F11: Toggle fullscreen
 - Esc: Cancel manual label selection / exit fullscreen
 
@@ -244,13 +248,157 @@ Detection labelling toolchain for object detection workflows:
 **Reports**:
 - **Label report**: Opens a dialog summarizing label statistics for the current dataset/collection — total annotations, images labeled, per-channel and per-source breakdown, per-class counts with attribute distributions. Includes a 2×2 chart grid (class histogram, bbox overlay, centre heatmap, w×h size heatmap) with per-class filter selector. Uses `.labels_summary_cache.yaml` for fast reload.
 
-**Storage**: Labels saved in YOLO format at `labels/{channel}/{channel}_{base}.txt`
-
 **Overlay display**: When labels are enabled (View → Show labels), bounding boxes appear on images with class name and color. Only class-specific attributes are shown in the overlay text (universal attributes like occlusion/truncation are hidden for clarity). Auto-detected labels show a dashed border and ⟳ suffix; accepted/manual labels show a solid border.
 
 ### Help Menu
 
 - **See help** (Ctrl+H): Opens a help window describing panels, context menus, all menu options, keyboard shortcuts, and contact information
+
+## Stereo Alignment — Technical Details
+
+### FOV Projection
+
+The LWIR and visible cameras have different fields of view (FOV).  The LWIR
+FOV is smaller and represents a sub-region of the visible image.  To show both
+images side-by-side with consistent spatial correspondence the system computes
+where each LWIR pixel projects onto the visible image using stereo calibration.
+
+The mapping uses the **extrinsic calibration** (rotation **R** and translation
+**T** from LWIR to visible) together with the **intrinsic matrices** (K_lwir,
+K_vis) of both cameras.
+
+#### Homography via stereo rectification
+
+`cv2.stereoRectify` is called with `CALIB_ZERO_DISPARITY` to compute
+rectification transforms $R_1$, $R_2$ and new projection matrices $P_1$, $P_2$.
+From these we derive per-camera homographies:
+
+$$
+H_1 = P_1^{3\times3} \cdot R_1 \cdot K_{\text{lwir}}^{-1} \qquad \text{(LWIR} \to \text{rectified)}
+$$
+
+$$
+H_2 = P_2^{3\times3} \cdot R_2 \cdot K_{\text{vis}}^{-1} \qquad \text{(Visible} \to \text{rectified)}
+$$
+
+The combined LWIR → Visible mapping is:
+
+$$
+H = H_2^{-1} \cdot H_1
+$$
+
+This homography assumes **infinite scene depth** (equivalent to a pure
+rotation between cameras).
+
+### Parallax and Finite Depth
+
+For objects at a finite depth $d$, the cameras see them from slightly different
+viewpoints due to the physical baseline separation.  This causes a residual
+translation (parallax) that the infinite-plane homography does not capture.
+
+The plane-induced homography for a fronto-parallel plane at depth $Z$ (in
+calibration units, i.e. chessboard squares) is:
+
+$$
+H_Z = K_{\text{vis}} \left( R + \frac{T \, n^\top}{Z} \right) K_{\text{lwir}}^{-1}
+$$
+
+where $\mathbf{n} = [0,\, 0,\, 1]^\top$ (fronto-parallel normal).  The parallax
+residual relative to the infinite-depth homography is:
+
+$$
+\Delta H = H_Z - H_\infty = \frac{1}{Z} \, K_{\text{vis}} \, T \, n^\top \, K_{\text{lwir}}^{-1}
+$$
+
+For a point $\mathbf{p}$ in the LWIR image the pixel shift in the visible
+image simplifies to:
+
+$$
+\Delta \mathbf{p} = \frac{K_{\text{vis}} \, T}{Z}
+$$
+
+(the scalar $n^\top K_{\text{lwir}}^{-1} \mathbf{p}$ equals 1 for any normalised point).
+
+#### Conversion to physical units
+
+The translation $T$ is expressed in **chessboard-square units** (the
+calibration grid has unit square size).  To convert depth from metres to
+square units:
+
+$$
+Z = \frac{d}{s}
+$$
+
+where $s$ is the physical square side length in metres.  Substituting:
+
+$$
+\Delta \mathbf{p} = \frac{K_{\text{vis}} \, T \cdot s}{d}
+\qquad \Rightarrow \qquad
+|\Delta| = \frac{\lVert \mathbf{e}_{xy} \rVert \cdot s}{d}
+$$
+
+The **direction** of the shift in pixel space is the 2D part of the
+epipole $\mathbf{e} = K_{\text{vis}} \, T$, which is determined entirely by
+the calibration.
+
+The **magnitude** depends on three quantities:
+
+| Symbol | Meaning | Typical value |
+|--------|---------|---------------|
+| $\lVert\mathbf{e}\rVert$ | Epipole norm (pixels) | 50–500 px |
+| $s$ | Square size (metres) | 0.020–0.060 m |
+| $d$ | Scene depth (metres) | 10–100 m |
+
+#### Residual error at other depths
+
+If the correction is tuned for a reference depth $d_0$, the residual error at
+depth $d$ is:
+
+$$
+\varepsilon = \lVert\mathbf{e}\rVert \cdot s \cdot \left| \frac{1}{d} - \frac{1}{d_0} \right|
+$$
+
+For typical urban scenes (baseline ~5 cm, $f \approx 500$ px) with $d_0 = 30$ m:
+
+| Object depth | Residual error |
+|--------------|----------------|
+| 15 m | ~0.8 px |
+| 20 m | ~0.4 px |
+| 50 m | ~0.3 px |
+| 100 m | ~0.2 px |
+
+### Parallax Correction in the Application
+
+When any stereo alignment mode is activated for the first time, the system
+auto-computes the parallax correction for a default depth of **30 m** using
+the formula above.  The chessboard square size is read from `config.py`
+(`chessboard_square_size_mm`, default 60 mm).  If for any reason the value is
+not available, a dialog asks the user to enter it in millimetres.
+
+The correction is applied as a translation matrix pre-multiplied onto $H$:
+
+$$
+H_{\text{adj}} = \begin{bmatrix} 1 & 0 & \Delta x \\ 0 & 1 & \Delta y \\ 0 & 0 & 1 \end{bmatrix} \cdot H
+$$
+
+where $[\Delta x,\, \Delta y] = \text{correction} \cdot \dfrac{\mathbf{e}}{\lVert\mathbf{e}\rVert}$.
+
+#### Manual fine-tuning
+
+After the auto-computation, the user can fine-tune with keyboard shortcuts:
+
+| Key | Action |
+|-----|--------|
+| `]` | +1 px along baseline direction |
+| `[` | −1 px along baseline direction |
+| Shift + `]` | +5 px |
+| Shift + `[` | −5 px |
+
+The current value is displayed in the status bar and persisted per workspace.
+
+The same correction is applied to **label projection** between channels, so
+that bounding boxes projected from visible to LWIR (or vice versa) remain
+consistent with the visual alignment.
 
 ## Data Persistence
 
@@ -261,6 +409,7 @@ All data is persistent and stored at dataset level in cache files:
 - **`calibration/*.yaml`**: Detected corners and image sizes per image
 - **`calibration_intrinsic.yaml`** / **`calibration_extrinsic.yaml`**: Clean calibration matrices (exportable)
 - **`.calibration_errors_cached.yaml`**: Per-view reprojection errors (hidden cache)
+- **`.workspace_config.yaml`**: Workspace-level settings (default calibration paths, chessboard square size)
 - **`.labels_summary_cache.yaml`**: Label summary statistics for fast report loading
 - **`labels/*.txt`**: YOLO format detection labels
 

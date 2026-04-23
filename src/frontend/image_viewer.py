@@ -235,6 +235,10 @@ class ImageViewer(QMainWindow):
         valid_align_modes = ("disabled", "full", "fov_focus", "max_overlap")
         self._align_mode = saved_align_mode if saved_align_mode in valid_align_modes else "disabled"
 
+        # Parallax correction (horizontal / vertical pixels)
+        self._parallax_h: float = float(preferences.get("parallax_h", 0.0))
+        self._parallax_v: float = float(preferences.get("parallax_v", 0.0))
+
         # Corner display mode: "original", "subpixel", "both"
         saved_corner_mode = preferences.get("corner_display_mode", "")
         valid_corner_modes = ("original", "subpixel", "both")
@@ -680,6 +684,10 @@ class ImageViewer(QMainWindow):
             self.ui.action_align_fov_focus.triggered.connect(lambda: self._set_align_mode("fov_focus"))
         if hasattr(self.ui, "action_align_max_overlap"):
             self.ui.action_align_max_overlap.triggered.connect(lambda: self._set_align_mode("max_overlap"))
+        if hasattr(self.ui, "action_reset_parallax"):
+            self.ui.action_reset_parallax.triggered.connect(self._reset_parallax)
+        if hasattr(self.ui, "action_open_workspace_config"):
+            self.ui.action_open_workspace_config.triggered.connect(self._open_workspace_config)
 
         # Corner display submenu actions - use triggered (QActionGroup handles exclusivity)
         if hasattr(self.ui, "action_corners_original"):
@@ -1271,6 +1279,17 @@ class ImageViewer(QMainWindow):
             if not handled and self.isFullScreen():
                 self._toggle_fullscreen()
                 handled = True
+        elif event.key() in (
+            Qt.Key.Key_W, Qt.Key.Key_A, Qt.Key.Key_S, Qt.Key.Key_D,
+        ) and event.modifiers() == Qt.KeyboardModifier.ShiftModifier:
+            dh, dv = {
+                Qt.Key.Key_A: (-1.0,  0.0),
+                Qt.Key.Key_D: ( 1.0,  0.0),
+                Qt.Key.Key_W: ( 0.0, -1.0),
+                Qt.Key.Key_S: ( 0.0,  1.0),
+            }[event.key()]
+            self._adjust_parallax(dh, dv)
+            handled = True
 
         if handled:
             event.accept()
@@ -2193,6 +2212,7 @@ class ImageViewer(QMainWindow):
         # Sync view settings via setters (they handle cache invalidation if changed)
         self.overlay_orchestrator.set_view_rectified(self.view_rectified)
         self.overlay_orchestrator.set_align_mode(self._align_mode)
+        self.overlay_orchestrator.set_parallax_correction(self._parallax_h, self._parallax_v)
         self.overlay_orchestrator.set_grid_mode(self.view_state.grid_mode)
         self.overlay_orchestrator.set_show_labels(self.view_state.show_labels)
         self.overlay_orchestrator.set_show_overlays(self.view_state.show_overlays)
@@ -4615,6 +4635,11 @@ class ImageViewer(QMainWindow):
         self._align_mode = mode
         self.overlay_orchestrator.set_align_mode(mode)
         self.session.cache_service.set_preference("align_mode", mode)
+
+        # Auto-compute parallax when first activating alignment
+        if mode != "disabled" and self._parallax_h == 0.0 and self._parallax_v == 0.0:
+            self._try_auto_parallax()
+
         self.invalidate_overlay_cache()
 
         base = self._current_base()
@@ -4648,6 +4673,161 @@ class ImageViewer(QMainWindow):
             for action in align_actions.values():
                 if action:
                     action.blockSignals(False)
+
+    def _adjust_parallax(self, dh: float, dv: float) -> None:
+        """Adjust the parallax correction by *(dh, dv)* pixels.
+
+        Only effective when stereo alignment is active (any mode other
+        than 'disabled').  Use Ctrl+Alt+Arrow keys for ±1 px.
+        """
+        if self._align_mode == "disabled":
+            self._safe_status_message("Parallax adjustment requires stereo alignment enabled", 2000)
+            return
+
+        self._parallax_h += dh
+        self._parallax_v += dv
+        self.overlay_orchestrator.set_parallax_correction(self._parallax_h, self._parallax_v)
+        self.session.cache_service.set_preference("parallax_h", self._parallax_h)
+        self.session.cache_service.set_preference("parallax_v", self._parallax_v)
+        self.invalidate_overlay_cache()
+
+        base = self._current_base()
+        if base:
+            self.load_image_pair(base)
+
+        self._safe_status_message(
+            f"Parallax: h={self._parallax_h:+.0f} v={self._parallax_v:+.0f} px  (Shift+WASD)",
+            3000,
+        )
+
+    def _reset_parallax(self) -> None:
+        """Reset parallax correction to (0, 0) and re-run auto-computation."""
+        self._parallax_h = 0.0
+        self._parallax_v = 0.0
+        self.overlay_orchestrator.set_parallax_correction(0.0, 0.0)
+        self.session.cache_service.set_preference("parallax_h", 0.0)
+        self.session.cache_service.set_preference("parallax_v", 0.0)
+        self.invalidate_overlay_cache()
+
+        # Re-run auto-parallax if alignment is active
+        if self._align_mode != "disabled":
+            self._try_auto_parallax()
+
+        base = self._current_base()
+        if base:
+            self.load_image_pair(base)
+
+        if self._parallax_h == 0.0 and self._parallax_v == 0.0:
+            self._safe_status_message("Parallax reset to 0", 2000)
+
+    def _open_workspace_config(self) -> None:
+        """Open the workspace config YAML file in the system default editor."""
+        import subprocess
+        from backend.services.workspace_config import get_workspace_config_service
+
+        ws = get_workspace_config_service()
+        config_path = ws._get_config_path()
+        if not config_path:
+            self._safe_status_message("No workspace loaded", 2000)
+            return
+
+        # Ensure file exists (save defaults if needed)
+        if not config_path.exists():
+            ws.save()
+
+        try:
+            subprocess.Popen(["xdg-open", str(config_path)])
+            self._safe_status_message(f"Opened {config_path.name}", 2000)
+        except Exception as e:
+            self._safe_status_message(f"Cannot open config: {e}", 3000)
+
+    def _try_auto_parallax(self) -> None:
+        """Auto-compute parallax correction from calibration data.
+
+        Requires:
+          - Extrinsic calibration (T vector) in cache_data["_extrinsic"]
+          - Visible camera matrix in cache_data["_matrices"]["visible"]
+          - Chessboard square size (from intrinsic YAML, workspace config,
+            or user input dialog)
+
+        If square_size is not known, prompts the user with an input dialog.
+        Computes parallax for a default depth of 30 m and applies it.
+        """
+        from backend.utils.stereo_alignment import compute_auto_parallax
+        from backend.services.workspace_config import get_workspace_config_service
+
+        extrinsic = self.state.cache_data.get("_extrinsic")
+        vis_matrices = self.state.cache_data.get("_matrices", {}).get("visible")
+        if not extrinsic or not vis_matrices:
+            return
+
+        translation = extrinsic.get("translation") or extrinsic.get("T")
+        if not translation:
+            return
+
+        # Resolve square_size_mm from multiple sources
+        square_size_mm: Optional[float] = None
+
+        # 1. From app config (always available)
+        from config import get_config as _get_config
+        app_cfg = _get_config()
+        if app_cfg.chessboard_square_size_mm > 0:
+            square_size_mm = app_cfg.chessboard_square_size_mm
+
+        # 2. From intrinsic YAML (overrides config if present)
+        sq = self.state.cache_data.get("_square_size_mm")
+        if sq:
+            square_size_mm = float(sq)
+
+        # 3. From workspace config (overrides if set)
+        if square_size_mm is None:
+            ws = get_workspace_config_service()
+            calib = ws.config.calibration
+            if calib.square_size_mm:
+                square_size_mm = calib.square_size_mm
+
+        # 4. Ask the user as last resort
+        if square_size_mm is None:
+            from PyQt6.QtWidgets import QInputDialog
+            val, ok = QInputDialog.getDouble(
+                self,
+                "Chessboard Square Size",
+                "Enter chessboard square side length (mm).\n"
+                "This is needed to auto-compute the parallax correction\n"
+                "for stereo alignment.",
+                25.0,   # default
+                1.0,    # min
+                500.0,  # max
+                1,      # decimals
+            )
+            if not ok:
+                return
+            square_size_mm = val
+            # Persist in workspace config
+            ws = get_workspace_config_service()
+            ws.config.calibration.square_size_mm = square_size_mm
+            ws.save()
+
+        default_depth_m = app_cfg.default_parallax_depth_m
+        auto_h, auto_v = compute_auto_parallax(
+            target_matrix=vis_matrices,
+            translation=translation,
+            square_size_mm=square_size_mm,
+            depth_m=default_depth_m,
+        )
+
+        if abs(auto_h) > 0.1 or abs(auto_v) > 0.1:
+            self._parallax_h = round(auto_h, 1)
+            self._parallax_v = round(auto_v, 1)
+            self.overlay_orchestrator.set_parallax_correction(self._parallax_h, self._parallax_v)
+            self.session.cache_service.set_preference("parallax_h", self._parallax_h)
+            self.session.cache_service.set_preference("parallax_v", self._parallax_v)
+            self._safe_status_message(
+                f"Auto-parallax: h={self._parallax_h:+.1f} v={self._parallax_v:+.1f} px "
+                f"(~{default_depth_m:.0f} m, {square_size_mm:.0f} mm). "
+                f"Fine-tune: Shift+WASD",
+                5000,
+            )
 
     def _set_corner_display_mode(self, mode: str) -> None:
         """Set corner display mode.

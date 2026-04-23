@@ -244,6 +244,7 @@ class Ui_MainWindow(object):
         self.action_load_recent = QtWidgets.QMenu("Load recent", self.menu_dataset)
         self.action_save_status = QtGui.QAction("Save current status", MainWindow)
         self.action_save_status.setShortcut(QtGui.QKeySequence("Ctrl+S"))
+        self.action_open_workspace_config = QtGui.QAction("Open Workspace Config…", MainWindow)
         self.action_run_duplicate_scan = QtGui.QAction("Run duplicate sweep", MainWindow)
         self.action_run_pattern_scan = QtGui.QAction("Run pattern sweep", MainWindow)
         self.action_delete_selected = QtGui.QAction("Delete selected pairs", MainWindow)
@@ -319,6 +320,7 @@ class Ui_MainWindow(object):
         self.align_action_group.addAction(self.action_align_fov_focus)
         self.align_action_group.addAction(self.action_align_max_overlap)
         self.align_action_group.setExclusive(True)
+        self.action_reset_parallax = QtGui.QAction("Reset Parallax", MainWindow)
 
         # Corner Display submenu
         self.menu_corner_display = QtWidgets.QMenu("Corner Display", MainWindow)
@@ -446,6 +448,8 @@ class Ui_MainWindow(object):
 
         self.menu_file.addAction(self.action_save_status)
         self.menu_file.addSeparator()
+        self.menu_file.addAction(self.action_open_workspace_config)
+        self.menu_file.addSeparator()
         self.menu_file.addAction(self.action_exit)
 
         # Dataset menu reorganization
@@ -507,6 +511,8 @@ class Ui_MainWindow(object):
         self.menu_stereo_alignment.addAction(self.action_align_full)
         self.menu_stereo_alignment.addAction(self.action_align_fov_focus)
         self.menu_stereo_alignment.addAction(self.action_align_max_overlap)
+        self.menu_stereo_alignment.addSeparator()
+        self.menu_stereo_alignment.addAction(self.action_reset_parallax)
         self.menu_view.addMenu(self.menu_stereo_alignment)
 
         # Corner Display submenu

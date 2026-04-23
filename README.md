@@ -73,14 +73,14 @@ Once the GUI is started, a Workspace can be loaded. A workspace is a folder that
 ```text
 workspace/
 ├── collection1/          # Groups related datasets
-│   ├── set_a/        # LWIR + Visible synchronized pairs
+│   ├── set_a/            # LWIR + Visible synchronized pairs
 │   │   ├── lwir/
 │   │   │   ├── img_001.png
 │   │   │   ├── img_001.yaml (metadata)
 │   │   │   └── ...
-│   │   └── visible/     # Same structure
+│   │   └── visible/      # Same structure
 │   └── set_b/
-└── standalone_set/  # Treated as single-set collection
+└── standalone_set/       # Treated as single-set collection
 ```
 
 Note that collections are optional and can be used to group specific sets (all calibration sets, all daylight sets, etc). If a set is not inside a collection, it will be treated as a single-set collection.

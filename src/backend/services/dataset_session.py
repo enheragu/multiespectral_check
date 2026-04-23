@@ -1062,6 +1062,10 @@ class DatasetSession:
                         if isinstance(channel_data, dict):
                             self.state.cache_data["_matrices"][channel] = channel_data
                     log_info(f"Loaded intrinsic calibration from {intrinsic_path.name}: {list(channels.keys())}", "SESSION")
+                # Store square_size if present (for parallax auto-computation)
+                sq = data.get("square_size") or data.get("square_length")
+                if sq is not None:
+                    self.state.cache_data["_square_size_mm"] = float(sq)
             except (OSError, yaml.YAMLError) as e:
                 log_warning(f"Failed to load intrinsic calibration: {e}", "SESSION")
 

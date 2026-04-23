@@ -23,24 +23,30 @@ class CalibrationConfig:
     intrinsic_path: Optional[Path] = None  # Absolute path to intrinsic YAML
     extrinsic_path: Optional[Path] = None  # Absolute path to extrinsic YAML
     source_dataset: Optional[str] = None   # Name of dataset these came from (for display)
+    square_size_mm: Optional[float] = None # Chessboard square side length in mm
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to YAML-compatible dict."""
-        return {
+        d: Dict[str, Any] = {
             "intrinsic_path": str(self.intrinsic_path) if self.intrinsic_path else None,
             "extrinsic_path": str(self.extrinsic_path) if self.extrinsic_path else None,
             "source_dataset": self.source_dataset,
         }
+        if self.square_size_mm is not None:
+            d["square_size_mm"] = self.square_size_mm
+        return d
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "CalibrationConfig":
         """Deserialize from dict."""
         intrinsic = data.get("intrinsic_path")
         extrinsic = data.get("extrinsic_path")
+        square_raw = data.get("square_size_mm")
         return cls(
             intrinsic_path=Path(intrinsic) if intrinsic else None,
             extrinsic_path=Path(extrinsic) if extrinsic else None,
             source_dataset=data.get("source_dataset"),
+            square_size_mm=float(square_raw) if square_raw is not None else None,
         )
 
     def is_valid(self) -> bool:

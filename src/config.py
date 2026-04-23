@@ -22,6 +22,8 @@ class AppConfig:
 
     # Calibration settings
     chessboard_size: Tuple[int, int] = (7, 7)
+    chessboard_square_size_mm: float = 60.0  # Physical side length of each chessboard square
+    default_parallax_depth_m: float = 15.0   # Assumed scene depth for auto-parallax (metres)
     calibration_prefetch_limit: int = 6
     calibration_toggle_shortcut: str = "Ctrl+Shift+C"
 
