@@ -238,6 +238,9 @@ class ImageViewer(QMainWindow):
         # Parallax correction (horizontal / vertical pixels)
         self._parallax_h: float = float(preferences.get("parallax_h", 0.0))
         self._parallax_v: float = float(preferences.get("parallax_v", 0.0))
+        self._apply_parallax_correction: bool = bool(
+            preferences.get("apply_parallax_correction", True)
+        )
 
         # Corner display mode: "original", "subpixel", "both"
         saved_corner_mode = preferences.get("corner_display_mode", "")
@@ -508,6 +511,7 @@ class ImageViewer(QMainWindow):
                 (getattr(self.ui, "action_toggle_rectified", None), self.view_rectified),
                 (getattr(self.ui, "action_show_labels", None), self.view_state.show_labels),
                 (getattr(self.ui, "action_show_overlays", None), self.view_state.show_overlays),
+                (getattr(self.ui, "action_apply_parallax", None), self._apply_parallax_correction),
                 (getattr(self.ui, "action_label_manual_mode", None), self._manual_label_mode),
                 (getattr(self.ui, "action_label_auto_mode", None), self._auto_label_active),
             ]
@@ -684,6 +688,8 @@ class ImageViewer(QMainWindow):
             self.ui.action_align_fov_focus.triggered.connect(lambda: self._set_align_mode("fov_focus"))
         if hasattr(self.ui, "action_align_max_overlap"):
             self.ui.action_align_max_overlap.triggered.connect(lambda: self._set_align_mode("max_overlap"))
+        if hasattr(self.ui, "action_apply_parallax"):
+            self.ui.action_apply_parallax.toggled.connect(self._handle_apply_parallax_toggle)
         if hasattr(self.ui, "action_reset_parallax"):
             self.ui.action_reset_parallax.triggered.connect(self._reset_parallax)
         if hasattr(self.ui, "action_open_workspace_config"):
@@ -2212,6 +2218,7 @@ class ImageViewer(QMainWindow):
         # Sync view settings via setters (they handle cache invalidation if changed)
         self.overlay_orchestrator.set_view_rectified(self.view_rectified)
         self.overlay_orchestrator.set_align_mode(self._align_mode)
+        self.overlay_orchestrator.set_apply_parallax_correction(self._apply_parallax_correction)
         self.overlay_orchestrator.set_parallax_correction(self._parallax_h, self._parallax_v)
         self.overlay_orchestrator.set_grid_mode(self.view_state.grid_mode)
         self.overlay_orchestrator.set_show_labels(self.view_state.show_labels)
@@ -4902,6 +4909,20 @@ class ImageViewer(QMainWindow):
 
     def _handle_show_labels_toggle(self, enabled: bool) -> None:
         self.view_state.toggle_labels(enabled)
+
+    def _handle_apply_parallax_toggle(self, enabled: bool) -> None:
+        """Enable/disable additive parallax correction while keeping calibration reprojection active."""
+        self._apply_parallax_correction = enabled
+        self.overlay_orchestrator.set_apply_parallax_correction(enabled)
+        self.session.cache_service.set_preference("apply_parallax_correction", enabled)
+        self.invalidate_overlay_cache()
+
+        base = self._current_base()
+        if base:
+            self.load_image_pair(base)
+
+        status = "enabled" if enabled else "disabled"
+        self._safe_status_message(f"Parallax correction: {status}", 2000)
 
     def _handle_show_overlays_toggle(self, enabled: bool) -> None:
         """Toggle visibility of image info overlays (status text, calibration markers, etc.)."""

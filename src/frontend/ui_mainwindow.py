@@ -320,6 +320,9 @@ class Ui_MainWindow(object):
         self.align_action_group.addAction(self.action_align_fov_focus)
         self.align_action_group.addAction(self.action_align_max_overlap)
         self.align_action_group.setExclusive(True)
+        self.action_apply_parallax = QtGui.QAction("Apply Parallax Correction", MainWindow)
+        self.action_apply_parallax.setCheckable(True)
+        self.action_apply_parallax.setChecked(True)
         self.action_reset_parallax = QtGui.QAction("Reset Parallax", MainWindow)
 
         # Corner Display submenu
@@ -512,6 +515,7 @@ class Ui_MainWindow(object):
         self.menu_stereo_alignment.addAction(self.action_align_fov_focus)
         self.menu_stereo_alignment.addAction(self.action_align_max_overlap)
         self.menu_stereo_alignment.addSeparator()
+        self.menu_stereo_alignment.addAction(self.action_apply_parallax)
         self.menu_stereo_alignment.addAction(self.action_reset_parallax)
         self.menu_view.addMenu(self.menu_stereo_alignment)
 

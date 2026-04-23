@@ -62,7 +62,10 @@ HELP_MENU_SECTIONS: Sequence[Tuple[str, Sequence[Tuple[str, str]]]] = [
             (
                 "Stereo Alignment",
                 "Control how stereo-rectified images are displayed: Disabled, Full View, "
-                "FOV Focus, or Max Overlap.",
+                "FOV Focus, or Max Overlap. Calibration-based reprojection remains active "
+                "as the base geometry. The optional parallax adjustment is an additive "
+                "manual offset (Apply Parallax Correction toggle); disable it to use pure "
+                "calibration reprojection. Reset Parallax clears only that additive offset.",
             ),
             (
                 "Corner Display",

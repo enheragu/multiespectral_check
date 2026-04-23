@@ -877,9 +877,17 @@ class DatasetSession:
                 return None
 
             if not img_path or not img_path.exists():
+                log_warning(f"Missing {channel} image for base '{base}'", "SESSION")
                 return None
 
             pixmap: Optional[QPixmap] = QPixmap(str(img_path))
+            if pixmap is None or pixmap.isNull():
+                log_warning(
+                    f"Failed to decode {channel} image for base '{base}': {img_path}",
+                    "SESSION",
+                )
+                return None
+
             if view_rectified:
                 matrices = self.state.cache_data["_matrices"].get(channel)
                 if matrices:

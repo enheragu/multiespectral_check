@@ -84,6 +84,7 @@ class OverlayOrchestrator(QObject):
         # User-adjustable parallax correction (horizontal / vertical pixels)
         self.parallax_h: float = 0.0
         self.parallax_v: float = 0.0
+        self.apply_parallax_correction: bool = True
 
         # Cached aligned pixmaps: {base: (mode, view_rectified, lwir_pixmap, vis_pixmap)}
         # Only cache the last one to avoid memory bloat
@@ -205,6 +206,7 @@ class OverlayOrchestrator(QObject):
         # Apply stereo alignment if enabled (any mode except "disabled")
         alignment_transform = None
         if self.align_mode != "disabled" and display_lwir and display_vis:
+            effective_h, effective_v = self._effective_parallax()
             # Check alignment cache
             cache = self._aligned_cache
             if (
@@ -212,8 +214,8 @@ class OverlayOrchestrator(QObject):
                 and cache[0] == base
                 and cache[1] == self.align_mode
                 and cache[2] == self.view_rectified
-                and cache[5] == self.parallax_h
-                and cache[6] == self.parallax_v
+                and cache[5] == effective_h
+                and cache[6] == effective_v
             ):
                 # Cache hit - use cached aligned pixmaps
                 display_lwir, display_vis = cache[3], cache[4]
@@ -230,7 +232,7 @@ class OverlayOrchestrator(QObject):
                 self._aligned_cache = (
                     base, self.align_mode, self.view_rectified,
                     display_lwir, display_vis,
-                    self.parallax_h, self.parallax_v,
+                    effective_h, effective_v,
                     alignment_transform,
                 )
                 log_debug(f"Alignment cache miss for {base}, cached", "ALIGN")
@@ -460,6 +462,8 @@ class OverlayOrchestrator(QObject):
         if not source_size:
             return None
 
+        effective_h, effective_v = self._effective_parallax()
+
         try:
             homography = compute_alignment_homography(
                 source_matrix=source_mat,
@@ -468,8 +472,8 @@ class OverlayOrchestrator(QObject):
                 translation=extrinsic.get("translation") or extrinsic.get("T"),
                 image_size=source_size,
                 source_is_lwir=source_is_lwir,
-                parallax_h=self.parallax_h,
-                parallax_v=self.parallax_v,
+                parallax_h=effective_h,
+                parallax_v=effective_v,
             )
             return homography
         except Exception as e:
@@ -519,6 +523,15 @@ class OverlayOrchestrator(QObject):
             self._aligned_cache = None
             self.invalidate()
 
+    def set_apply_parallax_correction(self, enabled: bool) -> None:
+        """Enable or disable additive parallax correction without disabling calibration reprojection."""
+        enabled = bool(enabled)
+        if enabled != self.apply_parallax_correction:
+            self.apply_parallax_correction = enabled
+            self._cached_homography = None
+            self._aligned_cache = None
+            self.invalidate()
+
     def set_grid_mode(self, mode: str) -> None:
         """Set grid display mode: 'off', 'thirds', or 'detailed'."""
         if mode not in ("off", "thirds", "detailed"):
@@ -526,6 +539,12 @@ class OverlayOrchestrator(QObject):
         if mode != self.grid_mode:
             self.grid_mode = mode
             self.invalidate()
+
+    def _effective_parallax(self) -> Tuple[float, float]:
+        """Get parallax actually applied in homography computations."""
+        if self.apply_parallax_correction:
+            return self.parallax_h, self.parallax_v
+        return 0.0, 0.0
 
     def set_show_labels(self, show: bool) -> None:
         """Set whether to show label box overlays."""
@@ -664,13 +683,14 @@ class OverlayOrchestrator(QObject):
 
         # Use cached homography if valid (extrinsic data hasn't changed)
         extrinsic_id = id(extrinsic)
+        effective_h, effective_v = self._effective_parallax()
         if (
             self._cached_homography is not None
             and self._cached_extrinsic_id == extrinsic_id
             and self._cached_lwir_calib_size == lwir_calib_size
             and self._cached_vis_calib_size == vis_calib_size
-            and self._cached_parallax_h == self.parallax_h
-            and self._cached_parallax_v == self.parallax_v
+            and self._cached_parallax_h == effective_h
+            and self._cached_parallax_v == effective_v
         ):
             homography = self._cached_homography
             log_debug("Using cached homography", "ALIGN")
@@ -682,16 +702,16 @@ class OverlayOrchestrator(QObject):
                 extrinsic.get("translation") or extrinsic.get("T"),
                 lwir_calib_size,
                 source_is_lwir=True,
-                parallax_h=self.parallax_h,
-                parallax_v=self.parallax_v,
+                parallax_h=effective_h,
+                parallax_v=effective_v,
             )
             if homography is not None:
                 self._cached_homography = homography
                 self._cached_extrinsic_id = extrinsic_id
                 self._cached_lwir_calib_size = lwir_calib_size
                 self._cached_vis_calib_size = vis_calib_size
-                self._cached_parallax_h = self.parallax_h
-                self._cached_parallax_v = self.parallax_v
+                self._cached_parallax_h = effective_h
+                self._cached_parallax_v = effective_v
                 log_debug("Computed and cached new homography", "ALIGN")
 
         if homography is None:
