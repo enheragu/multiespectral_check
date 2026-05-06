@@ -1,4 +1,12 @@
-# Design Philosophy - Multiespectral Dataset Checker
+<p align="center">
+  <img
+    src="../src/frontend/resources/media/banner.png"
+    alt="Multiespectral Check GUI"
+    width="60%"
+  />
+</p>
+
+# Design Philosophy
 
 ## Overview
 Management and validation system for multispectral datasets (LWIR + Visible) with calibration, labeling, and quality analysis tools.

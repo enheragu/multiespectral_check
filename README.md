@@ -1,4 +1,10 @@
-# Multiespectral Check GUI
+<p align="center">
+  <img
+    src="./src/frontend/resources/media/banner.png"
+    alt="Multiespectral Check GUI"
+    width="70%"
+  />
+</p>
 
 GUI for multispectral dataset review, calibration, and labeling for detection tasks.
 
@@ -104,6 +110,7 @@ Note that collections are optional and can be used to group specific sets (all c
 
 - [GUI_FUNCTIONALITIES.md](docs/GUI_FUNCTIONALITIES.md) — Detailed information about the functionalities included in the GUI.
 - [DESIGN_PHILOSOPHY.md](docs/DESIGN_PHILOSOPHY.md) — Design and coding philosophy followed (at least tried to) in this project.
+- [CHANGELOG.md](CHANGELOG.md) — Semantic history of the project and the current version baseline used by the About dialog.
 
 ## 🐛 Bug reports & Contact
 

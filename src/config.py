@@ -9,9 +9,25 @@ from pathlib import Path
 from typing import Tuple
 
 
+APP_NAME = "Multispectral Dataset Viewer"
+APP_VERSION = "0.8.1"
+APP_DESCRIPTION = "GUI for multispectral dataset review, calibration, and labelling."
+SUPPORT_EMAIL = "e.heredia@umh.es"
+REPO_URL = "https://github.com/enheragu/multiespectral_check"
+ISSUES_URL = f"{REPO_URL}/issues"
+
+
 @dataclass(frozen=True)
 class AppConfig:
     """Main application configuration."""
+
+    # Application metadata
+    app_name: str = APP_NAME
+    app_version: str = APP_VERSION
+    app_description: str = APP_DESCRIPTION
+    support_email: str = SUPPORT_EMAIL
+    repo_url: str = REPO_URL
+    issues_url: str = ISSUES_URL
 
     # Dataset defaults
     default_dataset_dir: Path = Path("")
@@ -23,7 +39,7 @@ class AppConfig:
     # Calibration settings
     chessboard_size: Tuple[int, int] = (7, 7)
     chessboard_square_size_mm: float = 60.0  # Physical side length of each chessboard square
-    default_parallax_depth_m: float = 15.0   # Assumed scene depth for auto-parallax (metres)
+    default_parallax_depth_m: float = 10.0   # Assumed scene depth for auto-parallax (metres)
     calibration_prefetch_limit: int = 6
     calibration_toggle_shortcut: str = "Ctrl+Shift+C"
 
@@ -89,6 +105,7 @@ class AppConfig:
     # Cache files
     summary_cache_filename: str = ".summary_cache.yaml"
     labels_summary_cache_filename: str = ".labels_summary_cache.yaml"
+    stereo_alignment_filename: str = ".stereo_alignment.yaml"
 
 
 # Global singleton instance

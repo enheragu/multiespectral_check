@@ -1,4 +1,12 @@
-# GUI Functionalities - Multiespectral Dataset Checker
+<p align="center">
+  <img
+    src="../src/frontend/resources/media/banner.png"
+    alt="Multiespectral Check GUI"
+    width="60%"
+  />
+</p>
+
+# GUI Functionalities
 
 GUI to handle multiespectral image datasets. Each dataset is composed of a workspace with a set of collections (groups of datasets) or single standalone datasets.
 
@@ -157,6 +165,8 @@ When multiple annotations of the same class overlap, the context menu shows comp
 ### File Menu
 
 - Save current status (Ctrl+S)
+- Open Workspace Config…
+- Export… (Ctrl+E) — see [Dataset Export](#dataset-export) below
 - Exit (Ctrl+Q)
 
 ### Workspace Menu
@@ -358,20 +368,28 @@ $$
 \varepsilon = \lVert\mathbf{e}\rVert \cdot s \cdot \left| \frac{1}{d} - \frac{1}{d_0} \right|
 $$
 
-For typical urban scenes (baseline ~5 cm, $f \approx 500$ px) with $d_0 = 30$ m:
+For typical urban scenes (baseline ~5 cm, $f \approx 500$ px) with $d_0 = 10$ m
+(approx. $\lVert\mathbf{e}\rVert \cdot s \approx 24$ px·m):
 
 | Object depth | Residual error |
 |--------------|----------------|
+| 5 m | ~2.4 px |
+| 8 m | ~0.6 px |
 | 15 m | ~0.8 px |
-| 20 m | ~0.4 px |
-| 50 m | ~0.3 px |
-| 100 m | ~0.2 px |
+| 20 m | ~1.2 px |
+| 50 m | ~1.9 px |
+| 100 m | ~2.2 px |
+
+A shorter reference depth tightens the alignment for nearby objects at the
+cost of accuracy at long range. Tune $d_0$ to the depth band that matters
+most for the use case.
 
 ### Parallax Correction in the Application
 
 When any stereo alignment mode is activated for the first time, the system
-auto-computes the parallax correction for a default depth of **30 m** using
-the formula above.  The chessboard square size is read from `config.py`
+auto-computes the parallax correction for a default depth of **10 m**
+(`default_parallax_depth_m` in `config.py`) using the formula above.  The
+chessboard square size is read from `config.py`
 (`chessboard_square_size_mm`, default 60 mm).  If for any reason the value is
 not available, a dialog asks the user to enter it in millimetres.
 
@@ -400,6 +418,78 @@ The same correction is applied to **label projection** between channels, so
 that bounding boxes projected from visible to LWIR (or vice versa) remain
 consistent with the visual alignment.
 
+## Dataset Export
+
+`File → Export…` (Ctrl+E) opens a dialog to write a transformed copy of
+the workspace (or a subset) to disk. The export reuses the same
+calibration, homography and bbox-projection code that powers the live
+GUI — there is no separate math.
+
+### Dialog options
+
+- **Output directory** — parent for the export. The export creates
+  `{workspace_name}_export/` inside the chosen directory and replicates
+  the workspace hierarchy under it.
+- **Datasets to export** — tree with checkboxes. Each leaf is annotated
+  as `✓ calibration` or `no calibration`. Datasets without calibration
+  are skipped automatically when FOV alignment is requested.
+- **Channels** — `LWIR` and/or `Visible`. Selecting only one disables
+  the alignment-related options.
+- **Transforms** (default ON when both channels are selected):
+  - **Undistort (intrinsic)** — `cv2.undistort` per channel using its
+    own K and D.
+  - **FOV alignment (extrinsic)** — warp via the LWIR↔Visible
+    homography so both images share a coordinate frame. Available
+    only when both channels are exported.
+  - **Parallax correction** — adds the depth-based pixel shift to the
+    homography (same value the GUI uses).
+- **Resolution** (when both channels exported):
+  - **Upsample to largest** — common frame is the visible camera; LWIR
+    is warped up to visible resolution.
+  - **Downsample to smallest** — common frame is the LWIR camera;
+    visible is warped down via H⁻¹.
+- **Max-overlap crop**: when alignment is on, both exported channels
+  are cropped to the axis-aligned bounding box of the LWIR FOV
+  projected into the common frame, intersected with the common frame's
+  bounds. This eliminates the black "out-of-FOV" regions and
+  guarantees that every pixel has valid data in both channels. The
+  cropping is always applied — there is no toggle for it.
+- **Labels** — only `manual` + `reviewed` annotations are exported
+  (`auto` are dropped). Each exported image gets the **union** of both
+  channels' labels: native ones pass through, the other channel's are
+  projected into the target frame using the same homography. Output
+  format is the project's existing rich YAML (one file per image at
+  `labels/{lwir,visible}/{base}.yaml`).
+
+### Single-channel export
+
+When only one channel is checked, no image-to-image alignment is done
+(only `undistort` if requested). Labels from the other channel are
+still projected into the exported channel's frame so nothing is lost.
+
+### Images marked for deletion
+
+Bases tagged in `.image_labels.yaml` are excluded automatically.
+Physically delete them via the regular workflow before export if you
+want them gone from disk too.
+
+### Provenance: `.export_info.yaml`
+
+Written at the root of the export. Contains:
+
+- Timestamp of the export
+- Source workspace path
+- Parameters used (channels, transforms, resolution mode, parallax px,
+  label source filter)
+- Per-dataset stats (image counts, label counts, skip reasons)
+- Calibration snapshot of the first dataset processed (intrinsics,
+  distortions, extrinsic R/T, square size, and the final 3×3
+  homography matrix used for the export)
+- `cancelled: true` if the user aborted
+
+This makes the export reproducible by external tools without re-running
+the calibration pipeline.
+
 ## Data Persistence
 
 All data is persistent and stored at dataset level in cache files:
@@ -411,6 +501,7 @@ All data is persistent and stored at dataset level in cache files:
 - **`.calibration_errors_cached.yaml`**: Per-view reprojection errors (hidden cache)
 - **`.workspace_config.yaml`**: Workspace-level settings (default calibration paths, chessboard square size)
 - **`.labels_summary_cache.yaml`**: Label summary statistics for fast report loading
+- **`.stereo_alignment.yaml`**: Write-only export of the active LWIR→Visible homography (including parallax shift) and the parameters that produced it. Refreshed whenever parallax changes or a dataset with calibration is loaded; never read back by the GUI. Provided so external tools can apply the same alignment without re-running the calibration pipeline.
 - **`labels/*.txt`**: YOLO format detection labels
 
 Data ownership follows hierarchy: Dataset produces and stores → Collection aggregates → Workspace coordinates. Collections and workspace store minimal information, mostly consuming aggregated data from below.
