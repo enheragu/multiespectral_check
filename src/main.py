@@ -45,6 +45,17 @@ def main() -> int:
     atexit.register(_on_shutdown)
 
     log_info("===== STARTUP BEGIN =====", "APP")
+    try:
+        import subprocess
+        _commit = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL, text=True,
+            cwd=Path(__file__).parent,
+        ).strip()
+    except Exception:
+        _commit = ""
+    _version_line = f"{APP_NAME} v{APP_VERSION}" + (f" ({_commit})" if _commit else "")
+    log_info(_version_line, "APP")
     log_info("Initializing Qt application...", "APP")
 
     start = time.perf_counter()
