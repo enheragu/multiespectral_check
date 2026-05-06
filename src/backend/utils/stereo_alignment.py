@@ -91,7 +91,7 @@ def compute_auto_parallax(
     target_matrix: Dict[str, Any],
     translation: Dict[str, Any],
     square_size_mm: float,
-    depth_m: float = 30.0,
+    depth_m: float = 10.0,
 ) -> float:
     """Compute the parallax correction for a given scene depth.
 
@@ -120,7 +120,7 @@ def compute_auto_parallax(
         target_matrix: Target camera intrinsic matrix (visible).
         translation:   Extrinsic translation vector T (3×1, in square units).
         square_size_mm: Chessboard square side length in **millimetres**.
-        depth_m:        Representative scene depth in **metres** (default 30 m).
+        depth_m:        Representative scene depth in **metres** (default 10 m).
 
     Returns:
         Tuple ``(parallax_h, parallax_v)`` — horizontal and vertical

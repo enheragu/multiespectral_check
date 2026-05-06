@@ -3,6 +3,8 @@
 Defines widgets, menus, and placeholders the application wires into runtime controllers.
 """
 
+from pathlib import Path
+
 from PyQt6 import QtCore, QtGui, QtWidgets
 from frontend.widgets import style
 
@@ -20,6 +22,24 @@ class Ui_MainWindow(object):
         self.tab_widget = QtWidgets.QTabWidget(self.centralwidget)
         self.tab_widget.setObjectName("tab_widget")
         self.main_layout.addWidget(self.tab_widget)
+
+        logo_path = Path(__file__).resolve().parent / "resources" / "media" / "logo.ico"
+        logo_pixmap = QtGui.QPixmap(str(logo_path))
+        logo_corner = QtWidgets.QLabel(self.tab_widget)
+        logo_corner.setObjectName("logo_corner")
+        logo_corner.setFixedSize(24, 24)
+        logo_corner.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        logo_corner.setStyleSheet("background: transparent; margin: 0; padding: 0;")
+        if not logo_pixmap.isNull():
+            logo_corner.setPixmap(
+                logo_pixmap.scaled(
+                    20,
+                    20,
+                    QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                    QtCore.Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+        self.tab_widget.setCornerWidget(logo_corner, QtCore.Qt.Corner.TopRightCorner)
 
         # Workspace tab (embedded workspace view)
         self.tab_workspace = QtWidgets.QWidget()
@@ -245,6 +265,8 @@ class Ui_MainWindow(object):
         self.action_save_status = QtGui.QAction("Save current status", MainWindow)
         self.action_save_status.setShortcut(QtGui.QKeySequence("Ctrl+S"))
         self.action_open_workspace_config = QtGui.QAction("Open Workspace Config…", MainWindow)
+        self.action_export_dataset = QtGui.QAction("Export…", MainWindow)
+        self.action_export_dataset.setShortcut(QtGui.QKeySequence("Ctrl+E"))
         self.action_run_duplicate_scan = QtGui.QAction("Run duplicate sweep", MainWindow)
         self.action_run_pattern_scan = QtGui.QAction("Run pattern sweep", MainWindow)
         self.action_delete_selected = QtGui.QAction("Delete selected pairs", MainWindow)
@@ -350,6 +372,7 @@ class Ui_MainWindow(object):
         self.action_run_calibration = QtGui.QAction("Detect chessboards", MainWindow)
         self.action_show_help = QtGui.QAction("See help", MainWindow)
         self.action_show_help.setShortcut(QtGui.QKeySequence("Ctrl+H"))
+        self.action_about = QtGui.QAction("About…", MainWindow)
         self.action_label_config_model = QtGui.QAction("Configure model…", MainWindow)
         self.action_label_config_labels = QtGui.QAction("Configure labels YAML…", MainWindow)
         self.action_label_reload_config = QtGui.QAction("Reload labels config from source", MainWindow)
@@ -403,18 +426,31 @@ class Ui_MainWindow(object):
         self.action_exit = QtGui.QAction("Exit", MainWindow)
         self.action_exit.setShortcut(QtGui.QKeySequence("Ctrl+Q"))
         qt_style = MainWindow.style()
+        self.action_set_workspace.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DirOpenIcon))
+        self.action_check_datasets.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_BrowserReload))
         self.action_load_dataset.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogOpenButton))
         self.action_load_recent.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogOpenButton))
         self.action_save_status.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogSaveButton))
+        self.action_open_workspace_config.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileIcon))
+        self.action_export_dataset.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ArrowUp))
         self.action_exit.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogCloseButton))
         self.action_delete_selected.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_TrashIcon))
         self.action_restore_images.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_BrowserReload))
         self.action_reset_dataset.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning))
         self.action_show_help.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogHelpButton))
+        self.action_about.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MessageBoxInformation))
         self.action_run_duplicate_scan.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay))
         self.action_run_quality_scan.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay))
         self.action_run_pattern_scan.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay))
         self.action_clear_empty_datasets.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_TrashIcon))
+        self.action_import_calibration.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogOpenButton))
+        self.action_calibration_check.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogDetailedView))
+        self.action_label_config_model.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileIcon))
+        self.action_label_config_labels.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogOpenButton))
+        self.action_label_reload_config.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_BrowserReload))
+        self.action_label_current.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay))
+        self.action_label_dataset.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay))
+        self.action_label_clear_current.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogDiscardButton))
         self.action_label_report.setIcon(qt_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogDetailedView))
 
         # Delete action icons
@@ -452,6 +488,7 @@ class Ui_MainWindow(object):
         self.menu_file.addAction(self.action_save_status)
         self.menu_file.addSeparator()
         self.menu_file.addAction(self.action_open_workspace_config)
+        self.menu_file.addAction(self.action_export_dataset)
         self.menu_file.addSeparator()
         self.menu_file.addAction(self.action_exit)
 
@@ -574,6 +611,7 @@ class Ui_MainWindow(object):
         self.menu_labelling.addSeparator()
         self.menu_labelling.addAction(self.action_label_report)
         self.menu_help.addAction(self.action_show_help)
+        self.menu_help.addAction(self.action_about)
         self.menubar.addAction(self.menu_file.menuAction())
         self.menubar.addAction(self.menu_view.menuAction())
         self.menubar.addAction(self.menu_dataset.menuAction())

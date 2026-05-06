@@ -3,11 +3,12 @@ from __future__ import annotations
 
 from typing import Iterable, Sequence, Tuple
 
+from config import SUPPORT_EMAIL
+
 DELETE_BUTTON_TEXT = "Delete selected"
 RESTORE_ACTION_TEXT = "Restore from trash"
 STATUS_SELECT_DATASET = "Select a dataset"
 STATUS_NO_IMAGES = "No images"
-SUPPORT_EMAIL = "e.heredia@umh.es"
 HELP_OVERVIEW = (
     "Multispectral Check lets you compare LWIR/visible pairs, tag calibration images, "
     "and keep datasets tidy while detections and duplicate sweeps run in the background.\n\n"

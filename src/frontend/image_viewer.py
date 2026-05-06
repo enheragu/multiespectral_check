@@ -19,6 +19,8 @@ from PyQt6.QtWidgets import (QApplication, QComboBox, QCompleter, QDialog,
                              QMessageBox, QStyle, QVBoxLayout)
 from tqdm import tqdm
 
+from frontend.resources import icon_path
+
 # Backend services (no Qt dependencies)
 from backend.services import (CalibrationController, CalibrationDebugger,
                               CalibrationExtrinsicSolver, CalibrationRefiner,
@@ -74,7 +76,7 @@ from frontend.widgets import style
 from frontend.widgets.calibration_check_dialog import CalibrationCheckDialog
 from frontend.widgets.calibration_outliers_dialog import \
     CalibrationOutliersDialog
-from frontend.widgets.help_dialog import HelpDialog
+from frontend.widgets.help_dialog import AboutDialog, HelpDialog
 from frontend.widgets.label_report_dialog import LabelReportDialog
 from frontend.widgets.progress_panel import ProgressPanel
 from frontend.widgets.stats_panel import StatsPanel
@@ -694,6 +696,8 @@ class ImageViewer(QMainWindow):
             self.ui.action_reset_parallax.triggered.connect(self._reset_parallax)
         if hasattr(self.ui, "action_open_workspace_config"):
             self.ui.action_open_workspace_config.triggered.connect(self._open_workspace_config)
+        if hasattr(self.ui, "action_export_dataset"):
+            self.ui.action_export_dataset.triggered.connect(self._open_export_dialog)
 
         # Corner display submenu actions - use triggered (QActionGroup handles exclusivity)
         if hasattr(self.ui, "action_corners_original"):
@@ -750,8 +754,11 @@ class ImageViewer(QMainWindow):
             self.ui.action_label_report.triggered.connect(self._handle_label_report)
         if hasattr(self.ui, "action_show_help"):
             self.ui.action_show_help.triggered.connect(self.show_help_dialog)
+        if hasattr(self.ui, "action_about"):
+            self.ui.action_about.triggered.connect(self.show_about_dialog)
         if hasattr(self.ui, "action_exit"):
             self.ui.action_exit.triggered.connect(self.close)
+
 
     def _setup_image_views(self) -> None:
         old_lwir = getattr(self.ui, "label_lwir", None)
@@ -2054,6 +2061,9 @@ class ImageViewer(QMainWindow):
                 if not current_base or not self.filter_controller.filter_accepts_base(current_base):
                     self.current_index = first_match
         self.load_current()
+
+        # Refresh the external stereo alignment export now that calibration is loaded.
+        self._export_stereo_alignment_snapshot()
 
     def _on_save_status_changed(self, status: str) -> None:
         """Show save status in status bar."""
@@ -4702,6 +4712,8 @@ class ImageViewer(QMainWindow):
         if base:
             self.load_image_pair(base)
 
+        self._export_stereo_alignment_snapshot()
+
         self._safe_status_message(
             f"Parallax: h={self._parallax_h:+.0f} v={self._parallax_v:+.0f} px  (Shift+WASD)",
             3000,
@@ -4716,9 +4728,11 @@ class ImageViewer(QMainWindow):
         self.session.cache_service.set_preference("parallax_v", 0.0)
         self.invalidate_overlay_cache()
 
-        # Re-run auto-parallax if alignment is active
+        # Re-run auto-parallax if alignment is active (auto path also re-exports)
         if self._align_mode != "disabled":
             self._try_auto_parallax()
+        else:
+            self._export_stereo_alignment_snapshot()
 
         base = self._current_base()
         if base:
@@ -4726,6 +4740,15 @@ class ImageViewer(QMainWindow):
 
         if self._parallax_h == 0.0 and self._parallax_v == 0.0:
             self._safe_status_message("Parallax reset to 0", 2000)
+
+    def _open_export_dialog(self) -> None:
+        """Open the dataset export dialog."""
+        if not self.workspace_dir:
+            self._safe_status_message("Open a workspace before exporting", 3000)
+            return
+        from frontend.widgets.export_dialog import ExportDialog
+        dialog = ExportDialog(Path(self.workspace_dir), parent=self)
+        dialog.exec()
 
     def _open_workspace_config(self) -> None:
         """Open the workspace config YAML file in the system default editor."""
@@ -4758,7 +4781,7 @@ class ImageViewer(QMainWindow):
             or user input dialog)
 
         If square_size is not known, prompts the user with an input dialog.
-        Computes parallax for a default depth of 30 m and applies it.
+        Computes parallax for a default depth of 10 m and applies it.
         """
         from backend.utils.stereo_alignment import compute_auto_parallax
         from backend.services.workspace_config import get_workspace_config_service
@@ -4835,6 +4858,39 @@ class ImageViewer(QMainWindow):
                 f"Fine-tune: Shift+WASD",
                 5000,
             )
+
+        self._export_stereo_alignment_snapshot()
+
+    def _export_stereo_alignment_snapshot(self) -> None:
+        """Dump current stereo alignment to .stereo_alignment.yaml (write-only).
+
+        Pulls calibration + parallax from the active session and overwrites
+        the dataset-level export. Skips silently if calibration is missing
+        or no dataset is loaded. The GUI never reads this file back.
+        """
+        dataset_path = self.session.dataset_path
+        if not dataset_path:
+            return
+
+        from backend.services.stereo_alignment_export import export_stereo_alignment
+        from config import get_config as _get_config
+
+        cd = self.state.cache_data
+        app_cfg = _get_config()
+        square_size = cd.get("_square_size_mm") or app_cfg.chessboard_square_size_mm
+
+        export_stereo_alignment(
+            dataset_path,
+            parallax_h=self._parallax_h,
+            parallax_v=self._parallax_v,
+            apply_parallax=self._apply_parallax_correction,
+            reference_depth_m=app_cfg.default_parallax_depth_m,
+            square_size_mm=square_size,
+            lwir_matrices=cd.get("_matrices", {}).get("lwir"),
+            vis_matrices=cd.get("_matrices", {}).get("visible"),
+            extrinsic=cd.get("_extrinsic"),
+            source_dataset=dataset_path.name,
+        )
 
     def _set_corner_display_mode(self, mode: str) -> None:
         """Set corner display mode.
@@ -4920,6 +4976,8 @@ class ImageViewer(QMainWindow):
         base = self._current_base()
         if base:
             self.load_image_pair(base)
+
+        self._export_stereo_alignment_snapshot()
 
         status = "enabled" if enabled else "disabled"
         self._safe_status_message(f"Parallax correction: {status}", 2000)
@@ -5039,6 +5097,10 @@ class ImageViewer(QMainWindow):
 
     def show_help_dialog(self):
         dialog = HelpDialog(self)
+        dialog.exec()
+
+    def show_about_dialog(self):
+        dialog = AboutDialog(self)
         dialog.exec()
 
     def _show_empty_state(self):

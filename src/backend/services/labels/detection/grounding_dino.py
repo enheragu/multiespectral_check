@@ -424,7 +424,7 @@ class GroundingDinoDetector(DetectionModel):
             f"Loading Grounding DINO: {self.model_id} on {device}", "DETECTION"
         )
 
-        self._processor = AutoProcessor.from_pretrained(self.model_id)
+        self._processor = AutoProcessor.from_pretrained(self.model_id, use_fast=False)
         self._model = AutoModel.from_pretrained(self.model_id).to(device)
 
         short_name = self.KNOWN_MODELS.get(self.model_id, self.model_id)

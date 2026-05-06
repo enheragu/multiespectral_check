@@ -7,8 +7,11 @@ import os
 import sys
 import time
 import atexit
+from pathlib import Path
 
 from PyQt6.QtWidgets import QApplication, QStyleFactory
+from PyQt6.QtGui import QIcon
+from config import APP_NAME, APP_VERSION
 from common.log_utils import log_debug, log_info, log_perf
 
 
@@ -51,6 +54,17 @@ def main() -> int:
 
     log_info("Applying Qt style...", "APP")
     _apply_style(app)
+    # Set application name and icon (taskbar / window manager)
+    # Use a readable application name so hover shows it instead of the script name
+    try:
+        app.setApplicationName(APP_NAME)
+        app.setApplicationVersion(APP_VERSION)
+    except Exception:
+        pass
+    try:
+        app.setWindowIcon(QIcon(str(Path(__file__).resolve().parent / "frontend" / "resources" / "media" / "logo.ico")))
+    except Exception:
+        pass
     after_style = time.perf_counter()
     log_perf(f"Style applied {after_style - after_app:.3f}s")
 
