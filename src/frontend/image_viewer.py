@@ -4434,16 +4434,41 @@ class ImageViewer(QMainWindow):
             self._safe_status_message("Computing stereo calibration…", 4000)
 
     def _calibration_intrinsic_path(self) -> Optional[Path]:
-        if not self.session.dataset_path:
-            return None
         config = get_config()
-        return self.session.dataset_path / config.calibration_intrinsic_filename
+        if self.session.dataset_path:
+            local = self.session.dataset_path / config.calibration_intrinsic_filename
+            if local.exists():
+                return local
+        default_calib = get_workspace_config_service().get_default_calibration()
+        if default_calib and default_calib.intrinsic_path:
+            return default_calib.intrinsic_path
+        return self.session.dataset_path / config.calibration_intrinsic_filename if self.session.dataset_path else None
 
     def _calibration_extrinsic_path(self) -> Optional[Path]:
-        if not self.session.dataset_path:
-            return None
         config = get_config()
-        return self.session.dataset_path / config.calibration_extrinsic_filename
+        if self.session.dataset_path:
+            local = self.session.dataset_path / config.calibration_extrinsic_filename
+            if local.exists():
+                return local
+        default_calib = get_workspace_config_service().get_default_calibration()
+        if default_calib and default_calib.extrinsic_path:
+            return default_calib.extrinsic_path
+        return self.session.dataset_path / config.calibration_extrinsic_filename if self.session.dataset_path else None
+
+    def _calibration_coverage_dataset_path(self) -> Optional[Path]:
+        """Return dataset path where chessboard corner files are stored.
+
+        Prefers local calibration; falls back to workspace default's source dataset.
+        """
+        config = get_config()
+        if self.session.dataset_path:
+            local = self.session.dataset_path / config.calibration_intrinsic_filename
+            if local.exists():
+                return self.session.dataset_path
+        default_calib = get_workspace_config_service().get_default_calibration()
+        if default_calib and default_calib.intrinsic_path and default_calib.intrinsic_path.exists():
+            return default_calib.intrinsic_path.parent
+        return self.session.dataset_path
 
     def _get_dataset_paths_for_calibration_dialog(self) -> Optional[List[str]]:
         """Get dataset paths for calibration dialog, showing children for collections."""
@@ -4468,7 +4493,7 @@ class ImageViewer(QMainWindow):
             intrinsic_path=self._calibration_intrinsic_path(),
             extrinsic_path=self._calibration_extrinsic_path(),
             dataset_paths=self._get_dataset_paths_for_calibration_dialog(),
-            dataset_path=self.session.dataset_path,
+            dataset_path=self._calibration_coverage_dataset_path(),
         )
         dialog.setModal(False)
         dialog.setWindowModality(Qt.WindowModality.NonModal)
@@ -4488,7 +4513,7 @@ class ImageViewer(QMainWindow):
             intrinsic_path=self._calibration_intrinsic_path(),
             extrinsic_path=self._calibration_extrinsic_path(),
             dataset_paths=self._get_dataset_paths_for_calibration_dialog(),
-            dataset_path=self.session.dataset_path,
+            dataset_path=self._calibration_coverage_dataset_path(),
         )
 
     # ------------------------------------------------------------------

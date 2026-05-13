@@ -1,6 +1,7 @@
 """Simple dialog to inspect calibration matrices and residual errors."""
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -52,7 +53,7 @@ class CalibrationCheckDialog(QDialog):
         self.dataset_path = dataset_path
         self.file_metadata = self._load_file_metadata()
         self.setWindowTitle("Calibration report")
-        self.setMinimumWidth(720)
+        self.setMinimumWidth(880)
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -90,6 +91,12 @@ class CalibrationCheckDialog(QDialog):
             card_layout.addWidget(self._section_heading("Chessboard coverage:"))
             card_layout.addWidget(coverage_widget)
 
+        # Distortion map
+        distortion_widget = self._distortion_map_group()
+        if distortion_widget:
+            card_layout.addWidget(self._section_heading("Distortion map:"))
+            card_layout.addWidget(distortion_widget)
+
         card_layout.addStretch(1)
 
         # Add button to open calibration files (both if available)
@@ -107,7 +114,7 @@ class CalibrationCheckDialog(QDialog):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         layout.addWidget(scroll)
-        self.resize(max(self.minimumWidth(), 900), 720)
+        self.resize(max(self.minimumWidth(), 1060), 780)
 
     def refresh_data(
         self,
@@ -345,6 +352,12 @@ class CalibrationCheckDialog(QDialog):
         distortion = QLabel(self._format_vector(payload.get("distortion")))
         distortion.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         form.addRow(self._field_label("Distortion"), distortion)
+        fov_text = self._format_fov(payload.get("camera_matrix"), payload.get("image_size"))
+        if fov_text:
+            fov_label = QLabel(fov_text)
+            fov_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            fov_label.setStyleSheet("font-family: monospace;")
+            form.addRow(self._field_label("FOV (H × V)"), fov_label)
         layout.addLayout(form)
         return panel
 
@@ -375,7 +388,7 @@ class CalibrationCheckDialog(QDialog):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(12)
 
-        chart_w, chart_h = 340, 280
+        chart_w, chart_h = 430, 310
 
         # LWIR chart
         lwir_label = QLabel()
@@ -397,6 +410,38 @@ class CalibrationCheckDialog(QDialog):
 
         return panel
 
+    def _distortion_map_group(self) -> Optional[QWidget]:
+        """Build side-by-side distortion warp-grid charts (LWIR + Visible)."""
+        lwir_payload = self.matrices.get("lwir")
+        vis_payload = self.matrices.get("visible")
+        if not lwir_payload and not vis_payload:
+            return None
+
+        panel = QWidget()
+        panel.setObjectName("distortion_map_panel")
+        panel.setStyleSheet(style.panel_body_style("distortion_map_panel"))
+        layout = QHBoxLayout(panel)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(12)
+
+        chart_w, chart_h = 430, 310
+
+        lwir_label = QLabel()
+        lwir_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lwir_label.setPixmap(
+            _render_distortion_map(lwir_payload, chart_w, chart_h, "LWIR", QColor(220, 60, 60))
+        )
+        layout.addWidget(lwir_label)
+
+        vis_label = QLabel()
+        vis_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        vis_label.setPixmap(
+            _render_distortion_map(vis_payload, chart_w, chart_h, "Visible", QColor(60, 120, 220))
+        )
+        layout.addWidget(vis_label)
+
+        return panel
+
     def _field_label(self, text: str) -> QLabel:
         label = QLabel(text)
         label.setStyleSheet("font-weight: 700; color: #111;")
@@ -413,6 +458,19 @@ class CalibrationCheckDialog(QDialog):
         if not vector:
             return "—"
         return "[ " + ", ".join(f"{value:.5f}" for value in vector) + " ]"
+
+    def _format_fov(self, camera_matrix, image_size) -> str:
+        if not camera_matrix or not image_size or len(image_size) < 2:
+            return ""
+        try:
+            fx = float(camera_matrix[0][0])
+            fy = float(camera_matrix[1][1])
+            w, h = float(image_size[0]), float(image_size[1])
+            hfov = math.degrees(2 * math.atan(w / (2 * fx)))
+            vfov = math.degrees(2 * math.atan(h / (2 * fy)))
+            return f"{hfov:.1f}° × {vfov:.1f}°   (fx={fx:.0f} px,  fy={fy:.0f} px)"
+        except Exception:  # noqa: BLE001
+            return ""
 
     def _format_per_pair_errors(self, rows) -> str:
         if not rows:
@@ -651,4 +709,157 @@ def _render_chessboard_coverage(
     p.drawRect(QRectF(ml, mt, pw, ph))
 
     p.end()
+    return pix
+
+
+# ======================================================================
+# Distortion map chart helpers
+# ======================================================================
+
+def _render_distortion_map(
+    payload: Optional[dict],
+    width: int,
+    height: int,
+    title: str,
+    main_color: QColor,
+) -> QPixmap:
+    """Render a warp-grid distortion map for a single camera channel.
+
+    Draws a regular undistorted grid in light gray and the same grid after
+    applying the lens distortion model in color, so barrel/pincushion is
+    immediately visible.
+    """
+    pix = QPixmap(width * _COV_DPR, height * _COV_DPR)
+    pix.setDevicePixelRatio(_COV_DPR)
+    pix.fill(_COV_BG)
+
+    painter = QPainter(pix)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    ml, mb, mt, mr = _COV_M
+    pw = width - ml - mr
+    ph = height - mt - mb
+
+    # Title
+    f = painter.font()
+    f.setPixelSize(_COV_TITLE_FONT_SIZE)
+    f.setBold(True)
+    painter.setFont(f)
+    painter.setPen(_COV_AXIS_COLOR)
+    painter.drawText(
+        QRectF(0, 2, width, mt - 2),
+        Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom,
+        title,
+    )
+
+    painter.fillRect(QRectF(ml, mt, pw, ph), QColor("#f0f0f0"))
+
+    if not payload:
+        painter.setPen(QPen(QColor("#999"), 1))
+        painter.drawRect(QRectF(ml, mt, pw, ph))
+        painter.end()
+        return pix
+
+    cam_mat = payload.get("camera_matrix")
+    dist_coeffs = payload.get("distortion")
+    img_size = payload.get("image_size")
+    if not cam_mat or not dist_coeffs or not img_size or len(img_size) < 2:
+        painter.setPen(QPen(QColor("#999"), 1))
+        painter.drawRect(QRectF(ml, mt, pw, ph))
+        painter.end()
+        return pix
+
+    fx = float(cam_mat[0][0])
+    fy = float(cam_mat[1][1])
+    cx = float(cam_mat[0][2])
+    cy = float(cam_mat[1][2])
+    img_w = float(img_size[0])
+    img_h = float(img_size[1])
+
+    k1 = float(dist_coeffs[0]) if len(dist_coeffs) > 0 else 0.0
+    k2 = float(dist_coeffs[1]) if len(dist_coeffs) > 1 else 0.0
+    td1 = float(dist_coeffs[2]) if len(dist_coeffs) > 2 else 0.0  # p1 tangential
+    td2 = float(dist_coeffs[3]) if len(dist_coeffs) > 3 else 0.0  # p2 tangential
+    k3 = float(dist_coeffs[4]) if len(dist_coeffs) > 4 else 0.0
+
+    def to_canvas(px: float, py: float):
+        return ml + (px / img_w) * pw, mt + (py / img_h) * ph
+
+    def apply_distortion(px: float, py: float):
+        xn = (px - cx) / fx
+        yn = (py - cy) / fy
+        r2 = xn * xn + yn * yn
+        r4 = r2 * r2
+        r6 = r4 * r2
+        radial = 1.0 + k1 * r2 + k2 * r4 + k3 * r6
+        xd = xn * radial + 2.0 * td1 * xn * yn + td2 * (r2 + 2.0 * xn * xn)
+        yd = yn * radial + td1 * (r2 + 2.0 * yn * yn) + 2.0 * td2 * xn * yn
+        return xd * fx + cx, yd * fy + cy
+
+    N_GRID = 8   # grid lines per axis
+    N_SAMP = 40  # sample points per grid line for smooth curves
+
+    # Undistorted reference grid (light gray)
+    painter.setPen(QPen(QColor(190, 190, 190), 0.8))
+    for i in range(N_GRID + 1):
+        y = img_h * i / N_GRID
+        prev = to_canvas(0.0, y)
+        for j in range(1, N_SAMP + 1):
+            curr = to_canvas(img_w * j / N_SAMP, y)
+            painter.drawLine(QPointF(*prev), QPointF(*curr))
+            prev = curr
+
+        x = img_w * i / N_GRID
+        prev = to_canvas(x, 0.0)
+        for j in range(1, N_SAMP + 1):
+            curr = to_canvas(x, img_h * j / N_SAMP)
+            painter.drawLine(QPointF(*prev), QPointF(*curr))
+            prev = curr
+
+    # Distorted grid (colored)
+    painter.setPen(QPen(main_color, 1.2))
+    for i in range(N_GRID + 1):
+        y = img_h * i / N_GRID
+        prev = to_canvas(*apply_distortion(0.0, y))
+        for j in range(1, N_SAMP + 1):
+            curr = to_canvas(*apply_distortion(img_w * j / N_SAMP, y))
+            painter.drawLine(QPointF(*prev), QPointF(*curr))
+            prev = curr
+
+        x = img_w * i / N_GRID
+        prev = to_canvas(*apply_distortion(x, 0.0))
+        for j in range(1, N_SAMP + 1):
+            curr = to_canvas(*apply_distortion(x, img_h * j / N_SAMP))
+            painter.drawLine(QPointF(*prev), QPointF(*curr))
+            prev = curr
+
+    # Border
+    painter.setPen(QPen(QColor("#999"), 1))
+    painter.drawRect(QRectF(ml, mt, pw, ph))
+
+    # Distortion type and magnitude label
+    corner_r2 = ((img_w / 2.0) / fx) ** 2 + ((img_h / 2.0) / fy) ** 2
+    corner_r4 = corner_r2 ** 2
+    corner_r6 = corner_r4 * corner_r2
+    max_pct = abs(k1 * corner_r2 + k2 * corner_r4 + k3 * corner_r6) * 100.0
+    dist_type = "barrel" if k1 > 0 else "pincushion"
+    f2 = painter.font()
+    f2.setPixelSize(_COV_FONT_SIZE)
+    f2.setBold(False)
+    painter.setFont(f2)
+    painter.setPen(_COV_AXIS_COLOR)
+    painter.drawText(
+        QRectF(ml + 4, mt + 4, pw - 4, 16),
+        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+        f"{dist_type}  (radial {max_pct:.1f}% at corner)",
+    )
+
+    # Legend
+    painter.drawText(
+        QRectF(ml, mt + ph + 4, pw, mb - 4),
+        Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+        "gray = ideal  |  color = distorted",
+    )
+
+    painter.end()
     return pix

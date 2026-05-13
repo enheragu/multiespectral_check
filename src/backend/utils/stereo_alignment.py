@@ -911,6 +911,40 @@ def _compute_optimal_output_size(
     return (out_w, out_h, adjusted)
 
 
+def _project_lwir_fov_to_display(
+    homography: Any,
+    lwir_calib_size: Tuple[int, int],
+    vis_calib_size: Tuple[int, int],
+    vis_w: int,
+    vis_h: int,
+) -> Any:
+    """Project the full LWIR sensor boundary through H into visible display coordinates.
+
+    H maps raw LWIR calibration pixels → raw visible calibration pixels.
+    The result is the 4 corners of the LWIR FOV expressed in the visible display pixel space.
+    Using the full calib size (not the undistorted crop_rect) is intentional — H operates
+    on raw coordinates, and the crop_rect is in undistorted space.
+
+    Returns a (4, 2) float32 array ordered [TL, TR, BR, BL].
+    """
+    calib_w, calib_h = float(lwir_calib_size[0]), float(lwir_calib_size[1])
+    lwir_corners_calib = np.array(
+        [[0, 0], [calib_w, 0], [calib_w, calib_h], [0, calib_h]],
+        dtype=np.float32,
+    ).reshape(-1, 1, 2)
+
+    fov_corners_calib = cv2.perspectiveTransform(
+        lwir_corners_calib, homography.astype(np.float32)
+    ).reshape(-1, 2)
+
+    vis_scale_x = vis_w / vis_calib_size[0]
+    vis_scale_y = vis_h / vis_calib_size[1]
+    fov_corners_display = fov_corners_calib.copy()
+    fov_corners_display[:, 0] *= vis_scale_x
+    fov_corners_display[:, 1] *= vis_scale_y
+    return fov_corners_display
+
+
 def align_fov_with_padding(
     lwir_pixmap: QPixmap,
     vis_pixmap: QPixmap,
@@ -969,36 +1003,9 @@ def align_fov_with_padding(
         vis_scale_x = vis_w / vis_calib_size[0]
         vis_scale_y = vis_h / vis_calib_size[1]
 
-        # LWIR corners in calibration coordinates (use cropped region)
-        # Adjust for crop offset
-        orig_lwir_w, orig_lwir_h = lwir_arr.shape[1], lwir_arr.shape[0]
-        lwir_scale_x = orig_lwir_w / lwir_calib_size[0]
-        lwir_scale_y = orig_lwir_h / lwir_calib_size[1]
-
-        # Crop rect in calibration coords
-        crop_x_calib = crop_rect[0] / lwir_scale_x
-        crop_y_calib = crop_rect[1] / lwir_scale_y
-        crop_w_calib = crop_rect[2] / lwir_scale_x
-        crop_h_calib = crop_rect[3] / lwir_scale_y
-
-        lwir_corners_calib = np.array([
-            [crop_x_calib, crop_y_calib],
-            [crop_x_calib + crop_w_calib, crop_y_calib],
-            [crop_x_calib + crop_w_calib, crop_y_calib + crop_h_calib],
-            [crop_x_calib, crop_y_calib + crop_h_calib],
-        ], dtype=np.float32).reshape(-1, 1, 2)
-
-        # Map LWIR corners to visible coordinates (in calibration space)
-        fov_corners_calib = cv2.perspectiveTransform(
-            lwir_corners_calib,
-            homography.astype(np.float32)
-        ).reshape(-1, 2)
-
-        # Convert FOV corners to visible display coordinates
-        fov_corners_display = fov_corners_calib.copy()
-        fov_corners_display[:, 0] *= vis_scale_x
-        fov_corners_display[:, 1] *= vis_scale_y
-
+        fov_corners_display = _project_lwir_fov_to_display(
+            homography, lwir_calib_size, vis_calib_size, vis_w, vis_h
+        )
         log_debug(f"align_fov_with_padding: FOV corners in vis display: {fov_corners_display.tolist()}", "ALIGN")
 
         # Calculate rotation angle from top edge of FOV
@@ -1157,20 +1164,7 @@ def align_fov_with_padding(
         log_debug(f"align_fov_with_padding: Vis polygon constraints: left_x={left_x_constraint:.0f}, right_x={right_x_constraint:.0f}", "ALIGN")
         log_debug(f"align_fov_with_padding: Max Overlap ({max_overlap_x1},{max_overlap_y1}) {max_overlap_w}x{max_overlap_h}", "ALIGN")
 
-        # Draw yellow FOV rectangle on visible
-        cv2.rectangle(
-            vis_result,
-            (fov_bbox_x1, fov_bbox_y1),
-            (fov_bbox_x2, fov_bbox_y2),
-            (0, 255, 255), 2  # Yellow in BGR
-        )
-        cv2.putText(
-            vis_result, "FOV Focus",
-            (fov_bbox_x1 + 5, fov_bbox_y1 + 20),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 1
-        )
-
-        # Draw cyan Max Overlap rectangle on visible
+        # Draw cyan Max Overlap rectangle first (yellow FOV drawn on top)
         cv2.rectangle(
             vis_result,
             (max_overlap_x1, max_overlap_y1),
@@ -1181,6 +1175,19 @@ def align_fov_with_padding(
             vis_result, "Max Overlap",
             (max_overlap_x1 + 5, max_overlap_y1 + 40),
             cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 1
+        )
+
+        # Draw yellow FOV rectangle on top (thickness 3 so it shows through cyan when they coincide)
+        cv2.rectangle(
+            vis_result,
+            (fov_bbox_x1, fov_bbox_y1),
+            (fov_bbox_x2, fov_bbox_y2),
+            (0, 255, 255), 3  # Yellow in BGR
+        )
+        cv2.putText(
+            vis_result, "FOV Focus",
+            (fov_bbox_x1 + 5, fov_bbox_y1 + 20),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 1
         )
 
         # === LWIR image: scale FULL image (with black borders) to match FOV size ===
@@ -1244,20 +1251,7 @@ def align_fov_with_padding(
         outside_valid = (lwir_full_mask == 255) & (valid_mask == 0)
         lwir_result[outside_valid] = (lwir_result[outside_valid] * 0.4).astype(np.uint8)
 
-        # Draw yellow FOV rectangle on LWIR (same position as visible)
-        cv2.rectangle(
-            lwir_result,
-            (fov_bbox_x1, fov_bbox_y1),
-            (fov_bbox_x2, fov_bbox_y2),
-            (0, 255, 255), 2  # Yellow in BGR
-        )
-        cv2.putText(
-            lwir_result, "FOV Focus",
-            (fov_bbox_x1 + 5, fov_bbox_y1 + 20),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 1
-        )
-
-        # Draw cyan Max Overlap rectangle on LWIR
+        # Draw cyan Max Overlap rectangle first on LWIR (yellow FOV drawn on top)
         cv2.rectangle(
             lwir_result,
             (max_overlap_x1, max_overlap_y1),
@@ -1268,6 +1262,19 @@ def align_fov_with_padding(
             lwir_result, "Max Overlap",
             (max_overlap_x1 + 5, max_overlap_y1 + 40),
             cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 1
+        )
+
+        # Draw yellow FOV rectangle on top on LWIR
+        cv2.rectangle(
+            lwir_result,
+            (fov_bbox_x1, fov_bbox_y1),
+            (fov_bbox_x2, fov_bbox_y2),
+            (0, 255, 255), 3  # Yellow in BGR
+        )
+        cv2.putText(
+            lwir_result, "FOV Focus",
+            (fov_bbox_x1 + 5, fov_bbox_y1 + 20),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 1
         )
 
         # Create transformation object
@@ -1342,39 +1349,9 @@ def align_fov_crop(
         # Get display sizes
         vis_h, vis_w = vis_arr.shape[:2]
 
-        # Scale factors from calibration to display
-        vis_scale_x = vis_w / vis_calib_size[0]
-        vis_scale_y = vis_h / vis_calib_size[1]
-
-        # LWIR dimensions for calibration
-        orig_lwir_w, orig_lwir_h = lwir_arr.shape[1], lwir_arr.shape[0]
-        lwir_scale_x = orig_lwir_w / lwir_calib_size[0]
-        lwir_scale_y = orig_lwir_h / lwir_calib_size[1]
-
-        # Crop rect in calibration coords
-        crop_x_calib = crop_rect[0] / lwir_scale_x
-        crop_y_calib = crop_rect[1] / lwir_scale_y
-        crop_w_calib = crop_rect[2] / lwir_scale_x
-        crop_h_calib = crop_rect[3] / lwir_scale_y
-
-        lwir_corners_calib = np.array([
-            [crop_x_calib, crop_y_calib],
-            [crop_x_calib + crop_w_calib, crop_y_calib],
-            [crop_x_calib + crop_w_calib, crop_y_calib + crop_h_calib],
-            [crop_x_calib, crop_y_calib + crop_h_calib],
-        ], dtype=np.float32).reshape(-1, 1, 2)
-
-        # Map LWIR corners to visible coordinates (in calibration space)
-        fov_corners_calib = cv2.perspectiveTransform(
-            lwir_corners_calib,
-            homography.astype(np.float32)
-        ).reshape(-1, 2)
-
-        # Convert FOV corners to visible display coordinates
-        fov_corners_display = fov_corners_calib.copy()
-        fov_corners_display[:, 0] *= vis_scale_x
-        fov_corners_display[:, 1] *= vis_scale_y
-
+        fov_corners_display = _project_lwir_fov_to_display(
+            homography, lwir_calib_size, vis_calib_size, vis_w, vis_h
+        )
         log_debug(f"align_fov_crop: FOV corners in vis display: {fov_corners_display.tolist()}", "ALIGN")
 
         # Calculate rotation angle from top edge of FOV
@@ -1572,37 +1549,9 @@ def align_max_overlap(
         # Get display sizes
         vis_h, vis_w = vis_arr.shape[:2]
 
-        # Scale factors from calibration to display
-        vis_scale_x = vis_w / vis_calib_size[0]
-        vis_scale_y = vis_h / vis_calib_size[1]
-
-        orig_lwir_w, orig_lwir_h = lwir_arr.shape[1], lwir_arr.shape[0]
-        lwir_scale_x = orig_lwir_w / lwir_calib_size[0]
-        lwir_scale_y = orig_lwir_h / lwir_calib_size[1]
-
-        # LWIR valid region corners in calibration coords
-        crop_x_calib = crop_rect[0] / lwir_scale_x
-        crop_y_calib = crop_rect[1] / lwir_scale_y
-        crop_w_calib = crop_rect[2] / lwir_scale_x
-        crop_h_calib = crop_rect[3] / lwir_scale_y
-
-        lwir_corners_calib = np.array([
-            [crop_x_calib, crop_y_calib],
-            [crop_x_calib + crop_w_calib, crop_y_calib],
-            [crop_x_calib + crop_w_calib, crop_y_calib + crop_h_calib],
-            [crop_x_calib, crop_y_calib + crop_h_calib],
-        ], dtype=np.float32).reshape(-1, 1, 2)
-
-        # Project LWIR corners to visible (FOV Focus)
-        fov_corners_calib = cv2.perspectiveTransform(
-            lwir_corners_calib,
-            homography.astype(np.float32)
-        ).reshape(-1, 2)
-
-        # Convert to visible display coordinates
-        fov_corners_display = fov_corners_calib.copy()
-        fov_corners_display[:, 0] *= vis_scale_x
-        fov_corners_display[:, 1] *= vis_scale_y
+        fov_corners_display = _project_lwir_fov_to_display(
+            homography, lwir_calib_size, vis_calib_size, vis_w, vis_h
+        )
 
         # FOV Focus bounding box
         fov_x1 = int(fov_corners_display[:, 0].min())
