@@ -318,7 +318,7 @@ class Annotation:
         """Serialize to YAML-compatible dict."""
         result: Dict[str, Any] = {
             "class_id": self.class_id,
-            "bbox": list(self.bbox),
+            "bbox": [float(v) for v in self.bbox],
             "source": self.source.value,
         }
         if self.confidence < 1.0:

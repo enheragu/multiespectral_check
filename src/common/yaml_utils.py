@@ -131,16 +131,17 @@ def save_yaml(file_path: Union[str, Path], data: Any, *, sort_keys: bool = False
         True if successful, False on error.
     """
     try:
+        # Serialize to string first so a failed serialization never truncates the file.
+        content = yaml.dump(
+            data,
+            Dumper=CompactDumper,
+            default_flow_style=False,
+            sort_keys=sort_keys,
+            allow_unicode=True,
+            width=5000,  # Prevent line wrapping in flow style
+        )
         with open(file_path, "w", encoding="utf-8") as f:
-            yaml.dump(
-                data,
-                f,
-                Dumper=CompactDumper,
-                default_flow_style=False,
-                sort_keys=sort_keys,
-                allow_unicode=True,
-                width=5000,  # Prevent line wrapping in flow style
-            )
+            f.write(content)
         return True
     except (OSError, yaml.YAMLError):
         return False

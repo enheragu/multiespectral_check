@@ -3176,10 +3176,10 @@ class ImageViewer(QMainWindow):
         chosen = menu.exec(global_pos)
 
         # --- Dispatch accept actions (individual) ---
-        for aa, idx, ann in accept_actions:
+        for aa, _idx, ann in accept_actions:
             if chosen is aa and self.label_service:
-                count = self.label_service.mark_reviewed(base, channel, indices=[idx])
-                if count:
+                success = self.label_service.accept_annotation(base, channel, ann.annotation_id)
+                if success:
                     self.invalidate_overlay_cache(base)
                     self.load_current()
                     self._safe_status_message(f"Accepted label {_display_name(ann)}.", 2000)

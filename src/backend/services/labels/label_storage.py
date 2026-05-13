@@ -182,7 +182,9 @@ class LabelStorage:
             # Build dict with only persistent annotations
             data = labels.to_dict()
             data["annotations"] = [a.to_dict() for a in persistent]
-            save_yaml(path, data)
+            if not save_yaml(path, data):
+                log_warning(f"Failed to serialize labels to {path}", "LABELS")
+                return False
             self._dirty.discard(cache_key)
             log_debug(f"Saved {len(persistent)} labels to {path} "
                       f"({len(labels.annotations) - len(persistent)} AUTO skipped)", "LABELS")

@@ -177,12 +177,13 @@ class YoloV8Detector(DetectionModel):
                 cls_id = int(boxes.cls[i].cpu().numpy())
                 conf_score = float(boxes.conf[i].cpu().numpy())
 
-                # Convert xyxy to normalized center format
+                # Convert xyxy to normalized center format (cast to Python float to
+                # avoid numpy scalar types that yaml.SafeDumper cannot serialize)
                 x1, y1, x2, y2 = xyxy
-                x_center = ((x1 + x2) / 2) / w
-                y_center = ((y1 + y2) / 2) / h
-                width = (x2 - x1) / w
-                height = (y2 - y1) / h
+                x_center = float((x1 + x2) / 2) / w
+                y_center = float((y1 + y2) / 2) / h
+                width = float(x2 - x1) / w
+                height = float(y2 - y1) / h
 
                 # Get class name
                 class_name = self._get_class_name(cls_id)
