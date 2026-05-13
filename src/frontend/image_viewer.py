@@ -228,6 +228,7 @@ class ImageViewer(QMainWindow):
 
         self._view_prefs = {
             "show_labels": bool(preferences.get("show_labels", False)),
+            "show_projected_labels": bool(preferences.get("show_projected_labels", True)),
             "show_overlays": bool(preferences.get("show_overlays", True)),  # Default: show info overlays
             "grid_mode": preferences.get("grid_mode") or "thirds",  # Default to thirds
         }
@@ -512,6 +513,7 @@ class ImageViewer(QMainWindow):
             toggles = [
                 (getattr(self.ui, "action_toggle_rectified", None), self.view_rectified),
                 (getattr(self.ui, "action_show_labels", None), self.view_state.show_labels),
+                (getattr(self.ui, "action_show_projected_labels", None), self.view_state.show_projected_labels),
                 (getattr(self.ui, "action_show_overlays", None), self.view_state.show_overlays),
                 (getattr(self.ui, "action_apply_parallax", None), self._apply_parallax_correction),
                 (getattr(self.ui, "action_label_manual_mode", None), self._manual_label_mode),
@@ -709,6 +711,8 @@ class ImageViewer(QMainWindow):
 
         if hasattr(self.ui, "action_show_labels"):
             self.ui.action_show_labels.toggled.connect(self._handle_show_labels_toggle)
+        if hasattr(self.ui, "action_show_projected_labels"):
+            self.ui.action_show_projected_labels.toggled.connect(self._handle_show_projected_labels_toggle)
         if hasattr(self.ui, "action_show_overlays"):
             self.ui.action_show_overlays.toggled.connect(self._handle_show_overlays_toggle)
         if hasattr(self.ui, "action_calibration_debug"):
@@ -2232,6 +2236,7 @@ class ImageViewer(QMainWindow):
         self.overlay_orchestrator.set_parallax_correction(self._parallax_h, self._parallax_v)
         self.overlay_orchestrator.set_grid_mode(self.view_state.grid_mode)
         self.overlay_orchestrator.set_show_labels(self.view_state.show_labels)
+        self.overlay_orchestrator.set_show_projected_labels(self.view_state.show_projected_labels)
         self.overlay_orchestrator.set_show_overlays(self.view_state.show_overlays)
         self.overlay_orchestrator.set_corner_display_mode(self._corner_display_mode)
 
@@ -4965,6 +4970,9 @@ class ImageViewer(QMainWindow):
 
     def _handle_show_labels_toggle(self, enabled: bool) -> None:
         self.view_state.toggle_labels(enabled)
+
+    def _handle_show_projected_labels_toggle(self, enabled: bool) -> None:
+        self.view_state.toggle_projected_labels(enabled)
 
     def _handle_apply_parallax_toggle(self, enabled: bool) -> None:
         """Enable/disable additive parallax correction while keeping calibration reprojection active."""

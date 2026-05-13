@@ -70,6 +70,7 @@ class OverlayOrchestrator(QObject):
         self.align_mode = "disabled"  # "disabled", "full", "fov_focus"
         self.grid_mode = "thirds"  # "off", "thirds", "detailed"
         self.show_labels = False
+        self.show_projected_labels = True
         self.show_overlays = True  # Info overlay (status text, calibration markers, corners)
         self.corner_display_mode = "subpixel"  # "original", "subpixel", "both"
 
@@ -182,9 +183,10 @@ class OverlayOrchestrator(QObject):
                 raw_lwir, "lwir", "visible", base
             )
 
-            # Append projected labels
-            label_boxes_lwir.extend(projected_to_lwir)
-            label_boxes_vis.extend(projected_to_vis)
+            # Append projected labels (only if show_projected_labels is enabled)
+            if self.show_projected_labels:
+                label_boxes_lwir.extend(projected_to_lwir)
+                label_boxes_vis.extend(projected_to_vis)
 
             # Update signatures to include projected labels
             label_sig_lwir = self._get_label_signature(base, "lwir", raw_lwir)
@@ -550,6 +552,12 @@ class OverlayOrchestrator(QObject):
         """Set whether to show label box overlays."""
         if show != self.show_labels:
             self.show_labels = show
+            self.invalidate()
+
+    def set_show_projected_labels(self, show: bool) -> None:
+        """Set whether to show projected (cross-channel) label overlays."""
+        if show != self.show_projected_labels:
+            self.show_projected_labels = show
             self.invalidate()
 
     def set_show_overlays(self, show: bool) -> None:

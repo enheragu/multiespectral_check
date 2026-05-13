@@ -49,6 +49,7 @@ class ViewStateController(QObject):
 
         self._grid_mode = "off"  # "off", "thirds", "detailed"
         self._show_labels = False
+        self._show_projected_labels = True
         self._show_overlays = True  # Info overlay (status text, calibration markers)
         self._view_rectified = False
 
@@ -85,6 +86,26 @@ class ViewStateController(QObject):
             if self.session.has_images():
                 self._load_current()
             self.viewStateChanged.emit()
+
+    @property
+    def show_projected_labels(self) -> bool:
+        """Get projected-label display state."""
+        return self._show_projected_labels
+
+    @show_projected_labels.setter
+    def show_projected_labels(self, value: bool) -> None:
+        """Set projected-label display state."""
+        if self._show_projected_labels != value:
+            self._show_projected_labels = value
+            self._persist_preferences(show_projected_labels=value)
+            self._invalidate_overlay_cache()
+            if self.session.has_images():
+                self._load_current()
+            self.viewStateChanged.emit()
+
+    def toggle_projected_labels(self, enabled: bool) -> None:
+        """Toggle projected-label display."""
+        self.show_projected_labels = enabled
 
     @property
     def show_overlays(self) -> bool:
@@ -156,6 +177,7 @@ class ViewStateController(QObject):
     def load_preferences(
         self,
         show_labels: bool = False,
+        show_projected_labels: bool = True,
         show_overlays: bool = True,
         grid_mode: str = "off",
     ) -> None:
@@ -163,9 +185,11 @@ class ViewStateController(QObject):
 
         Args:
             show_labels: Initial label display state
+            show_projected_labels: Initial projected-label display state (default True)
             show_overlays: Initial info overlay display state (default True)
             grid_mode: Grid display mode ("off", "thirds", "detailed")
         """
         self._grid_mode = grid_mode if grid_mode in ("off", "thirds", "detailed") else "off"
         self._show_labels = show_labels
+        self._show_projected_labels = show_projected_labels
         self._show_overlays = show_overlays

@@ -308,9 +308,15 @@ class Ui_MainWindow(object):
         self.action_toggle_rectified.setCheckable(True)
         self.action_show_labels = QtGui.QAction("Show labels", MainWindow)
         self.action_show_labels.setCheckable(True)
+        self.action_show_projected_labels = QtGui.QAction("Show projected labels", MainWindow)
+        self.action_show_projected_labels.setCheckable(True)
+        self.action_show_projected_labels.setChecked(True)  # Default: projected labels visible
         self.action_show_overlays = QtGui.QAction("Show image info overlay", MainWindow)
         self.action_show_overlays.setCheckable(True)
         self.action_show_overlays.setChecked(True)  # Default: overlays visible
+
+        # Labels display submenu
+        self.menu_labels_display = QtWidgets.QMenu("Labels display", MainWindow)
 
         # Grid submenu
         self.menu_grid = QtWidgets.QMenu("Show Grid", MainWindow)
@@ -563,7 +569,9 @@ class Ui_MainWindow(object):
         self.menu_view.addMenu(self.menu_corner_display)
 
         self.menu_view.addSeparator()
-        self.menu_view.addAction(self.action_show_labels)
+        self.menu_labels_display.addAction(self.action_show_labels)
+        self.menu_labels_display.addAction(self.action_show_projected_labels)
+        self.menu_view.addMenu(self.menu_labels_display)
         self.menu_view.addAction(self.action_show_overlays)
         self.menu_view.addSeparator()
         self.menu_filter.addAction(self.action_filter_all)
