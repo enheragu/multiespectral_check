@@ -9,6 +9,13 @@ Versioning note: minor releases mark visible feature jumps; patch releases cover
 
 ## [Unreleased]
 
+## [0.9.1](https://github.com/enheragu/multiespectral_check/commit/40768df) - 2026-05-13
+
+- View › Labels display submenu: new toggle to show/hide projected (cross-channel) labels independently of the base labels toggle; preference persists across sessions.
+- Calibration report updates: distortion map charts (barrel/pincushion per channel), FOV and focal length per channel, chessboard coverage visible when using workspace default calibration.
+- Bugfix: stereo alignment FOV projection (all three modes) was feeding undistorted LWIR crop bounds to the homography instead of raw calibration corners, causing the FOV Focus box to appear ~4% too small per side; corrected draw order so the FOV Focus rectangle is always visible.
+- Bugfix: autosave triggered correctly when accepting a label from the automated labelling toolchain.
+
 ## [0.9.0](https://github.com/enheragu/multiespectral_check/commit/89600bd) - 2026-05-06
 
 - Dataset export system: new backend pipeline (`src/backend/services/export/`) with image processing (undistort, parallax correction, optional downscaling) and label export (COCO/YOLO converters).
