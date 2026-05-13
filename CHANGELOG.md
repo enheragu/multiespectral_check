@@ -9,7 +9,7 @@ Versioning note: minor releases mark visible feature jumps; patch releases cover
 
 ## [Unreleased]
 
-## [0.9.1](https://github.com/enheragu/multiespectral_check/commit/40768df) - 2026-05-13
+## [0.9.1](https://github.com/enheragu/multiespectral_check/commit/18091fd) - 2026-05-13
 
 - View › Labels display submenu: new toggle to show/hide projected (cross-channel) labels independently of the base labels toggle; preference persists across sessions.
 - Calibration report updates: distortion map charts (barrel/pincushion per channel), FOV and focal length per channel, chessboard coverage visible when using workspace default calibration.
