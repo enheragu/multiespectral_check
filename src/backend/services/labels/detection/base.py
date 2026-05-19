@@ -349,6 +349,7 @@ def detection_to_annotation(
         class_id=class_id,
         bbox=detection.bbox,
         source=AnnotationSource.AUTO,
+        confidence=detection.confidence,
         attributes=attrs,
     )
 
