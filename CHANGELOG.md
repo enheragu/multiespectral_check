@@ -8,6 +8,7 @@ Each release below is pinned to the commit that best represents that snapshot.
 Versioning note: minor releases mark visible feature jumps; patch releases cover bugfixes and maintenance updates, including docs/help polish that does not change behavior.
 
 ## [Unreleased]
+- Bugfix: prev and next boton in viewer were not working.
 
 ## [0.9.1](https://github.com/enheragu/multiespectral_check/commit/18091fd) - 2026-05-13
 

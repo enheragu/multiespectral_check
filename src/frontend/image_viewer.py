@@ -591,11 +591,11 @@ class ImageViewer(QMainWindow):
         if hasattr(self.ui, "btn_prev_fast"):
             self.ui.btn_prev_fast.clicked.connect(lambda: self.prev_image(step=5))
         if hasattr(self.ui, "btn_prev"):
-            self.ui.btn_prev.clicked.connect(self.prev_image)
+            self.ui.btn_prev.clicked.connect(lambda: self.prev_image())
         if hasattr(self.ui, "btn_goto"):
             self.ui.btn_goto.clicked.connect(self._handle_goto_image)
         if hasattr(self.ui, "btn_next"):
-            self.ui.btn_next.clicked.connect(self.next_image)
+            self.ui.btn_next.clicked.connect(lambda: self.next_image())
         if hasattr(self.ui, "btn_next_fast"):
             self.ui.btn_next_fast.clicked.connect(lambda: self.next_image(step=5))
 
