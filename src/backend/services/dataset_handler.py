@@ -14,7 +14,7 @@ from backend.services.summary_derivation import derive_summary_from_entry
 from common.dict_helpers import get_dict_path
 from common.log_utils import log_debug, log_error, log_info, log_warning
 from common.timing import timed
-from common.yaml_utils import get_timestamp_fields, load_yaml, save_yaml
+from common.yaml_utils import get_metadata_fields, load_yaml, save_yaml
 from config import get_config
 
 if TYPE_CHECKING:
@@ -145,7 +145,7 @@ class SummaryCache:
         summary = SummaryCache()
         summary._data["dataset_info"] = {
             "note": note,
-            **get_timestamp_fields(),
+            **get_metadata_fields(),
         }
         summary._data["stats"] = stats.to_dict()
         return summary

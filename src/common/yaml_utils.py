@@ -14,8 +14,25 @@ from typing import Any, Dict, Tuple, Union
 
 import yaml
 
+from config import APP_NAME, APP_VERSION, REPO_URL
+
 # Prefer the C-extension SafeLoader when available (much faster parsing).
 _SafeLoader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+
+def get_metadata_fields() -> Dict[str, Any]:
+    """Generate metadata fields for YAML persistence: timestamp, app version, and origin.
+
+    Returns:
+        Dict with timestamp, app_version, and generated_by fields.
+    """
+    now = time.time()
+    return {
+        "last_updated": now,
+        "last_updated_str": datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M:%S"),
+        "app_version": APP_VERSION,
+        "generated_by": f"{APP_NAME} {REPO_URL}",
+    }
 
 
 def get_timestamp_fields() -> Dict[str, Any]:

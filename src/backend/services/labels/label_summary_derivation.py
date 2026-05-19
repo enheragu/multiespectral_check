@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from common.log_utils import log_debug, log_info, log_warning
-from common.yaml_utils import get_timestamp_fields, load_yaml, save_yaml
+from common.yaml_utils import get_metadata_fields, load_yaml, save_yaml
 
 # ---------------------------------------------------------------------------
 # Cache filename (hidden file at dataset root)
@@ -299,7 +299,7 @@ def _merge_charts(dest: Dict[str, Any], src: Dict[str, Any]) -> None:
 
 
 def _stamp(d: Dict[str, Any]) -> None:
-    ts = get_timestamp_fields()
+    ts = get_metadata_fields()
     d["last_updated"] = ts["last_updated"]
     d["last_updated_str"] = ts["last_updated_str"]
 

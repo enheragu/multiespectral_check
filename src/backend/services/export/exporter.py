@@ -40,7 +40,7 @@ from backend.services.labels.label_storage import LabelStorage
 from backend.services.workspace_config import get_workspace_config_service
 from backend.utils.stereo_alignment import compute_auto_parallax
 from common.log_utils import log_debug, log_info, log_warning
-from common.yaml_utils import get_timestamp_fields, load_yaml, save_yaml
+from common.yaml_utils import get_metadata_fields, load_yaml, save_yaml
 from config import get_config
 
 from dataclasses import replace
@@ -547,7 +547,7 @@ def _write_export_info(
     """Write provenance + per-dataset stats + calibration to ``.export_info.yaml``."""
     info: Dict[str, Any] = {
         "version": 1,
-        **get_timestamp_fields(),
+        **get_metadata_fields(),
         "tool": "multiespectral_check",
         "source_workspace": str(request.workspace_path),
         "parameters": {

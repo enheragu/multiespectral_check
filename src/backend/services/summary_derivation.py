@@ -12,7 +12,7 @@ from typing import Any, Dict
 
 from backend.services.stats_manager import empty_stats_dict
 from backend.utils.cache import DatasetCache
-from common.yaml_utils import get_timestamp_fields
+from common.yaml_utils import get_metadata_fields
 
 
 def derive_summary_from_entry(entry: DatasetCache) -> Dict[str, Any]:
@@ -178,7 +178,7 @@ def derive_summary_from_entry(entry: DatasetCache) -> Dict[str, Any]:
     # =========================================================================
     # Build final summary structure
     # =========================================================================
-    timestamps = get_timestamp_fields()
+    timestamps = get_metadata_fields()
     summary = {
         "dataset_info": {
             "note": note,

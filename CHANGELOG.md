@@ -9,6 +9,7 @@ Versioning note: minor releases mark visible feature jumps; patch releases cover
 
 ## [Unreleased]
 - Bugfix: prev and next boton in viewer were not working.
+- Store GUI version in generated files for an easier tracking of issues.
 
 ## [0.9.1](https://github.com/enheragu/multiespectral_check/commit/18091fd) - 2026-05-13
 

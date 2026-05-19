@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from common.log_utils import log_debug, log_warning
-from common.yaml_utils import get_timestamp_fields, save_yaml
+from common.yaml_utils import get_metadata_fields, save_yaml
 from config import get_config
 
 
@@ -78,7 +78,7 @@ def export_stereo_alignment(
 
     payload: Dict[str, Any] = {
         "version": 1,
-        **get_timestamp_fields(),
+        **get_metadata_fields(),
         "source_dataset": source_dataset or dataset_path.name,
         "parallax_correction": {
             "h_px": float(parallax_h),

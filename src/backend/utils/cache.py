@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 
 import yaml
 
-from common.yaml_utils import get_timestamp_fields, load_yaml, save_yaml
+from common.yaml_utils import get_metadata_fields, load_yaml, save_yaml
 
 from common.log_utils import log_warning
 from config import get_config
@@ -115,7 +115,7 @@ def serialize_dataset_entry(entry: DatasetCache) -> DatasetCache:
     result["overrides"] = sorted(overrides) if isinstance(overrides, (set, list)) else []
 
     # Add timestamp for traceability
-    result.update(get_timestamp_fields())
+    result.update(get_metadata_fields())
 
     return result
 
@@ -190,7 +190,7 @@ def save_cache(cache: CacheData) -> None:
     config = get_config()
     cache["version"] = config.cache_version
     # Add timestamp for traceability
-    cache.update(get_timestamp_fields())
+    cache.update(get_metadata_fields())
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
     except OSError:
