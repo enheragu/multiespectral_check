@@ -8,8 +8,12 @@ Each release below is pinned to the commit that best represents that snapshot.
 Versioning note: minor releases mark visible feature jumps; patch releases cover bugfixes and maintenance updates, including docs/help polish that does not change behavior.
 
 ## [Unreleased]
+- Attribute propagation from adjacent frames: new "Inter-frame label attribute propagation" toggle in the Labelling menu. When enabled, after any auto-detection or manual annotation the system matches annotations in the previous and next frames (same class) using IoU and sparse Lucas-Kanade optical flow, then copies any missing attributes to the matched annotations without overwriting existing values.
+
+## [0.9.2](https://github.com/enheragu/multiespectral_check/commit/76284e1) - 2026-05-19
 - Bugfix: prev and next boton in viewer were not working.
 - Store GUI version in generated files for an easier tracking of issues.
+- Bugfix: per-class `min_confidence` thresholds defined in the label YAML were never applied — `Annotation.confidence` was left at its default (1.0) because `detection.confidence` was stored only in `attributes` dict, not in the dataclass field read by the filter.
 
 ## [0.9.1](https://github.com/enheragu/multiespectral_check/commit/18091fd) - 2026-05-13
 
