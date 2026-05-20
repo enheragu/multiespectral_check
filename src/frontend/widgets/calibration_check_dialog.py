@@ -53,7 +53,7 @@ class CalibrationCheckDialog(QDialog):
         self.dataset_path = dataset_path
         self.file_metadata = self._load_file_metadata()
         self.setWindowTitle("Calibration report")
-        self.setMinimumWidth(880)
+        self.setMinimumWidth(style.DIALOG_REPORT_MIN_W)
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -77,25 +77,31 @@ class CalibrationCheckDialog(QDialog):
 
         metadata_group = self._file_info_group()
         if metadata_group:
-            card_layout.addWidget(self._section_heading("Calibration information:"))
+            card_layout.addWidget(style.section_heading_label("Calibration information:"))
             card_layout.addWidget(metadata_group)
 
-        card_layout.addWidget(self._section_heading("Intrinsic calibration:"))
+        card_layout.addWidget(style.section_heading_label("Intrinsic calibration:"))
         card_layout.addWidget(self._intrinsic_group())
-        card_layout.addWidget(self._section_heading("Extrinsic calibration:"))
+        card_layout.addWidget(style.section_heading_label("Extrinsic calibration:"))
         card_layout.addWidget(self._extrinsic_group())
 
         # Chessboard coverage charts
         coverage_widget = self._chessboard_coverage_group()
         if coverage_widget:
-            card_layout.addWidget(self._section_heading("Chessboard coverage:"))
+            card_layout.addWidget(style.section_heading_label("Chessboard coverage:"))
             card_layout.addWidget(coverage_widget)
 
         # Distortion map
         distortion_widget = self._distortion_map_group()
         if distortion_widget:
-            card_layout.addWidget(self._section_heading("Distortion map:"))
+            card_layout.addWidget(style.section_heading_label("Distortion map:"))
             card_layout.addWidget(distortion_widget)
+
+        # Pattern pose diversity
+        pose_widget = self._pose_diversity_group()
+        if pose_widget:
+            card_layout.addWidget(style.section_heading_label("Calibration pattern pose diversity:"))
+            card_layout.addWidget(pose_widget)
 
         card_layout.addStretch(1)
 
@@ -111,10 +117,9 @@ class CalibrationCheckDialog(QDialog):
         scroll = QScrollArea(self)
         scroll.setWidget(card)
         scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         layout.addWidget(scroll)
-        self.resize(max(self.minimumWidth(), 1060), 780)
+        self.resize(style.DIALOG_REPORT_MIN_W + 40, 800)
 
     def refresh_data(
         self,
@@ -146,21 +151,11 @@ class CalibrationCheckDialog(QDialog):
                     widget.deleteLater()
         self._build_ui()
 
-    def _section_heading(self, text: str) -> QLabel:
-        label = QLabel(text)
-        label.setStyleSheet(style.heading_style())
-        return label
-
     def _file_info_group(self) -> Optional[QWidget]:
         # Show info if we have any metadata or dataset paths
         if not self.file_metadata and not self.dataset_paths:
             return None
-        panel = QWidget()
-        panel.setObjectName("file_info_panel")
-        panel.setStyleSheet(style.panel_body_style("file_info_panel"))
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(6)
+        panel, layout = style.make_panel("file_info_panel")
         form = QFormLayout()
         form.setContentsMargins(0, 0, 0, 0)
 
@@ -209,12 +204,7 @@ class CalibrationCheckDialog(QDialog):
     def _dataset_list_group(self) -> Optional[QWidget]:
         if not self.dataset_paths:
             return None
-        panel = QWidget()
-        panel.setObjectName("dataset_list_panel")
-        panel.setStyleSheet(style.panel_body_style("dataset_list_panel"))
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(6)
+        panel, layout = style.make_panel("dataset_list_panel")
         for dataset in self.dataset_paths:
             label = QLabel(dataset)
             label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -222,12 +212,7 @@ class CalibrationCheckDialog(QDialog):
         return panel
 
     def _intrinsic_group(self) -> QWidget:
-        panel = QWidget()
-        panel.setObjectName("intrinsic_panel")
-        panel.setStyleSheet(style.panel_body_style("intrinsic_panel"))
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(6)
+        panel, layout = style.make_panel("intrinsic_panel")
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setHorizontalSpacing(10)
@@ -240,12 +225,7 @@ class CalibrationCheckDialog(QDialog):
         return panel
 
     def _extrinsic_group(self) -> QWidget:
-        panel = QWidget()
-        panel.setObjectName("extrinsic_panel")
-        panel.setStyleSheet(style.panel_body_style("extrinsic_panel"))
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(8)
+        panel, layout = style.make_panel("extrinsic_panel", spacing=8)
         form = QFormLayout()
         form.setContentsMargins(0, 0, 0, 0)
         form.setVerticalSpacing(8)
@@ -260,10 +240,35 @@ class CalibrationCheckDialog(QDialog):
             layout.addLayout(form)
             return panel
 
-        frame_note = QLabel(
-            "Extrinsic transform maps points from the LWIR camera frame into the visible camera frame. "
-            "Units follow the chessboard square size used during calibration."
-        )
+        # Resolve square size → meters for unit-aware display (done first so frame_note can reference it)
+        sq_meta = self.file_metadata.get("square_size")
+        square_size_m: Optional[float] = None
+        if isinstance(sq_meta, dict):
+            val = sq_meta.get("value")
+            unit = (sq_meta.get("unit") or "").lower()
+            if isinstance(val, (int, float)):
+                if unit == "mm":
+                    square_size_m = float(val) / 1000.0
+                elif unit == "cm":
+                    square_size_m = float(val) / 100.0
+                elif unit in ("m", "meters"):
+                    square_size_m = float(val)
+        elif isinstance(sq_meta, (int, float)):
+            square_size_m = float(sq_meta) / 1000.0  # bare number → assume mm
+
+        if square_size_m:
+            frame_note_text = (
+                "Extrinsic transform maps points from the LWIR camera frame into the visible camera frame. "
+                f"Translation converted to meters using the stored square size ({square_size_m * 1000:.1f} mm). "
+                "Rotation shown as ZYX Euler angles."
+            )
+        else:
+            frame_note_text = (
+                "Extrinsic transform maps points from the LWIR camera frame into the visible camera frame. "
+                "Translation in pattern squares (square physical size not available for meter conversion). "
+                "Rotation shown as ZYX Euler angles."
+            )
+        frame_note = QLabel(frame_note_text)
         frame_note.setWordWrap(True)
         frame_note.setStyleSheet("color: #444;")
         frame_note.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -279,9 +284,15 @@ class CalibrationCheckDialog(QDialog):
         form.addRow(self._field_label("Summary"), summary_label)
 
         baseline = payload.get("baseline")
-        baseline_label = QLabel(f"{baseline:.4f}" if baseline is not None else "—")
+        if baseline is not None and square_size_m:
+            baseline_text = f"{baseline * square_size_m:.4f} m"
+        elif baseline is not None:
+            baseline_text = f"{baseline:.4f} squares"
+        else:
+            baseline_text = "—"
+        baseline_label = QLabel(baseline_text)
         baseline_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        form.addRow(self._field_label("Baseline"), baseline_label)
+        form.addRow(self._field_label("Baseline (‖T‖)"), baseline_label)
 
         updated = payload.get("updated_at")
         updated_str = str(updated) if updated and not isinstance(updated, dict) else None
@@ -289,7 +300,12 @@ class CalibrationCheckDialog(QDialog):
         updated_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         form.addRow(self._field_label("Computed"), updated_label)
 
-        translation_label = QLabel(self._format_vector(translation))
+        if square_size_m:
+            t_m = [v * square_size_m for v in translation]
+            translation_text = "[ " + ", ".join(f"{v:.4f}" for v in t_m) + " ]  (m)"
+        else:
+            translation_text = self._format_vector(translation) + "  (pattern squares)"
+        translation_label = QLabel(translation_text)
         translation_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         translation_label.setStyleSheet("font-family: monospace;")
         form.addRow(self._field_label("Translation (LWIR → Visible)"), translation_label)
@@ -298,7 +314,29 @@ class CalibrationCheckDialog(QDialog):
         rotation_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         rotation_label.setWordWrap(True)
         rotation_label.setStyleSheet("font-family: monospace; padding: 2px 0 8px 0;")
-        form.addRow(self._field_label("Rotation (LWIR → Visible)"), rotation_label)
+        form.addRow(self._field_label("Rotation matrix (LWIR → Visible)"), rotation_label)
+
+        try:
+            R = rotation
+            pitch_rad = -math.asin(max(-1.0, min(1.0, R[2][0])))
+            cos_p = math.cos(pitch_rad)
+            if abs(cos_p) > 1e-6:
+                roll_rad = math.atan2(R[2][1] / cos_p, R[2][2] / cos_p)
+                yaw_rad = math.atan2(R[1][0] / cos_p, R[0][0] / cos_p)
+            else:
+                roll_rad = math.atan2(-R[1][2], R[1][1])
+                yaw_rad = 0.0
+            euler_text = (
+                f"roll {math.degrees(roll_rad):.2f}°   "
+                f"pitch {math.degrees(pitch_rad):.2f}°   "
+                f"yaw {math.degrees(yaw_rad):.2f}°"
+            )
+            euler_label = QLabel(euler_text)
+            euler_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            euler_label.setStyleSheet("font-family: monospace;")
+            form.addRow(self._field_label("Rotation (roll/pitch/yaw)"), euler_label)
+        except Exception:  # noqa: BLE001
+            pass
 
         ## Too much information to show in the dialog
         # per_pair = payload.get("per_pair_errors")
@@ -319,14 +357,8 @@ class CalibrationCheckDialog(QDialog):
         return panel
 
     def _channel_block(self, key: str, title: str) -> QWidget:
-        panel = QWidget()
-        panel.setObjectName(f"channel_panel_{key}")
-        panel.setStyleSheet(style.panel_body_style(panel.objectName()))
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(6)
-        heading = QLabel(f"{title}:")
-        heading.setStyleSheet(style.heading_style())
+        panel, layout = style.make_panel(f"channel_panel_{key}")
+        heading = style.section_heading_label(f"{title}:")
         layout.addWidget(heading)
         form = QFormLayout()
         form.setContentsMargins(0, 0, 0, 0)
@@ -388,7 +420,7 @@ class CalibrationCheckDialog(QDialog):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(12)
 
-        chart_w, chart_h = 430, 310
+        chart_w, chart_h = style.CHART_W_PAIR, style.CHART_H_PAIR
 
         # LWIR chart
         lwir_label = QLabel()
@@ -410,6 +442,100 @@ class CalibrationCheckDialog(QDialog):
 
         return panel
 
+    def _pose_diversity_group(self) -> Optional[QWidget]:
+        """Build tilt-scatter, distance-histogram, and tilt-vs-distance charts."""
+        if not self.dataset_path:
+            return None
+        try:
+            from backend.services.calibration_corners_io import load_corners_for_dataset
+            all_corners = load_corners_for_dataset(self.dataset_path)
+        except Exception:  # noqa: BLE001
+            return None
+        if not all_corners:
+            return None
+
+        pattern_size = self.file_metadata.get("pattern_size")
+        if not pattern_size:
+            return None
+
+        lwir_payload = self.matrices.get("lwir") or {}
+        vis_payload = self.matrices.get("visible") or {}
+        lwir_poses = _compute_poses(all_corners, "lwir", lwir_payload, pattern_size)
+        vis_poses = _compute_poses(all_corners, "visible", vis_payload, pattern_size)
+
+        if not lwir_poses and not vis_poses:
+            return None
+
+        # Convert distances from grid squares to metres if square_size is known
+        sq_meta = self.file_metadata.get("square_size")
+        square_size_m: Optional[float] = None
+        if isinstance(sq_meta, dict):
+            val = sq_meta.get("value")
+            unit = (sq_meta.get("unit") or "").lower()
+            if isinstance(val, (int, float)):
+                if unit == "mm":
+                    square_size_m = float(val) / 1000.0
+                elif unit == "cm":
+                    square_size_m = float(val) / 100.0
+                elif unit in ("m", "meters"):
+                    square_size_m = float(val)
+        elif isinstance(sq_meta, (int, float)):
+            square_size_m = float(sq_meta) / 1000.0
+        if square_size_m:
+            lwir_poses = [(tx, ty, d * square_size_m) for tx, ty, d in lwir_poses]
+            vis_poses = [(tx, ty, d * square_size_m) for tx, ty, d in vis_poses]
+        dist_unit = "m" if square_size_m else "grid sq."
+
+        outer, layout = style.make_panel("pose_diversity_panel", spacing=8)
+
+        chart_w, chart_h = style.CHART_W_PAIR, style.CHART_H_GRID
+        lwir_color = QColor(220, 60, 60)
+        vis_color = QColor(60, 120, 220)
+
+        def _row(lwir_pix: QPixmap, vis_pix: QPixmap) -> QWidget:
+            row = QWidget()
+            row.setStyleSheet("background: transparent;")
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(0, 0, 0, 0)
+            rl.setSpacing(12)
+            for pix in (lwir_pix, vis_pix):
+                lbl = QLabel()
+                lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                lbl.setPixmap(pix)
+                rl.addWidget(lbl)
+            return row
+
+        def _row_with_caption(lwir_pix: QPixmap, vis_pix: QPixmap, caption: str) -> QWidget:
+            container = QWidget()
+            container.setStyleSheet("background: transparent;")
+            cl = QVBoxLayout(container)
+            cl.setContentsMargins(0, 0, 0, 0)
+            cl.setSpacing(2)
+            cl.addWidget(_row(lwir_pix, vis_pix))
+            cap = QLabel(caption)
+            cap.setStyleSheet("color: #666; font-size: 10px; font-style: italic;")
+            cap.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cl.addWidget(cap)
+            return container
+
+        layout.addWidget(_row_with_caption(
+            _render_tilt_scatter(lwir_poses, chart_w, chart_h, "LWIR — Tilt distribution", lwir_color),
+            _render_tilt_scatter(vis_poses, chart_w, chart_h, "Visible — Tilt distribution", vis_color),
+            "Each dot = one image. Good coverage: cloud spread broadly around the origin, not clustered at zero.",
+        ))
+        layout.addWidget(_row_with_caption(
+            _render_distance_histogram(lwir_poses, chart_w, chart_h, "LWIR — Pattern distance distribution", lwir_color, dist_unit),
+            _render_distance_histogram(vis_poses, chart_w, chart_h, "Visible — Pattern distance distribution", vis_color, dist_unit),
+            "Good coverage: bars spanning a wide range. All bars at the same distance limits depth diversity.",
+        ))
+        layout.addWidget(_row_with_caption(
+            _render_tilt_vs_distance(lwir_poses, chart_w, chart_h, "LWIR — Tilt magnitude (Y) vs. Distance (X)", lwir_color, dist_unit),
+            _render_tilt_vs_distance(vis_poses, chart_w, chart_h, "Visible — Tilt magnitude (Y) vs. Distance (X)", vis_color, dist_unit),
+            "Good coverage: dots spread across both axes with no strong diagonal correlation.",
+        ))
+
+        return outer
+
     def _distortion_map_group(self) -> Optional[QWidget]:
         """Build side-by-side distortion warp-grid charts (LWIR + Visible)."""
         lwir_payload = self.matrices.get("lwir")
@@ -424,7 +550,7 @@ class CalibrationCheckDialog(QDialog):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(12)
 
-        chart_w, chart_h = 430, 310
+        chart_w, chart_h = style.CHART_W_PAIR, style.CHART_H_PAIR
 
         lwir_label = QLabel()
         lwir_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -553,13 +679,63 @@ class CalibrationCheckDialog(QDialog):
 # Chessboard coverage chart helpers
 # ======================================================================
 
-# Chart rendering constants (matching label_report_dialog style)
-_COV_DPR = 2
-_COV_BG = QColor("#fafafa")
-_COV_AXIS_COLOR = QColor("#444444")
-_COV_FONT_SIZE = 9
-_COV_TITLE_FONT_SIZE = 10
-_COV_M = (40, 28, 22, 10)  # (left, bottom, top, right) margins
+
+
+def _begin_chart(width: int, height: int, title: str):
+    """Create a chart pixmap with title drawn and plot area pre-filled."""
+    pix = QPixmap(width * style.CHART_DPR, height * style.CHART_DPR)
+    pix.setDevicePixelRatio(style.CHART_DPR)
+    pix.fill(style.CHART_BG_QCOLOR)
+    painter = QPainter(pix)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    ml, mb, mt, mr = style.CHART_MARGINS
+    pw, ph = width - ml - mr, height - mt - mb
+    f = painter.font()
+    f.setPixelSize(style.CHART_TITLE_FONT_SIZE)
+    f.setBold(True)
+    painter.setFont(f)
+    painter.setPen(style.CHART_AXIS_QCOLOR)
+    painter.drawText(
+        QRectF(0, 2, width, mt - 2),
+        Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom,
+        title,
+    )
+    painter.fillRect(QRectF(ml, mt, pw, ph), style.CHART_PLOT_BG_QCOLOR)
+    return pix, painter, ml, mb, mt, mr, pw, ph
+
+
+def _chart_no_data(pix: QPixmap, painter: QPainter, ml, mb, mt, mr, pw, ph) -> QPixmap:
+    """Finish an empty chart with a grey border and return the pixmap."""
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.setPen(QPen(style.CHART_PLACEHOLDER_QCOLOR, 1))
+    painter.drawRect(QRectF(ml, mt, pw, ph))
+    painter.end()
+    return pix
+
+
+def _end_chart(painter: QPainter, ml, mb, mt, mr, pw, ph, n: int) -> None:
+    """Draw border + sample-count annotation and end the painter."""
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.setPen(QPen(style.CHART_AXIS_QCOLOR, 0.8))
+    painter.drawRect(QRectF(ml, mt, pw, ph))
+    f = painter.font()
+    f.setPixelSize(style.CHART_FONT_SIZE - 1)
+    painter.setFont(f)
+    painter.setPen(QColor("#666"))
+    painter.drawText(
+        QRectF(ml + 4, mt + 4, pw - 8, 14),
+        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop,
+        f"n={n}",
+    )
+    painter.end()
+
+
+def _set_tick_font(painter: QPainter) -> None:
+    """Switch painter to the small tick-label font."""
+    f = painter.font()
+    f.setPixelSize(style.CHART_FONT_SIZE)
+    f.setBold(False)
+    painter.setFont(f)
 
 
 def _extract_chessboard_quads(
@@ -609,39 +785,39 @@ def _render_chessboard_coverage(
     fill_color: QColor,
 ) -> QPixmap:
     """Draw chessboard quadrilaterals as semi-transparent polygons on a [0,1]² canvas."""
-    pix = QPixmap(width * _COV_DPR, height * _COV_DPR)
-    pix.setDevicePixelRatio(_COV_DPR)
-    pix.fill(_COV_BG)
+    pix = QPixmap(width * style.CHART_DPR, height * style.CHART_DPR)
+    pix.setDevicePixelRatio(style.CHART_DPR)
+    pix.fill(style.CHART_BG_QCOLOR)
 
     p = QPainter(pix)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     f = p.font()
-    f.setPixelSize(_COV_FONT_SIZE)
+    f.setPixelSize(style.CHART_FONT_SIZE)
     p.setFont(f)
 
     # Title
-    f.setPixelSize(_COV_TITLE_FONT_SIZE)
+    f.setPixelSize(style.CHART_TITLE_FONT_SIZE)
     f.setBold(True)
     p.setFont(f)
-    p.setPen(_COV_AXIS_COLOR)
-    ml, mb, mt, mr = _COV_M
+    p.setPen(style.CHART_AXIS_QCOLOR)
+    ml, mb, mt, mr = style.CHART_MARGINS
     p.drawText(
         QRectF(0, 2, width, mt - 2),
         Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom,
         title,
     )
     f.setBold(False)
-    f.setPixelSize(_COV_FONT_SIZE)
+    f.setPixelSize(style.CHART_FONT_SIZE)
     p.setFont(f)
 
     pw = width - ml - mr
     ph = height - mt - mb
 
     # Background image area
-    p.fillRect(QRectF(ml, mt, pw, ph), QColor("#f0f0f0"))
+    p.fillRect(QRectF(ml, mt, pw, ph), style.CHART_PLOT_BG_QCOLOR)
 
     # Draw axes with ticks (0.0 – 1.0)
-    pen = QPen(_COV_AXIS_COLOR, 1)
+    pen = QPen(style.CHART_AXIS_QCOLOR, 1)
     p.setPen(pen)
     p.drawLine(ml, mt, ml, height - mb)
     p.drawLine(ml, height - mb, width - mr, height - mb)
@@ -697,7 +873,7 @@ def _render_chessboard_coverage(
 
     # Count label
     if quads:
-        p.setPen(_COV_AXIS_COLOR)
+        p.setPen(style.CHART_AXIS_QCOLOR)
         p.drawText(
             QRectF(ml + 4, mt + 4, pw, 16),
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
@@ -705,7 +881,7 @@ def _render_chessboard_coverage(
         )
 
     # Border
-    p.setPen(QPen(QColor("#999"), 1))
+    p.setPen(QPen(style.CHART_PLACEHOLDER_QCOLOR, 1))
     p.drawRect(QRectF(ml, mt, pw, ph))
 
     p.end()
@@ -729,33 +905,33 @@ def _render_distortion_map(
     applying the lens distortion model in color, so barrel/pincushion is
     immediately visible.
     """
-    pix = QPixmap(width * _COV_DPR, height * _COV_DPR)
-    pix.setDevicePixelRatio(_COV_DPR)
-    pix.fill(_COV_BG)
+    pix = QPixmap(width * style.CHART_DPR, height * style.CHART_DPR)
+    pix.setDevicePixelRatio(style.CHART_DPR)
+    pix.fill(style.CHART_BG_QCOLOR)
 
     painter = QPainter(pix)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-    ml, mb, mt, mr = _COV_M
+    ml, mb, mt, mr = style.CHART_MARGINS
     pw = width - ml - mr
     ph = height - mt - mb
 
     # Title
     f = painter.font()
-    f.setPixelSize(_COV_TITLE_FONT_SIZE)
+    f.setPixelSize(style.CHART_TITLE_FONT_SIZE)
     f.setBold(True)
     painter.setFont(f)
-    painter.setPen(_COV_AXIS_COLOR)
+    painter.setPen(style.CHART_AXIS_QCOLOR)
     painter.drawText(
         QRectF(0, 2, width, mt - 2),
         Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom,
         title,
     )
 
-    painter.fillRect(QRectF(ml, mt, pw, ph), QColor("#f0f0f0"))
+    painter.fillRect(QRectF(ml, mt, pw, ph), style.CHART_PLOT_BG_QCOLOR)
 
     if not payload:
-        painter.setPen(QPen(QColor("#999"), 1))
+        painter.setPen(QPen(style.CHART_PLACEHOLDER_QCOLOR, 1))
         painter.drawRect(QRectF(ml, mt, pw, ph))
         painter.end()
         return pix
@@ -764,7 +940,7 @@ def _render_distortion_map(
     dist_coeffs = payload.get("distortion")
     img_size = payload.get("image_size")
     if not cam_mat or not dist_coeffs or not img_size or len(img_size) < 2:
-        painter.setPen(QPen(QColor("#999"), 1))
+        painter.setPen(QPen(style.CHART_PLACEHOLDER_QCOLOR, 1))
         painter.drawRect(QRectF(ml, mt, pw, ph))
         painter.end()
         return pix
@@ -834,7 +1010,7 @@ def _render_distortion_map(
             prev = curr
 
     # Border
-    painter.setPen(QPen(QColor("#999"), 1))
+    painter.setPen(QPen(style.CHART_PLACEHOLDER_QCOLOR, 1))
     painter.drawRect(QRectF(ml, mt, pw, ph))
 
     # Distortion type and magnitude label
@@ -844,10 +1020,10 @@ def _render_distortion_map(
     max_pct = abs(k1 * corner_r2 + k2 * corner_r4 + k3 * corner_r6) * 100.0
     dist_type = "barrel" if k1 > 0 else "pincushion"
     f2 = painter.font()
-    f2.setPixelSize(_COV_FONT_SIZE)
+    f2.setPixelSize(style.CHART_FONT_SIZE)
     f2.setBold(False)
     painter.setFont(f2)
-    painter.setPen(_COV_AXIS_COLOR)
+    painter.setPen(style.CHART_AXIS_QCOLOR)
     painter.drawText(
         QRectF(ml + 4, mt + 4, pw - 4, 16),
         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
@@ -862,4 +1038,305 @@ def _render_distortion_map(
     )
 
     painter.end()
+    return pix
+
+
+# ======================================================================
+# Pose diversity chart helpers (tilt scatter, distance histogram, tilt vs distance)
+# ======================================================================
+
+def _nice_step(data_range: float, target_ticks: int = 5) -> float:
+    """Return a human-friendly tick step for the given data range."""
+    if data_range <= 0:
+        return 1.0
+    raw = data_range / max(target_ticks, 1)
+    magnitude = 10 ** math.floor(math.log10(raw))
+    for factor in (1, 2, 2.5, 5, 10):
+        step = factor * magnitude
+        if data_range / step <= target_ticks + 1:
+            return step
+    return magnitude * 10
+
+
+def _map(value: float, src_min: float, src_max: float, dst_min: float, dst_max: float) -> float:
+    """Linear mapping from [src_min, src_max] to [dst_min, dst_max]."""
+    span = src_max - src_min
+    if span == 0:
+        return (dst_min + dst_max) / 2
+    return dst_min + (value - src_min) / span * (dst_max - dst_min)
+
+
+def _compute_poses(
+    all_corners: Dict[str, Dict[str, Any]],
+    channel: str,
+    channel_payload: Dict[str, Any],
+    pattern_size: Any,
+) -> List[tuple]:
+    """Compute (tilt_x_deg, tilt_y_deg, distance) for each calibration image.
+
+    Uses cv2.solvePnP with the stored camera_matrix and distortion coefficients
+    to recover the pattern pose from the saved 2-D corner detections.
+    Distance is in pattern-square units (relative, not mm).
+    """
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        return []
+
+    if not channel_payload:
+        return []
+
+    cam_matrix = channel_payload.get("camera_matrix")
+    dist_coeffs = channel_payload.get("distortion")
+    image_size = channel_payload.get("image_size")
+    if not cam_matrix or not dist_coeffs or not image_size or len(image_size) < 2:
+        return []
+
+    if not isinstance(pattern_size, (list, tuple)) or len(pattern_size) < 2:
+        return []
+    cols, rows = int(pattern_size[0]), int(pattern_size[1])
+    expected = cols * rows
+
+    # Object points: integer grid, no physical scale
+    obj_pts = np.zeros((expected, 3), dtype=np.float32)
+    obj_pts[:, :2] = np.mgrid[0:cols, 0:rows].T.reshape(-1, 2)
+
+    cam_mat = np.array(cam_matrix, dtype=np.float64)
+    dist = np.array(dist_coeffs, dtype=np.float64)
+    img_w, img_h = float(image_size[0]), float(image_size[1])
+
+    poses: List[tuple] = []
+    for _base, data in all_corners.items():
+        corners = data.get(channel)
+        if not corners or len(corners) != expected:
+            continue
+        # Corners stored normalised [0,1] → convert to pixels
+        img_pts = np.array(
+            [[c[0] * img_w, c[1] * img_h] for c in corners],
+            dtype=np.float32,
+        ).reshape(-1, 1, 2)
+
+        ok, rvec, tvec = cv2.solvePnP(
+            obj_pts, img_pts, cam_mat, dist, flags=cv2.SOLVEPNP_ITERATIVE
+        )
+        if not ok:
+            continue
+
+        R, _ = cv2.Rodrigues(rvec)
+        # Pattern normal in camera frame = third column of R
+        nx, ny, nz = float(R[0, 2]), float(R[1, 2]), float(R[2, 2])
+        nz_safe = nz if abs(nz) > 1e-6 else 1e-6
+        tilt_x = math.degrees(math.atan2(nx, nz_safe))
+        tilt_y = math.degrees(math.atan2(ny, nz_safe))
+        distance = float(np.linalg.norm(tvec))
+        poses.append((tilt_x, tilt_y, distance))
+
+    return poses
+
+
+def _render_tilt_scatter(
+    poses: List[tuple],
+    width: int,
+    height: int,
+    title: str,
+    main_color: QColor,
+) -> QPixmap:
+    """Scatter plot of tilt_X vs tilt_Y (degrees) for each calibration image."""
+    pix, painter, ml, mb, mt, mr, pw, ph = _begin_chart(width, height, title)
+    if not poses:
+        return _chart_no_data(pix, painter, ml, mb, mt, mr, pw, ph)
+
+    tilts_x = [p[0] for p in poses]
+    tilts_y = [p[1] for p in poses]
+    max_abs = max(max(abs(v) for v in tilts_x), max(abs(v) for v in tilts_y), 30.0)
+    margin = max_abs * 0.15
+    ax_min, ax_max = -(max_abs + margin), max_abs + margin
+    step = _nice_step(2 * (max_abs + margin), 5)
+
+    _set_tick_font(painter)
+    tick = math.ceil(ax_min / step) * step
+    while tick <= ax_max + 1e-9:
+        cx = _map(tick, ax_min, ax_max, ml, ml + pw)
+        cy = _map(tick, ax_min, ax_max, mt + ph, mt)
+        is_zero = abs(tick) < 1e-9
+        painter.setPen(QPen(QColor("#888888" if is_zero else "#aaaaaa"), 1.2 if is_zero else 0.6))
+        painter.drawLine(QPointF(cx, mt), QPointF(cx, mt + ph))
+        painter.drawLine(QPointF(ml, cy), QPointF(ml + pw, cy))
+        painter.setPen(style.CHART_AXIS_QCOLOR)
+        label = f"{tick:.0f}°"
+        painter.drawText(QRectF(cx - 16, mt + ph + 2, 32, mb - 4),
+                         Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, label)
+        painter.drawText(QRectF(0, cy - 8, ml - 3, 16),
+                         Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, label)
+        tick += step
+
+    painter.setPen(style.CHART_AXIS_QCOLOR)
+    painter.drawText(QRectF(ml, mt + ph + 14, pw, 14),
+                     Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, "Tilt X (°)")
+
+    dot_r = 4.0
+    fill = QColor(main_color)
+    fill.setAlpha(180)
+    painter.setBrush(fill)
+    painter.setPen(QPen(main_color.darker(130), 0.8))
+    for tx, ty, _ in poses:
+        px = _map(tx, ax_min, ax_max, ml, ml + pw)
+        py = _map(ty, ax_min, ax_max, mt + ph, mt)
+        painter.drawEllipse(QPointF(px, py), dot_r, dot_r)
+
+    _end_chart(painter, ml, mb, mt, mr, pw, ph, len(poses))
+    return pix
+
+
+def _render_distance_histogram(
+    poses: List[tuple],
+    width: int,
+    height: int,
+    title: str,
+    main_color: QColor,
+    dist_unit: str = "grid sq.",
+) -> QPixmap:
+    """Histogram of pattern distances showing distance-coverage distribution."""
+    pix, painter, ml, mb, mt, mr, pw, ph = _begin_chart(width, height, title)
+    if not poses:
+        return _chart_no_data(pix, painter, ml, mb, mt, mr, pw, ph)
+
+    distances = [p[2] for p in poses]
+    d_max = max(max(distances), 1.0)
+    n_bins = max(5, min(20, int(math.sqrt(len(distances)))))
+    bin_w = d_max / n_bins
+    counts = [0] * n_bins
+    for d in distances:
+        counts[min(int(d / bin_w), n_bins - 1)] += 1
+
+    max_count = max(counts) if counts else 1
+    y_step = _nice_step(max_count, 4)
+    y_max = math.ceil(max_count / y_step) * y_step
+
+    _set_tick_font(painter)
+
+    # Y grid
+    y_tick = 0.0
+    while y_tick <= y_max + 1e-9:
+        cy = _map(y_tick, 0, y_max, mt + ph, mt)
+        painter.setPen(QPen(QColor("#cccccc"), 0.6))
+        painter.drawLine(QPointF(ml, cy), QPointF(ml + pw, cy))
+        painter.setPen(style.CHART_AXIS_QCOLOR)
+        painter.drawText(QRectF(0, cy - 8, ml - 3, 16),
+                         Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                         f"{int(y_tick)}")
+        y_tick += y_step
+
+    # X axis labels: 0, midpoint, max — full-width rects with alignment flags avoid clipping
+    fmt = ".2f" if dist_unit == "m" else ".1f"
+    painter.setPen(style.CHART_AXIS_QCOLOR)
+    painter.drawText(QRectF(ml, mt + ph + 2, 48, mb - 4),
+                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, f"{0:{fmt}}")
+    painter.drawText(QRectF(ml, mt + ph + 2, pw, mb - 4),
+                     Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, f"{d_max / 2:{fmt}}")
+    painter.drawText(QRectF(ml, mt + ph + 2, pw, mb - 4),
+                     Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop, f"{d_max:{fmt}}")
+
+    # Bars
+    bar_gap = max(1.0, pw / n_bins * 0.08)
+    bar_pw = pw / n_bins - bar_gap
+    fill = QColor(main_color)
+    fill.setAlpha(110)
+    for i, cnt in enumerate(counts):
+        if cnt == 0:
+            continue
+        bx = ml + i * (pw / n_bins) + bar_gap / 2
+        bar_h = _map(cnt, 0, y_max, 0, ph)
+        painter.setBrush(fill)
+        painter.setPen(QPen(main_color.darker(120), 0.5))
+        painter.drawRect(QRectF(bx, mt + ph - bar_h, bar_pw, bar_h))
+
+    painter.setPen(style.CHART_AXIS_QCOLOR)
+    painter.drawText(QRectF(ml, mt + ph + 14, pw, 14),
+                     Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+                     f"Distance ({dist_unit})")
+
+    _end_chart(painter, ml, mb, mt, mr, pw, ph, len(poses))
+    return pix
+
+
+def _render_tilt_vs_distance(
+    poses: List[tuple],
+    width: int,
+    height: int,
+    title: str,
+    main_color: QColor,
+    dist_unit: str = "grid sq.",
+) -> QPixmap:
+    """Scatter of tilt magnitude (°) vs. distance to check for coverage correlation."""
+    pix, painter, ml, mb, mt, mr, pw, ph = _begin_chart(width, height, title)
+    if not poses:
+        return _chart_no_data(pix, painter, ml, mb, mt, mr, pw, ph)
+
+    distances = [p[2] for p in poses]
+    tilts = [math.sqrt(p[0] ** 2 + p[1] ** 2) for p in poses]
+
+    d_max = max(distances) if distances else 1.0
+    t_max = max(tilts) if tilts else 1.0
+    ax_d_min, ax_d_max = 0.0, d_max + (d_max * 0.1 if d_max > 0 else 1.0)
+    ax_t_min, ax_t_max = 0.0, max(45.0, t_max + (t_max * 0.15 if t_max > 0 else 1.0))
+
+    _set_tick_font(painter)
+
+    # X grid
+    d_fmt = ".2f" if dist_unit == "m" else ".1f"
+    d_step = _nice_step(ax_d_max - ax_d_min, 5)
+    x_tick = math.ceil(ax_d_min / d_step) * d_step
+    while x_tick <= ax_d_max + 1e-9:
+        cx = _map(x_tick, ax_d_min, ax_d_max, ml, ml + pw)
+        painter.setPen(QPen(QColor("#cccccc"), 0.6))
+        painter.drawLine(QPointF(cx, mt), QPointF(cx, mt + ph))
+        painter.setPen(style.CHART_AXIS_QCOLOR)
+        painter.drawText(QRectF(cx - 20, mt + ph + 2, 40, mb - 4),
+                         Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+                         f"{x_tick:{d_fmt}}")
+        x_tick += d_step
+
+    # Y axis label (rotated)
+    painter.save()
+    painter.translate(10, mt + ph / 2)
+    painter.rotate(-90)
+    f_ax = painter.font()
+    f_ax.setPixelSize(style.CHART_FONT_SIZE)
+    painter.setFont(f_ax)
+    painter.setPen(style.CHART_AXIS_QCOLOR)
+    painter.drawText(QRectF(-ph / 2, -10, ph, 20),
+                     Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, "Tilt (°)")
+    painter.restore()
+
+    # Y grid
+    t_step = _nice_step(ax_t_max - ax_t_min, 4)
+    y_tick = 0.0
+    while y_tick <= ax_t_max + 1e-9:
+        cy = _map(y_tick, ax_t_min, ax_t_max, mt + ph, mt)
+        painter.setPen(QPen(QColor("#cccccc"), 0.6))
+        painter.drawLine(QPointF(ml, cy), QPointF(ml + pw, cy))
+        painter.setPen(style.CHART_AXIS_QCOLOR)
+        painter.drawText(QRectF(0, cy - 8, ml - 3, 16),
+                         Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                         f"{y_tick:.0f}°")
+        y_tick += t_step
+
+    painter.setPen(style.CHART_AXIS_QCOLOR)
+    painter.drawText(QRectF(ml, mt + ph + 14, pw, 14),
+                     Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+                     f"Distance ({dist_unit})")
+
+    dot_r = 4.0
+    fill = QColor(main_color)
+    fill.setAlpha(180)
+    painter.setBrush(fill)
+    painter.setPen(QPen(main_color.darker(130), 0.8))
+    for (_, _, dist), tilt in zip(poses, tilts):
+        px = _map(dist, ax_d_min, ax_d_max, ml, ml + pw)
+        py = _map(tilt, ax_t_min, ax_t_max, mt + ph, mt)
+        painter.drawEllipse(QPointF(px, py), dot_r, dot_r)
+
+    _end_chart(painter, ml, mb, mt, mr, pw, ph, len(poses))
     return pix

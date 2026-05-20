@@ -205,6 +205,11 @@ class _CalibrationSolverTask(QRunnable):
             final_payload["channels"] = calibration_payload["channels"]
             final_payload["pattern_size"] = calibration_payload["pattern_size"]
             final_payload["updated_at"] = calibration_payload["updated_at"]
+            if config.chessboard_square_size_mm > 0:
+                final_payload["square_size"] = {
+                    "value": config.chessboard_square_size_mm,
+                    "unit": "mm",
+                }
             self._ensure_not_cancelled()
             save_yaml(output_path, final_payload, sort_keys=False)
 
