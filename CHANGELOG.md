@@ -1,14 +1,19 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
-
-The current runtime version is defined in [src/config.py](src/config.py).
+Note: Current runtime version is defined in [src/config.py](src/config.py).
 Each release below is pinned to the commit that best represents that snapshot.
 
 Versioning note: minor releases mark visible feature jumps; patch releases cover bugfixes and maintenance updates, including docs/help polish that does not change behavior.
 
 ## [Unreleased]
-- Attribute propagation from adjacent frames: new "Inter-frame label attribute propagation" toggle in the Labelling menu. When enabled, after any auto-detection or manual annotation the system matches annotations in the previous and next frames (same class) using IoU and sparse Lucas-Kanade optical flow, then copies any missing attributes to the matched annotations without overwriting existing values.
+
+## [0.10.0](https://github.com/enheragu/multiespectral_check/commit/8c9c801) - 2026-05-20
+- Inter-frame attribute propagation: new toggle in the Labelling menu (on by default). After any annotation action the system matches annotations in adjacent frames by class and spatial overlap (IoU + Lucas-Kanade optical flow) and copies missing attributes without overwriting existing values. Propagated fields are highlighted in the annotation editor so the user can review and correct them.
+- Calibration report — pattern pose diversity: three charts showing tilt scatter, distance histogram, and tilt-vs-distance scatter, derived from the stored corner detections via `cv2.solvePnP`. Distances shown in metres when the chessboard square size is known.
+- Calibration report — extrinsic section: translation in metres (falls back to pattern squares when square size is unknown); rotation supplemented by roll/pitch/yaw in degrees (ZYX Euler).
+- Auto-detection labels: confidence percentage shown on the bbox overlay (e.g. `person 85% ⟳`); label text clamped to stay within image bounds.
+- UI style overhaul: unified 3-tier color hierarchy (window → content area → panels), consistent table/tree headers and hover states, native checkbox/radiobutton rendering, progress bar sizing, rounded tab styling, clickable logo (opens About), fixed image view panel backgrounds.
+- Reuse default GUI style for Calibration Report and Label Report view. Better generalization of Widget and Group instantiation.
 
 ## [0.9.2](https://github.com/enheragu/multiespectral_check/commit/76284e1) - 2026-05-19
 - Bugfix: prev and next boton in viewer were not working.
