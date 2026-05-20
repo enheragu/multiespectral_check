@@ -1342,7 +1342,7 @@ class LabelService:
         # only class-specific attributes add value on the overlay.
         _HIDDEN_ATTRS = {
             "model", "model_version", "raw_label", "confidence", "source",
-            "occlusion", "truncation",
+            "occlusion", "truncation", "_propagated_attrs",
         }
 
         for ann in annotations:
@@ -1364,7 +1364,7 @@ class LabelService:
             if visible_attrs:
                 display += f" ({', '.join(visible_attrs)})"
 
-            # Append confidence percentage for auto detections
+            # Append confidence percentage for auto detections (never persisted, always fresh)
             if ann.source == AnnotationSource.AUTO and ann.confidence < 1.0:
                 display += f" {ann.confidence:.0%}"
 
