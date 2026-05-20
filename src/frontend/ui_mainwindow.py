@@ -25,21 +25,21 @@ class Ui_MainWindow(object):
 
         logo_path = Path(__file__).resolve().parent / "resources" / "media" / "logo.ico"
         logo_pixmap = QtGui.QPixmap(str(logo_path))
-        logo_corner = QtWidgets.QLabel(self.tab_widget)
-        logo_corner.setObjectName("logo_corner")
-        logo_corner.setFixedSize(24, 24)
-        logo_corner.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        logo_corner.setStyleSheet("background: transparent; margin: 0; padding: 0;")
+        self.logo_button = QtWidgets.QPushButton(self.tab_widget)
+        self.logo_button.setObjectName("logo_button")
+        self.logo_button.setFlat(True)
+        self.logo_button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.logo_button.setToolTip("About")
+        self.logo_button.setStyleSheet(
+            "#logo_button { background: transparent; border: none; padding: 2px; }"
+            "#logo_button:hover { background: rgba(0,0,0,20); border-radius: 4px; }"
+        )
         if not logo_pixmap.isNull():
-            logo_corner.setPixmap(
-                logo_pixmap.scaled(
-                    20,
-                    20,
-                    QtCore.Qt.AspectRatioMode.KeepAspectRatio,
-                    QtCore.Qt.TransformationMode.SmoothTransformation,
-                )
-            )
-        self.tab_widget.setCornerWidget(logo_corner, QtCore.Qt.Corner.TopRightCorner)
+            icon_size = style.BUTTON_HEIGHT + 2  # slightly larger than button text height
+            self.logo_button.setIcon(QtGui.QIcon(logo_pixmap))
+            self.logo_button.setIconSize(QtCore.QSize(icon_size, icon_size))
+            self.logo_button.setFixedSize(icon_size + 10, icon_size + 6)
+        self.tab_widget.setCornerWidget(self.logo_button, QtCore.Qt.Corner.TopRightCorner)
 
         # Workspace tab (embedded workspace view)
         self.tab_workspace = QtWidgets.QWidget()
@@ -136,7 +136,7 @@ class Ui_MainWindow(object):
         self.label_lwir = QtWidgets.QLabel(self.tab_dataset)
         self.label_lwir.setMinimumSize(QtCore.QSize(100, 100))  # Reduced to allow narrower window
         self.label_lwir.setStyleSheet(
-            f"border: 1px solid {style.GROUP_BORDER}; background: {style.GROUP_BG};"
+            f"border: 1px solid {style.GROUP_BORDER}; background: {style.CARD_BG};"
         )
         self.label_lwir.setText("")
         self.label_lwir.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
@@ -148,7 +148,7 @@ class Ui_MainWindow(object):
         self.label_vis = QtWidgets.QLabel(self.tab_dataset)
         self.label_vis.setMinimumSize(QtCore.QSize(100, 100))  # Reduced to allow narrower window
         self.label_vis.setStyleSheet(
-            f"border: 1px solid {style.GROUP_BORDER}; background: {style.GROUP_BG};"
+            f"border: 1px solid {style.GROUP_BORDER}; background: {style.CARD_BG};"
         )
         self.label_vis.setText("")
         self.label_vis.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
@@ -189,7 +189,7 @@ class Ui_MainWindow(object):
         )
         self.text_metadata_lwir.setStyleSheet(
             style.monospace_text_style()
-            + f" border: 0px solid {style.CARD_BG}; background: {style.CARD_BG};"
+            + f" border: 0px solid {style.TABLE_BG}; background: {style.TABLE_BG};"
         )
         self.metadata_lwir_layout.addWidget(self.text_metadata_lwir)
         lwir_col_layout.addWidget(self.metadata_lwir_panel)
@@ -217,7 +217,7 @@ class Ui_MainWindow(object):
         )
         self.text_metadata_vis.setStyleSheet(
             style.monospace_text_style()
-            + f" border: 0px solid {style.CARD_BG}; background: {style.CARD_BG};"
+            + f" border: 0px solid {style.TABLE_BG}; background: {style.TABLE_BG};"
         )
         self.metadata_vis_layout.addWidget(self.text_metadata_vis)
         vis_col_layout.addWidget(self.metadata_vis_panel)
@@ -396,6 +396,12 @@ class Ui_MainWindow(object):
             "Toggle which image channel is used for auto-detection (Visible / LWIR)"
         )
         self.action_label_report = QtGui.QAction("Label report…", MainWindow)
+        self.action_label_propagate_attrs = QtGui.QAction("Inter-frame label attribute propagation", MainWindow)
+        self.action_label_propagate_attrs.setCheckable(True)
+        self.action_label_propagate_attrs.setToolTip(
+            "When enabled, propagates label attributes from adjacent frames\n"
+            "using IoU matching and sparse optical flow (requires sequential images)."
+        )
         self.action_filter_all = QtGui.QAction("Show all images", MainWindow)
         self.action_filter_calibration_any = QtGui.QAction("Calibration candidates", MainWindow)
         self.action_filter_calibration_both = QtGui.QAction("Calibration with both detections", MainWindow)
@@ -616,6 +622,8 @@ class Ui_MainWindow(object):
         self.menu_labelling.addAction(self.action_label_auto_mode)
         self.menu_labelling.addSeparator()
         self.menu_labelling.addAction(self.action_label_detection_channel)
+        self.menu_labelling.addSeparator()
+        self.menu_labelling.addAction(self.action_label_propagate_attrs)
         self.menu_labelling.addSeparator()
         self.menu_labelling.addAction(self.action_label_report)
         self.menu_help.addAction(self.action_show_help)

@@ -101,11 +101,7 @@ class HelpDialog(QDialog):
 
         # Contact
         content_layout.addWidget(self._section_header("Contact"))
-        contact_box = QWidget(content)
-        contact_box.setObjectName("contact_box")
-        contact_box.setStyleSheet(style.panel_body_style("contact_box"))
-        contact_layout = QVBoxLayout(contact_box)
-        contact_layout.setContentsMargins(10, 8, 10, 8)
+        contact_box, contact_layout = style.make_panel("contact_box", margins=(10, 8, 10, 8))
         contact = QLabel(
             f'Maintainer: <a href="mailto:{SUPPORT_EMAIL}">{SUPPORT_EMAIL}</a><br>'
             'Repository: <a href="https://github.com/enheragu/multiespectral_check">'

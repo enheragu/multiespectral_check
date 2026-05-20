@@ -16,7 +16,6 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -43,6 +42,7 @@ from backend.services.export.image_pipeline import (
 )
 from backend.services.workspace_inspector import WorkspaceDatasetInfo, scan_workspace
 from common.log_utils import log_warning
+from frontend.widgets import style
 
 
 # Roles to stash the dataset path / has-calibration flag on tree items.
@@ -96,8 +96,18 @@ class ExportDialog(QDialog):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
 
-        # Output dir.
+        # ── Card ────────────────────────────────────────────────────────────
+        card = QWidget(self)
+        card.setObjectName("export_card")
+        card.setStyleSheet(style.card_style("export_card"))
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(14, 14, 14, 14)
+        card_layout.setSpacing(10)
+
+        # Output directory
         out_row = QHBoxLayout()
         out_row.addWidget(QLabel("Output directory:"))
         self.output_edit = QLineEdit()
@@ -106,15 +116,15 @@ class ExportDialog(QDialog):
         browse = QPushButton("Browse…")
         browse.clicked.connect(self._on_browse)
         out_row.addWidget(browse)
-        layout.addLayout(out_row)
+        card_layout.addLayout(out_row)
 
         self.output_hint = QLabel("")
-        self.output_hint.setStyleSheet("color: gray;")
-        layout.addWidget(self.output_hint)
+        self.output_hint.setVisible(False)
+        card_layout.addWidget(self.output_hint)
 
-        # Tree of datasets.
-        tree_box = QGroupBox("Datasets to export")
-        tree_layout = QVBoxLayout(tree_box)
+        # Datasets tree
+        card_layout.addWidget(style.section_heading_label("Datasets to export"))
+        tree_panel, tree_layout = style.make_panel("export_tree_panel")
 
         select_row = QHBoxLayout()
         btn_select_all = QPushButton("Select all")
@@ -135,11 +145,17 @@ class ExportDialog(QDialog):
         self.tree.setColumnWidth(1, 80)
         self.tree.setColumnWidth(2, 80)
         tree_layout.addWidget(self.tree)
-        layout.addWidget(tree_box, 1)
+        card_layout.addWidget(tree_panel, 1)
 
-        # Channels.
-        ch_box = QGroupBox("Channels")
-        ch_layout = QHBoxLayout(ch_box)
+        # ── 3-column options row: Channels | Transforms (2 inner cols) ──────
+        options_row = QHBoxLayout()
+        options_row.setSpacing(10)
+
+        # — Channels column —
+        ch_col = QVBoxLayout()
+        ch_col.setSpacing(4)
+        ch_col.addWidget(style.section_heading_label("Channels"))
+        ch_panel, ch_layout = style.make_panel("export_channels_panel")
         self.cb_lwir = QCheckBox("LWIR")
         self.cb_lwir.setChecked(True)
         self.cb_lwir.toggled.connect(self._update_alignment_availability)
@@ -149,11 +165,21 @@ class ExportDialog(QDialog):
         ch_layout.addWidget(self.cb_lwir)
         ch_layout.addWidget(self.cb_visible)
         ch_layout.addStretch(1)
-        layout.addWidget(ch_box)
+        ch_col.addWidget(ch_panel)
+        options_row.addLayout(ch_col, 1)
 
-        # Transforms.
-        tr_box = QGroupBox("Transforms")
-        tr_layout = QVBoxLayout(tr_box)
+        # — Transforms column (2 inner sub-columns) —
+        tr_col = QVBoxLayout()
+        tr_col.setSpacing(4)
+        tr_col.addWidget(style.section_heading_label("Transforms"))
+        tr_panel, tr_layout = style.make_panel("export_transforms_panel", spacing=6)
+
+        tr_inner = QHBoxLayout()
+        tr_inner.setSpacing(16)
+
+        # Left: undistort / align / parallax
+        checks_col = QVBoxLayout()
+        checks_col.setSpacing(6)
         self.cb_undistort = QCheckBox("Undistort (intrinsic calibration)")
         self.cb_undistort.setChecked(True)
         self.cb_align = QCheckBox("FOV alignment (extrinsic calibration)")
@@ -161,47 +187,60 @@ class ExportDialog(QDialog):
         self.cb_align.toggled.connect(self._update_alignment_availability)
         self.cb_parallax = QCheckBox("Parallax correction")
         self.cb_parallax.setChecked(True)
-        tr_layout.addWidget(self.cb_undistort)
-        tr_layout.addWidget(self.cb_align)
-        tr_layout.addWidget(self.cb_parallax)
+        checks_col.addWidget(self.cb_undistort)
+        checks_col.addWidget(self.cb_align)
+        checks_col.addWidget(self.cb_parallax)
+        checks_col.addStretch(1)
+        tr_inner.addLayout(checks_col, 1)
 
-        res_row = QHBoxLayout()
-        res_row.addWidget(QLabel("Resolution:"))
+        # Right: resolution
+        res_col = QVBoxLayout()
+        res_col.setSpacing(6)
+        res_lbl = QLabel("Resolution:")
+        res_lbl.setStyleSheet(style.SECTION_TITLE_STYLE)
         self.rb_upsample = QRadioButton("Upsample to largest")
         self.rb_upsample.setChecked(True)
         self.rb_downsample = QRadioButton("Downsample to smallest")
         self._res_group = QButtonGroup(self)
         self._res_group.addButton(self.rb_upsample)
         self._res_group.addButton(self.rb_downsample)
-        res_row.addWidget(self.rb_upsample)
-        res_row.addWidget(self.rb_downsample)
-        res_row.addStretch(1)
-        tr_layout.addLayout(res_row)
+        res_col.addWidget(res_lbl)
+        res_col.addWidget(self.rb_upsample)
+        res_col.addWidget(self.rb_downsample)
+        res_col.addStretch(1)
+        tr_inner.addLayout(res_col, 1)
 
+        tr_layout.addLayout(tr_inner)
         self.transform_hint = QLabel("")
-        self.transform_hint.setStyleSheet("color: gray;")
+        self.transform_hint.setVisible(False)
+        self.transform_hint.setWordWrap(True)
         tr_layout.addWidget(self.transform_hint)
-        layout.addWidget(tr_box)
+        tr_col.addWidget(tr_panel)
+        options_row.addLayout(tr_col, 2)
 
-        # Labels (informational only, no choices for now).
-        lbl_box = QGroupBox("Labels")
-        lbl_layout = QVBoxLayout(lbl_box)
+        card_layout.addLayout(options_row)
+
+        # Labels info
+        card_layout.addWidget(style.section_heading_label("Labels"))
+        lbl_panel, lbl_layout = style.make_panel("export_labels_panel")
         lbl_layout.addWidget(QLabel(
-            "Source filter: manual + reviewed (auto-pending excluded).\n"
-            "Output: union of both channels (other-channel labels projected via H)."
+            "Source: manual + reviewed (auto-pending excluded). "
+            "Output: union of both channels, cross-channel labels projected via H."
         ))
-        layout.addWidget(lbl_box)
+        card_layout.addWidget(lbl_panel)
 
-        # Progress + buttons.
+        layout.addWidget(card, 1)
+
+        # ── Progress + buttons (outside card, always visible) ──────────────
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
-        self.progress_bar.setTextVisible(True)
         self.progress_bar.setFormat("Idle")
         layout.addWidget(self.progress_bar)
 
         self.progress_msg = QLabel("")
-        self.progress_msg.setStyleSheet("color: gray;")
+        self.progress_msg.setVisible(False)
+        self.progress_msg.setWordWrap(True)
         layout.addWidget(self.progress_msg)
 
         self.button_box = QDialogButtonBox(
@@ -315,14 +354,16 @@ class ExportDialog(QDialog):
         self.rb_downsample.setEnabled(both and self.cb_align.isChecked())
 
         if none:
-            self.transform_hint.setText("Select at least one channel.")
+            msg = "Select at least one channel."
         elif not both:
-            self.transform_hint.setText(
+            msg = (
                 "Single-channel export: no alignment between channels. "
                 "Other-channel labels still get projected onto the exported image."
             )
         else:
-            self.transform_hint.setText("")
+            msg = ""
+        self.transform_hint.setText(msg)
+        self.transform_hint.setVisible(bool(msg))
 
     def _on_browse(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Select output directory")
@@ -331,6 +372,7 @@ class ExportDialog(QDialog):
             self.output_hint.setText(
                 f"Will create: {Path(path) / (self._workspace_path.name + '_export')}"
             )
+            self.output_hint.setVisible(True)
 
     # ── selection collection ────────────────────────────────────────────
 
@@ -477,6 +519,7 @@ class ExportDialog(QDialog):
             self.progress_bar.setValue(pct)
             self.progress_bar.setFormat(f"{pct}%  ({current}/{total})")
         self.progress_msg.setText(message)
+        self.progress_msg.setVisible(bool(message))
 
     def _on_finished(self, result: ExportResult) -> None:
         self._teardown_worker()
@@ -487,9 +530,9 @@ class ExportDialog(QDialog):
         errored = [r for r in result.datasets if r.error]
 
         if result.cancelled:
-            self.progress_msg.setText("Export cancelled.")
+            msg = "Export cancelled."
         else:
-            summary = f"✓ {result.total_images} images, {result.total_labels} labels → {result.output_root}"
+            msg = f"✓ {result.total_images} images, {result.total_labels} labels → {result.output_root}"
             warnings: List[str] = []
             if skipped_no_calib:
                 warnings.append(
@@ -498,8 +541,7 @@ class ExportDialog(QDialog):
             if errored:
                 warnings.append(f"{len(errored)} dataset(s) failed (see log)")
             if warnings:
-                summary += "\n⚠ " + "; ".join(warnings)
-            self.progress_msg.setText(summary)
+                msg += "\n⚠ " + "; ".join(warnings)
 
             if skipped_no_calib or errored:
                 detail_lines = []
@@ -513,6 +555,8 @@ class ExportDialog(QDialog):
                     )
                 QMessageBox.warning(self, "Export completed with warnings", "\n".join(detail_lines))
 
+        self.progress_msg.setText(msg)
+        self.progress_msg.setVisible(True)
         self.button_box.button(QDialogButtonBox.StandardButton.Cancel).setText("Close")
         self._set_running(False)
 
@@ -520,6 +564,7 @@ class ExportDialog(QDialog):
         self._teardown_worker()
         self.progress_bar.setFormat("Failed")
         self.progress_msg.setText(f"Failed: {message}")
+        self.progress_msg.setVisible(True)
         QMessageBox.critical(self, "Export failed", message)
         self.button_box.button(QDialogButtonBox.StandardButton.Cancel).setText("Close")
         self._set_running(False)
@@ -528,6 +573,7 @@ class ExportDialog(QDialog):
         if self._worker is not None and self._worker_thread is not None and self._worker_thread.isRunning():
             self._worker.cancel()
             self.progress_msg.setText("Cancelling…")
+            self.progress_msg.setVisible(True)
             return
         self.reject()
 

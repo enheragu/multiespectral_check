@@ -1,4 +1,10 @@
 """Shared UI style helpers for dialogs and panels."""
+from __future__ import annotations
+
+from typing import Tuple
+
+from PyQt6.QtGui import QColor
+from PyQt6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 APP_BG = "#eceff3"  # light gray app background
 CARD_BG = "#f9fafc"  # almost-white panels
@@ -16,6 +22,9 @@ TABLE_BG = "#ffffff"
 TABLE_ALT_BG = "#f6f7f9"
 TABLE_SELECT_BG = "#dbe7ff"
 TABLE_SELECT_FG = "#1c2230"
+ACCENT = "#4476c4"        # primary action / interactive accent (blue family of TABLE_SELECT_BG)
+ACCENT_HOVER = "#3a68b8"  # darker on hover
+ACCENT_LIGHT = "#b8c8e0"  # muted accent for disabled/indeterminate states
 BUTTON_BG = "#f9fafc"
 BUTTON_BG_HOVER = "#edf1f7"
 BUTTON_BORDER = GROUP_BORDER
@@ -23,6 +32,30 @@ BUTTON_BORDER_STRONG = "#c5ced9"
 BUTTON_BG_GRADIENT = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #fefefe, stop:1 #e1e6ef)"
 BUTTON_BG_DISABLED = BUTTON_BG_GRADIENT
 BUTTON_HEIGHT = 18
+
+# Shared chart rendering constants (used by calibration and label report charts)
+CHART_DPR = 2
+CHART_AXIS_COLOR = "#444444"
+CHART_FONT_SIZE = 9
+CHART_TITLE_FONT_SIZE = 10
+CHART_MARGINS = (40, 28, 22, 10)  # (left, bottom, top, right)
+CHART_PLOT_BG = "white"
+
+# Chart pixmap sizes (logical pixels, DPR applied separately)
+CHART_W_PAIR = 430   # width for charts shown two side-by-side (calibration coverage/distortion)
+CHART_H_PAIR = 310   # height for standard paired charts
+CHART_W_GRID = 380   # width for charts in a 2×2 grid (label report)
+CHART_H_GRID = 280   # height for grid charts (also pose-diversity rows)
+
+# Recommended minimum dialog width for report/analysis dialogs (2×CHART_W_PAIR + all margins)
+DIALOG_REPORT_MIN_W = 960
+
+# Pre-built QColor objects for chart rendering (QColor is safe without QApplication)
+CHART_AXIS_QCOLOR = QColor(CHART_AXIS_COLOR)
+CHART_PLOT_BG_QCOLOR = QColor(CHART_PLOT_BG)
+CHART_BG_QCOLOR = QColor(CARD_BG)
+CHART_PLACEHOLDER_QCOLOR = QColor("#999999")  # "no data" borders and placeholder outlines
+
 SECTION_TITLE_STYLE = (
     f"font-size: 12.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.55px;"
     f" color: {TEXT_TITLE};"
@@ -33,33 +66,38 @@ TITLE_STYLE_BASE = f"font-weight: 700; color: {TEXT_TITLE}; background: transpar
 
 def card_style(object_name: str) -> str:
     return (
-        f"#{object_name} {{ background: {CARD_BG}; border-radius: 8px; }}"
+        f"#{object_name} {{ background: {TABLE_BG}; border-radius: 8px; }}"
         f"#{object_name} QLabel {{ color: {TEXT_PRIMARY}; font-size: {BODY_FONT_SIZE}; background: transparent; }}"
     )
 
 
 def panel_body_style(object_name: str) -> str:
     return (
-        f"#{object_name} {{ background: {CARD_BG}; border: 1px solid {GROUP_BORDER};"
+        f"#{object_name} {{ background: {TABLE_BG}; border: 1px solid {GROUP_BORDER};"
         f" border-radius: 8px; padding: 10px 12px; font-size: {BODY_FONT_SIZE}; }}"
         f"#{object_name} QLabel {{ background: transparent; }}"
     )
 
 
 def group_box_style() -> str:
+    """Style for untitled QGroupBoxes (no margin-top)."""
     return (
         f"QGroupBox {{ border: 1px solid {GROUP_BORDER}; border-radius: 7px;"
-        f" background: {GROUP_BG}; color: {TEXT_PRIMARY}; font-size: {BODY_FONT_SIZE}; }}"
-        # margin-top: 15px; padding-top: 15px;
-        f"QGroupBox::title {{ font-weight: 700; font-size: 13px; padding: 15 5px; color: {TEXT_TITLE};"
-        f" subcontrol-origin: margin; subcontrol-position: top left; margin-left: 6px; }}"
-        f"QLabel {{ color: {TEXT_PRIMARY}; }}"
+        f" background: {TABLE_BG}; color: {TEXT_PRIMARY}; font-size: {BODY_FONT_SIZE}; }}"
+        f"QLabel {{ background: transparent; color: {TEXT_PRIMARY}; }}"
     )
 
 
-def group_box_with_title_style(title_size: float = 13.0) -> str:
-    base = group_box_style()
-    return base.replace("font-size: 13px", f"font-size: {title_size}px")
+def titled_group_box_style(title_size: float = 13.0) -> str:
+    """Style for QGroupBoxes WITH a visible title (includes margin-top for the title area)."""
+    return (
+        f"QGroupBox {{ border: 1px solid {GROUP_BORDER}; border-radius: 7px; margin-top: 16px;"
+        f" background: {TABLE_BG}; color: {TEXT_PRIMARY}; font-size: {BODY_FONT_SIZE}; }}"
+        f"QGroupBox::title {{ font-weight: 700; font-size: {title_size}px; padding: 0 5px;"
+        f" color: {TEXT_TITLE}; subcontrol-origin: margin; subcontrol-position: top left;"
+        f" margin-left: 6px; }}"
+        f"QLabel {{ background: transparent; color: {TEXT_PRIMARY}; }}"
+    )
 
 
 def heading_style(size: float = HEADING_FONT_SIZE) -> str:
@@ -88,20 +126,18 @@ def scoped_button_style(object_name: str) -> str:
     )
 
 def table_widget_style() -> str:
-    return (
-        f"QTableWidget {{ background: {TABLE_BG}; alternate-background-color: {TABLE_ALT_BG};"
-        f" color: {TEXT_PRIMARY}; selection-background-color: {TABLE_SELECT_BG};"
-        f" selection-color: {TABLE_SELECT_FG}; gridline-color: {GROUP_BORDER}; }}"
-    )
+    return ""  # covered by app_stylesheet() globally
 
 
 def app_stylesheet() -> str:
     """Application-wide stylesheet with consistent background and text colors."""
     return (
         f"QMainWindow {{ background: {APP_BG}; color: {TEXT_PRIMARY}; font-size: {BODY_FONT_SIZE}; }}"
+        f"QWidget#centralwidget {{ background: {APP_BG}; }}"
         f"QDialog {{ background: {APP_BG}; color: {TEXT_PRIMARY}; font-size: {BODY_FONT_SIZE}; }}"
         f"QMessageBox {{ background: {APP_BG}; color: {TEXT_PRIMARY}; font-size: {BODY_FONT_SIZE}; }}"
-        f"QWidget {{ color: {TEXT_PRIMARY}; background: {APP_BG}; font-size: {BODY_FONT_SIZE}; }}"
+        f"QWidget {{ color: {TEXT_PRIMARY}; font-size: {BODY_FONT_SIZE}; }}"
+        f"QScrollArea {{ background: {APP_BG}; }}"
         f"QLabel {{ color: {TEXT_PRIMARY}; background: transparent; font-size: {BODY_FONT_SIZE}; }}"
         f"QGroupBox {{ color: {TEXT_PRIMARY}; font-size: {BODY_FONT_SIZE}; }}"
         f"QMenuBar {{ background: {MENU_BG}; color: {MENU_FG}; }}"
@@ -122,7 +158,34 @@ def app_stylesheet() -> str:
         f"QDialogButtonBox QPushButton:hover {{ background: {BUTTON_BG_HOVER}; border-color: {BUTTON_BORDER_STRONG}; }}"
         f"QDialogButtonBox QPushButton:pressed {{ background: #dfe6f1; border-color: {TEXT_PRIMARY}; }}"
         f"QDialogButtonBox QPushButton:disabled {{ color: #8d95a3; background: {BUTTON_BG_DISABLED}; border-color: {BUTTON_BORDER_STRONG}; }}"
-        f"QLineEdit, QTextEdit, QPlainTextEdit {{ background: {CARD_BG}; color: {TEXT_PRIMARY};"
+        f"QTreeView, QTreeWidget, QTableView, QTableWidget {{"
+        f" background: {TABLE_BG}; alternate-background-color: {TABLE_ALT_BG};"
+        f" color: {TEXT_PRIMARY}; selection-background-color: {TABLE_SELECT_BG};"
+        f" selection-color: {TABLE_SELECT_FG}; gridline-color: {GROUP_BORDER};"
+        f" outline: none; border: 1px solid {GROUP_BORDER}; border-radius: 6px; }}"
+        f"QTreeView::item, QTreeWidget::item, QTableView::item, QTableWidget::item {{ padding: 2px 0; }}"
+        f"QTreeView::item:hover, QTreeWidget::item:hover, QTableView::item:hover, QTableWidget::item:hover {{ background: {BUTTON_BG_HOVER}; }}"
+        f"QTreeView::item:selected, QTreeWidget::item:selected, QTableView::item:selected, QTableWidget::item:selected {{ background: {TABLE_SELECT_BG}; color: {TABLE_SELECT_FG}; }}"
+        f"QTreeView::item:selected:active, QTreeWidget::item:selected:active, QTableView::item:selected:active, QTableWidget::item:selected:active {{ background: {TABLE_SELECT_BG}; color: {TABLE_SELECT_FG}; }}"
+        f"QHeaderView::section {{"
+        f" background: {APP_BG}; color: {TEXT_PRIMARY}; border: none;"
+        f" border-bottom: 1px solid {GROUP_BORDER}; border-right: 1px solid {GROUP_BORDER};"
+        f" padding: 4px 6px; font-size: {BODY_FONT_SIZE}; font-weight: 600; }}"
+        f"QProgressBar {{ background: {CARD_BG}; border: 1px solid {GROUP_BORDER}; border-radius: 6px;"
+        f" min-height: {BUTTON_HEIGHT}px; max-height: {BUTTON_HEIGHT}px; padding: 5px 10px;"
+        f" font-size: {BODY_FONT_SIZE}; text-align: center; color: {TEXT_PRIMARY}; }}"
+        f"QProgressBar::chunk {{ background: {TABLE_SELECT_BG}; border-radius: 5px; }}"
+        f"QWidget#tab_workspace, QWidget#tab_dataset {{ background: {CARD_BG}; }}"
+        f"QTabWidget::pane {{ border: 1px solid {BUTTON_BORDER_STRONG}; background: {CARD_BG}; top: -1px; }}"
+        f"QTabBar {{ background: transparent; }}"
+        f"QTabBar::tab {{ background: {APP_BG}; color: #5a6270; font-size: {BODY_FONT_SIZE};"
+        f" border: 1px solid {BUTTON_BORDER_STRONG}; border-bottom: none;"
+        f" border-top-left-radius: 6px; border-top-right-radius: 6px;"
+        f" padding: 5px 16px; min-width: 80px; }}"
+        f"QTabBar::tab:selected {{ background: {CARD_BG}; color: {TEXT_TITLE}; font-weight: 600;"
+        f" border-color: {BUTTON_BORDER_STRONG}; margin-bottom: -1px; padding-bottom: 6px; }}"
+        f"QTabBar::tab:hover:!selected {{ background: {BUTTON_BG_HOVER}; color: {TEXT_PRIMARY}; }}"
+        f"QLineEdit, QTextEdit, QPlainTextEdit {{ background: {TABLE_BG}; color: {TEXT_PRIMARY};"
         f" border: 1px solid {GROUP_BORDER}; border-radius: 6px; padding: 6px; font-size: {BODY_FONT_SIZE};"
         f" selection-background-color: {TABLE_SELECT_BG}; selection-color: {TEXT_PRIMARY}; }}"
     )
@@ -139,3 +202,29 @@ def monospace_text_style() -> str:
 def apply_app_style(app) -> None:
     """Apply the shared stylesheet to the given QApplication instance."""
     app.setStyleSheet(app_stylesheet())
+
+
+def make_panel(
+    object_name: str,
+    margins: Tuple[int, int, int, int] = (6, 6, 6, 6),
+    spacing: int = 6,
+) -> Tuple[QWidget, QVBoxLayout]:
+    """Create a styled panel widget (panel_body_style) with a QVBoxLayout.
+
+    Returns the panel widget and its layout so callers can add content directly.
+    Inner sub-layouts (QFormLayout, QGridLayout) should set their own margins to (0,0,0,0).
+    """
+    panel = QWidget()
+    panel.setObjectName(object_name)
+    panel.setStyleSheet(panel_body_style(object_name))
+    layout = QVBoxLayout(panel)
+    layout.setContentsMargins(*margins)
+    layout.setSpacing(spacing)
+    return panel, layout
+
+
+def section_heading_label(text: str, size: float = HEADING_FONT_SIZE) -> QLabel:
+    """Create a styled section heading QLabel."""
+    label = QLabel(text)
+    label.setStyleSheet(heading_style(size))
+    return label

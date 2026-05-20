@@ -7,6 +7,8 @@ from PyQt6.QtCore import QEvent, QPoint, QPointF, Qt, QRect, pyqtSignal
 from PyQt6.QtGui import QPixmap, QPainter, QColor, QPen, QFont
 from PyQt6.QtWidgets import QLabel, QScrollArea, QRubberBand
 
+from frontend.widgets import style
+
 
 class ZoomPanView(QScrollArea):
     """Scrollable label that supports Ctrl+wheel zoom and drag panning."""
@@ -25,9 +27,12 @@ class ZoomPanView(QScrollArea):
 
         self._label = QLabel("Select a dataset")
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._label.setStyleSheet("background: #f0f0f0; border: 2px solid gray;")
+        self._label.setStyleSheet(
+            f"background: {style.CARD_BG}; border: 1px solid {style.GROUP_BORDER};"
+        )
         self._label.setMinimumSize(100, 100)  # Further reduced to allow narrower window
         self.setWidget(self._label)
+        self.viewport().setStyleSheet(f"background: {style.CARD_BG};")
 
         # Install event filter for overlay painting
         self._label.installEventFilter(self)

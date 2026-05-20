@@ -36,7 +36,6 @@ class ProgressPanel(QWidget):
         self.progress_bar = QProgressBar(self)
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setMinimumWidth(320)
-        self.progress_bar.setFixedHeight(style.BUTTON_HEIGHT)
         self.progress_bar.setSizePolicy(
             QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         )
@@ -44,7 +43,6 @@ class ProgressPanel(QWidget):
         self.cancel_button = QPushButton("Cancel", self)
         self.cancel_button.setVisible(False)
         self.cancel_button.setMinimumWidth(86)
-        self.cancel_button.setFixedHeight(style.BUTTON_HEIGHT)
         self.cancel_button.setObjectName("progress_cancel_button")
         self.cancel_button.setStyleSheet(style.scoped_button_style(self.cancel_button.objectName()))
         self.cancel_button.setSizePolicy(

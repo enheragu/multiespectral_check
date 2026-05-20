@@ -35,15 +35,8 @@ from frontend.widgets import style
 # ---------------------------------------------------------------------------
 # Chart rendering constants
 # ---------------------------------------------------------------------------
-_CHART_W = 320        # chart pixmap logical width
-_CHART_H = 260        # chart pixmap logical height
-_DPR = 2              # device pixel ratio for crisp rendering
-_AXIS_COLOR = QColor("#444444")
-_BG_COLOR = QColor("#fafafa")
-_FONT_SIZE = 9
-_TITLE_FONT_SIZE = 10
-# Margins: left, bottom, top, right  (for axis-labelled charts)
-_M = (40, 28, 22, 10)
+_CHART_W = style.CHART_W_GRID
+_CHART_H = style.CHART_H_GRID
 
 # Colour palette for per-class items (12 distinguishable colours)
 _CLASS_COLORS = [
@@ -76,7 +69,7 @@ class LabelReportDialog(QDialog):
         self._title = title
         self._refresh_callback = None
         self.setWindowTitle(title)
-        self.setMinimumWidth(720)
+        self.setMinimumWidth(style.DIALOG_REPORT_MIN_W)
         self._build_ui()
 
     # ------------------------------------------------------------------
@@ -125,15 +118,15 @@ class LabelReportDialog(QDialog):
             card_layout.addWidget(empty)
         else:
             # Overview panel
-            card_layout.addWidget(self._section_heading("Overview"))
+            card_layout.addWidget(style.section_heading_label("Overview"))
             card_layout.addWidget(self._overview_panel())
 
             # Charts 2×2 grid with class selector
-            card_layout.addWidget(self._section_heading("Distribution"))
+            card_layout.addWidget(style.section_heading_label("Distribution"))
             card_layout.addWidget(self._charts_section())
 
             # Per-class panels
-            card_layout.addWidget(self._section_heading("Classes"))
+            card_layout.addWidget(style.section_heading_label("Classes"))
             card_layout.addWidget(self._classes_panel())
 
         card_layout.addStretch(1)
@@ -200,10 +193,7 @@ class LabelReportDialog(QDialog):
 
     def _charts_section(self) -> QWidget:
         """Build charts panel: class selector + 2×2 chart grid."""
-        wrapper = QWidget()
-        vbox = QVBoxLayout(wrapper)
-        vbox.setContentsMargins(0, 0, 0, 0)
-        vbox.setSpacing(8)
+        wrapper, vbox = style.make_panel("label_charts_panel", margins=(8, 8, 8, 8), spacing=8)
 
         # Precompute sorted classes list (used by combo, histogram, colours)
         by_class = self.summary.get("by_class", {})
@@ -308,12 +298,7 @@ class LabelReportDialog(QDialog):
         by_class: Dict[str, Any] = self.summary.get("by_class", {})
         sorted_classes = sorted(by_class.items(), key=lambda kv: kv[1].get("total", 0), reverse=True)
 
-        panel = QWidget()
-        panel.setObjectName("label_classes_panel")
-        panel.setStyleSheet(style.panel_body_style("label_classes_panel"))
-        vbox = QVBoxLayout(panel)
-        vbox.setContentsMargins(10, 8, 10, 8)
-        vbox.setSpacing(10)
+        panel, vbox = style.make_panel("label_classes_panel", margins=(10, 8, 10, 8), spacing=10)
 
         for class_id, cls_data in sorted_classes:
             cls_name = cls_data.get("name") or class_id
@@ -361,11 +346,6 @@ class LabelReportDialog(QDialog):
     # Helpers
     # ------------------------------------------------------------------
 
-    def _section_heading(self, text: str) -> QLabel:
-        lbl = QLabel(text)
-        lbl.setStyleSheet(style.heading_style())
-        return lbl
-
     def _field(self, text: str) -> QLabel:
         lbl = QLabel(text)
         lbl.setStyleSheet("font-weight: 700; color: #111;")
@@ -388,9 +368,9 @@ class LabelReportDialog(QDialog):
 
 def _make_pixmap(w: int, h: int) -> QPixmap:
     """Create a HiDPI-ready pixmap filled with background colour."""
-    pix = QPixmap(w * _DPR, h * _DPR)
-    pix.setDevicePixelRatio(_DPR)
-    pix.fill(_BG_COLOR)
+    pix = QPixmap(w * style.CHART_DPR, h * style.CHART_DPR)
+    pix.setDevicePixelRatio(style.CHART_DPR)
+    pix.fill(style.CHART_BG_QCOLOR)
     return pix
 
 
@@ -398,7 +378,7 @@ def _setup_painter(pix: QPixmap) -> QPainter:
     p = QPainter(pix)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     f = p.font()
-    f.setPixelSize(_FONT_SIZE)
+    f.setPixelSize(style.CHART_FONT_SIZE)
     p.setFont(f)
     return p
 
@@ -406,14 +386,14 @@ def _setup_painter(pix: QPixmap) -> QPainter:
 def _draw_title(p: QPainter, title: str, width: int) -> None:
     """Draw a centred title in the top margin."""
     f = p.font()
-    f.setPixelSize(_TITLE_FONT_SIZE)
+    f.setPixelSize(style.CHART_TITLE_FONT_SIZE)
     f.setBold(True)
     p.setFont(f)
-    p.setPen(_AXIS_COLOR)
-    p.drawText(QRectF(0, 2, width, _M[2] - 2),
+    p.setPen(style.CHART_AXIS_QCOLOR)
+    p.drawText(QRectF(0, 2, width, style.CHART_MARGINS[2] - 2),
                Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom, title)
     f.setBold(False)
-    f.setPixelSize(_FONT_SIZE)
+    f.setPixelSize(style.CHART_FONT_SIZE)
     p.setFont(f)
 
 
@@ -421,11 +401,11 @@ def _draw_axes(p: QPainter, w: int, h: int,
                x_label: str, y_label: str,
                n_ticks: int = 6) -> None:
     """Draw axes, tick marks (0.0 … 1.0), and axis labels."""
-    ml, mb, mt, mr = _M
+    ml, mb, mt, mr = style.CHART_MARGINS
     pw = w - ml - mr
     ph = h - mt - mb
 
-    pen = QPen(_AXIS_COLOR, 1)
+    pen = QPen(style.CHART_AXIS_QCOLOR, 1)
     p.setPen(pen)
     p.drawLine(ml, mt, ml, h - mb)
     p.drawLine(ml, h - mb, w - mr, h - mb)
@@ -475,9 +455,11 @@ def _render_class_histogram(
     p = _setup_painter(pix)
     _draw_title(p, "Labels per class", width)
 
-    ml, mb, mt, mr = 70, 10, 26, 36  # wider left margin for names
+    ml, mb, mt, mr = style.CHART_MARGINS  # identical margins to the other three charts
     pw = width - ml - mr
     ph = height - mt - mb
+
+    p.fillRect(QRectF(ml, mt, pw, ph), style.CHART_PLOT_BG_QCOLOR)
 
     n = len(sorted_classes)
     max_count = max(cd.get("total", 0) for _, cd in sorted_classes) or 1
@@ -496,18 +478,28 @@ def _render_class_histogram(
 
         p.fillRect(QRectF(ml, y, bw, bar_h), color)
 
-        # Class name on the left
-        p.setPen(_AXIS_COLOR)
+        # Label: "id: name (count)" inside the bar when wide enough, else after it
         label = f"{cid}: {cname}" if cid != cname else str(cname)
-        if len(label) > 10:
-            label = label[:9] + "…"
-        p.drawText(QRectF(2, y, ml - 4, bar_h),
-                   Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, label)
+        if len(label) > 14:
+            label = label[:13] + "…"
+        count_str = str(total)
+        if bw >= pw * 0.35:
+            # Wide bar: name left-inside (white), count right-inside (white)
+            p.setPen(QColor("white"))
+            p.drawText(QRectF(ml + 3, y, bw - 6, bar_h),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, label)
+            p.drawText(QRectF(ml + 3, y, bw - 6, bar_h),
+                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, count_str)
+        else:
+            # Narrow bar: name + count to the right of bar
+            p.setPen(style.CHART_AXIS_QCOLOR)
+            p.drawText(QRectF(ml + bw + 3, y, pw - bw - 3, bar_h),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                       f"{label} {count_str}")
 
-        # Count on the right of bar
-        p.drawText(QRectF(ml + bw + 2, y, mr - 4, bar_h),
-                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                   str(total))
+    # Border (matches the other three charts)
+    p.setPen(QPen(style.CHART_PLACEHOLDER_QCOLOR, 1))
+    p.drawRect(QRectF(ml, mt, pw, ph))
 
     p.end()
     return pix
@@ -527,12 +519,11 @@ def _render_bbox_overlay(
     p = _setup_painter(pix)
     _draw_title(p, "Bounding boxes", width)
 
-    ml, mb, mt, mr = _M
+    ml, mb, mt, mr = style.CHART_MARGINS
     pw = width - ml - mr
     ph = height - mt - mb
 
-    # Background image area
-    p.fillRect(QRectF(ml, mt, pw, ph), QColor("#f0f0f0"))
+    p.fillRect(QRectF(ml, mt, pw, ph), style.CHART_PLOT_BG_QCOLOR)
 
     # Axes with ticks
     _draw_axes(p, width, height, "x", "y")
@@ -555,7 +546,7 @@ def _render_bbox_overlay(
             p.drawRect(QRectF(x, y, rw, rh))
 
     # Border
-    p.setPen(QPen(QColor("#999"), 1))
+    p.setPen(QPen(style.CHART_PLACEHOLDER_QCOLOR, 1))
     p.drawRect(QRectF(ml, mt, pw, ph))
 
     p.end()
@@ -579,7 +570,7 @@ def _render_heatmap(
     title = f"{y_label} vs {x_label}" if y_label != x_label else y_label
     _draw_title(p, title, width)
 
-    ml, mb, mt, mr = _M
+    ml, mb, mt, mr = style.CHART_MARGINS
     pw = width - ml - mr
     ph = height - mt - mb
 
@@ -587,7 +578,7 @@ def _render_heatmap(
     cols = len(grid[0]) if rows else 0
 
     if rows == 0 or cols == 0:
-        p.setPen(_AXIS_COLOR)
+        p.setPen(style.CHART_AXIS_QCOLOR)
         p.drawText(QRectF(ml, mt, pw, ph),
                    Qt.AlignmentFlag.AlignCenter, "No data")
         p.end()
@@ -612,7 +603,7 @@ def _render_heatmap(
     _draw_axes(p, width, height, x_label, y_label)
 
     # Border
-    p.setPen(QPen(QColor("#999"), 1))
+    p.setPen(QPen(style.CHART_PLACEHOLDER_QCOLOR, 1))
     p.drawRect(QRectF(ml, mt, pw, ph))
 
     p.end()

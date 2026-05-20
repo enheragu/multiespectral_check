@@ -689,7 +689,7 @@ class WorkspacePanel(QWidget):
             header.setStretchLastSection(False)
         vert_header = self.table.verticalHeader()
         if vert_header is not None:
-            vert_header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+            vert_header.setVisible(False)
         layout.addWidget(self.table, 6)
 
         buttons = QHBoxLayout()

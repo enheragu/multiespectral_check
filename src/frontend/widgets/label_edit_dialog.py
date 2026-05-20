@@ -42,6 +42,8 @@ if TYPE_CHECKING:
 
 import yaml
 
+from frontend.widgets import style
+
 
 class LabelEditDialog(QDialog):
     """Dialog for editing annotation class and attributes."""
@@ -104,6 +106,10 @@ class LabelEditDialog(QDialog):
         self._ok_button: Optional[QWidget] = None
         self._delete_requested: bool = False
 
+        # Track which attribute keys were suggested by propagation
+        _attrs = (annotation.attributes or {}) if annotation else {}
+        self._propagated_keys: set = set(_attrs.get("_propagated_attrs") or [])
+
         # Block signals during setup
         self._setup_in_progress = True
         self._setup_ui()
@@ -143,6 +149,7 @@ class LabelEditDialog(QDialog):
 
         # === Class Selection ===
         class_group = QGroupBox("Class")
+        class_group.setStyleSheet(style.titled_group_box_style())
         class_layout = QFormLayout(class_group)
         class_layout.setContentsMargins(8, 12, 8, 8)
 
@@ -169,6 +176,7 @@ class LabelEditDialog(QDialog):
 
         # === Bounding Box (Corner-based) ===
         bbox_group = QGroupBox("Bounding Box")
+        bbox_group.setStyleSheet(style.titled_group_box_style())
         bbox_layout = QVBoxLayout(bbox_group)
         bbox_layout.setContentsMargins(8, 12, 8, 8)
         bbox_layout.setSpacing(4)
@@ -251,6 +259,7 @@ class LabelEditDialog(QDialog):
 
         # === Universal Attributes ===
         universal_group = QGroupBox("Attributes")
+        universal_group.setStyleSheet(style.titled_group_box_style())
         universal_layout = QFormLayout(universal_group)
         universal_layout.setContentsMargins(8, 12, 8, 8)
         universal_layout.setSpacing(4)
@@ -296,6 +305,7 @@ class LabelEditDialog(QDialog):
 
         # === Class-Specific Attributes (dynamic) ===
         self._class_attrs_group = QGroupBox("Class Attributes")
+        self._class_attrs_group.setStyleSheet(style.titled_group_box_style())
         self._class_attrs_layout = QFormLayout(self._class_attrs_group)
         self._class_attrs_layout.setContentsMargins(8, 12, 8, 8)
         self._class_attrs_layout.setSpacing(4)
@@ -304,6 +314,7 @@ class LabelEditDialog(QDialog):
 
         # === Advanced Attributes (YAML fallback) ===
         self._advanced_group = QGroupBox("Advanced (YAML)")
+        self._advanced_group.setStyleSheet(style.titled_group_box_style())
         self._advanced_group.setCheckable(True)
         self._advanced_group.setChecked(False)
         advanced_layout = QVBoxLayout(self._advanced_group)
@@ -497,8 +508,8 @@ class LabelEditDialog(QDialog):
         if not self._advanced_text:
             return
 
-        # Collect attrs not handled by standard widgets
-        handled = {"occlusion", "truncation", "source", "confidence"}
+        # Collect attrs not handled by standard widgets (skip internal propagation marker)
+        handled = {"occlusion", "truncation", "source", "confidence", "_propagated_attrs"}
         handled.update(self._class_attr_widgets.keys())
 
         extra = {k: v for k, v in attrs.items() if k not in handled}
@@ -570,13 +581,50 @@ class LabelEditDialog(QDialog):
             widget = self._create_attr_widget(attr_def)
             if widget:
                 label_text = attr_name.replace('_', ' ').title() + ":"
-                self._class_attrs_layout.addRow(label_text, widget)
+                if attr_name in self._propagated_keys:
+                    lbl = QLabel(label_text)
+                    lbl.setStyleSheet("font-weight: bold; font-style: italic;")
+                    lbl.setToolTip("Suggested from adjacent frame — verify and correct if needed")
+                    self._class_attrs_layout.addRow(lbl, widget)
+                    widget.setStyleSheet("background-color: #b8d4ff;")
+                    widget.setToolTip("Suggested from adjacent frame — verify and correct if needed")
+                else:
+                    self._class_attrs_layout.addRow(label_text, widget)
                 self._class_attr_widgets[attr_name] = widget
 
         # Populate from existing annotation if editing
         if self.annotation and self.annotation.attributes:
             self._populate_class_attrs(self.annotation.attributes)
             self._populate_advanced_attrs(self.annotation.attributes)
+
+        # Connect change signals for propagated fields — after population to avoid spurious clears
+        self._connect_propagation_signals()
+
+    def _connect_propagation_signals(self) -> None:
+        """Connect widget change signals to clear the propagated mark on user edit."""
+        for attr_name, widget in self._class_attr_widgets.items():
+            if attr_name not in self._propagated_keys:
+                continue
+            if isinstance(widget, QComboBox):
+                widget.currentIndexChanged.connect(
+                    lambda _, k=attr_name: self._clear_propagated(k)
+                )
+            elif isinstance(widget, QCheckBox):
+                widget.stateChanged.connect(
+                    lambda _, k=attr_name: self._clear_propagated(k)
+                )
+            elif isinstance(widget, QDoubleSpinBox):
+                widget.valueChanged.connect(
+                    lambda _, k=attr_name: self._clear_propagated(k)
+                )
+
+    def _clear_propagated(self, key: str) -> None:
+        """Mark an attribute as manually edited, removing its propagated status."""
+        self._propagated_keys.discard(key)
+        widget = self._class_attr_widgets.get(key)
+        if widget:
+            widget.setStyleSheet("")
+            widget.setToolTip("")
 
     def _clear_class_attrs(self) -> None:
         """Remove all class-specific attribute widgets."""
@@ -736,10 +784,15 @@ class LabelEditDialog(QDialog):
                 try:
                     extra = yaml.safe_load(yaml_text)
                     if isinstance(extra, dict):
-                        # Only include non-commented values
+                        # Only include non-commented values (never let YAML override marker)
+                        extra.pop("_propagated_attrs", None)
                         attrs.update(extra)
                 except yaml.YAMLError:
                     pass  # Ignore invalid YAML
+
+        # Persist propagation marker so the editor can highlight fields on re-open
+        if self._propagated_keys:
+            attrs["_propagated_attrs"] = sorted(self._propagated_keys)
 
         return attrs
 

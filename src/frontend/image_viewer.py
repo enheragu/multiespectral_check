@@ -44,6 +44,7 @@ from backend.services.filter_modes import (FILTER_ACTION_NAMES, FILTER_ALL,
                                            FILTER_STATUS_TITLES)
 from backend.services.handler_registry import get_handler_registry
 from backend.services.labels import LabelService
+from backend.services.labels.attribute_propagator import propagate_attributes
 from backend.services.marking_controller import MarkingController
 from backend.services.navigation_controller import NavigationController
 from backend.services.overlay_orchestrator import OverlayOrchestrator
@@ -145,9 +146,6 @@ class ImageViewer(QMainWindow):
         """Initialize UI and apply styling."""
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
-
-        if hasattr(self.ui, "centralwidget"):
-            self.ui.centralwidget.setStyleSheet(f"background: {style.APP_BG};")
 
         for btn in (
             getattr(self.ui, "btn_prev", None),
@@ -409,6 +407,7 @@ class ImageViewer(QMainWindow):
         self.label_service: Optional[LabelService] = None
         self._manual_label_mode = False
         self._auto_label_active = False
+        self._attr_propagation_enabled = True
         self._auto_detected_bases: set[tuple[str, str]] = set()  # (base, channel) already processed
 
     def _init_calibration_pipeline(self) -> None:
@@ -518,6 +517,7 @@ class ImageViewer(QMainWindow):
                 (getattr(self.ui, "action_apply_parallax", None), self._apply_parallax_correction),
                 (getattr(self.ui, "action_label_manual_mode", None), self._manual_label_mode),
                 (getattr(self.ui, "action_label_auto_mode", None), self._auto_label_active),
+                (getattr(self.ui, "action_label_propagate_attrs", None), self._attr_propagation_enabled),
             ]
             for action, state in toggles:
                 if not action:
@@ -754,12 +754,16 @@ class ImageViewer(QMainWindow):
         if hasattr(self.ui, "action_label_detection_channel"):
             self.ui.action_label_detection_channel.triggered.connect(self._handle_toggle_detection_channel)
             self._sync_detection_channel_action()
+        if hasattr(self.ui, "action_label_propagate_attrs"):
+            self.ui.action_label_propagate_attrs.toggled.connect(self._handle_propagate_attrs_toggle)
         if hasattr(self.ui, "action_label_report"):
             self.ui.action_label_report.triggered.connect(self._handle_label_report)
         if hasattr(self.ui, "action_show_help"):
             self.ui.action_show_help.triggered.connect(self.show_help_dialog)
         if hasattr(self.ui, "action_about"):
             self.ui.action_about.triggered.connect(self.show_about_dialog)
+        if hasattr(self.ui, "logo_button"):
+            self.ui.logo_button.clicked.connect(self.show_about_dialog)
         if hasattr(self.ui, "action_exit"):
             self.ui.action_exit.triggered.connect(self.close)
 
@@ -2578,6 +2582,67 @@ class ImageViewer(QMainWindow):
         else:
             self._safe_status_message("Auto label mode off.", 2000)
 
+    def _handle_propagate_attrs_toggle(self, enabled: bool) -> None:
+        """Handle 'Suggest attributes from neighbors' toggle."""
+        self._attr_propagation_enabled = enabled
+        if enabled:
+            self._safe_status_message(
+                "Inter-frame attribute propagation enabled: attributes will be filled from adjacent frames.",
+                4000,
+            )
+        else:
+            self._safe_status_message("Attribute propagation disabled.", 2000)
+
+    def _trigger_attr_propagation(self, base: str, channel: str) -> None:
+        """Propagate attributes between *base* and its immediate neighbors.
+
+        Runs in both directions:
+          - neighbors → base  (fills missing attrs in the current frame)
+          - base → neighbors  (fills missing attrs in adjacent frames)
+
+        No-op when propagation is disabled or label service is unavailable.
+        """
+        if not self._attr_propagation_enabled or not self.label_service:
+            return
+
+        all_bases = self.session.get_all_bases()
+        if base not in all_bases:
+            return
+        idx = all_bases.index(base)
+
+        neighbors = []
+        if idx > 0:
+            neighbors.append(all_bases[idx - 1])
+        if idx + 1 < len(all_bases):
+            neighbors.append(all_bases[idx + 1])
+
+        if not neighbors:
+            return
+
+        def _img_path(b: str, c: str):
+            return self.session.get_image_path(b, c)
+
+        total = 0
+        invalidate_neighbors = []
+        for neighbor in neighbors:
+            # neighbor → current (fill current frame)
+            n = propagate_attributes(neighbor, base, channel, self.label_service, _img_path)
+            # current → neighbor (fill adjacent frame)
+            m = propagate_attributes(base, neighbor, channel, self.label_service, _img_path)
+            total += n + m
+            if m > 0:
+                invalidate_neighbors.append(neighbor)
+
+        if total > 0:
+            self.invalidate_overlay_cache(base)
+            for nb in invalidate_neighbors:
+                self.invalidate_overlay_cache(nb)
+            self.load_current()
+            self._safe_status_message(
+                f"Suggested attributes for {total} annotation(s) from adjacent frames.",
+                3000,
+            )
+
     def _toggle_auto_label_mode(self, enabled: bool) -> None:
         """Toggle auto-labelling mode programmatically."""
         if hasattr(self.ui, "action_label_auto_mode"):
@@ -2625,6 +2690,7 @@ class ImageViewer(QMainWindow):
             )
             self.invalidate_overlay_cache(base)
             self.load_image_pair(base)
+        self._trigger_attr_propagation(base, channel)
 
     def _handle_manual_selection_canceled(self, channel: str) -> None:  # noqa: ARG002
         if self._manual_label_mode:
@@ -3054,6 +3120,7 @@ class ImageViewer(QMainWindow):
         self.invalidate_overlay_cache(base)
         self.load_current()
         self._safe_status_message(f"Added label to {channel}:{base}.", 3000)
+        self._trigger_attr_propagation(base, channel)
 
     def _handle_manual_delete_request(self, channel: str, x_norm: float, y_norm: float, global_pos) -> None:
         if not self._manual_label_mode and not self._auto_label_active:
@@ -3353,6 +3420,7 @@ class ImageViewer(QMainWindow):
                 self.invalidate_overlay_cache(base)
                 self.load_current()
                 self._safe_status_message(f"Updated label to class {new_class_id}.", 2000)
+                self._trigger_attr_propagation(base, channel)
 
     def _toggle_manual_label_mode(self, enabled: bool) -> None:
         """Toggle manual labelling mode programmatically."""
