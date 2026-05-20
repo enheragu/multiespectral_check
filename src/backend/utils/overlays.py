@@ -141,7 +141,8 @@ def draw_label_boxes(
         text = (cls_name or "?") + suffix
         text_w = metrics.horizontalAdvance(text)
         text_h = metrics.height()
-        text_x = abs_x + inset
+        # Clamp horizontally so the label never overflows the image edges
+        text_x = max(inset, min(abs_x + inset, width - text_w - inset))
         text_y = max(inset + text_h, abs_y + inset + text_h)
         bg_x = int(round(text_x - 2))
         bg_y = int(round(text_y - text_h))

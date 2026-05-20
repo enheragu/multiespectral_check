@@ -488,6 +488,8 @@ def _load_calibration_for(dataset_path: Path) -> Optional[CalibrationBundle]:
         return None
 
     sq = intrinsic_data.get("square_size") or intrinsic_data.get("square_length")
+    if isinstance(sq, dict):
+        sq = sq.get("value")
     if sq is None:
         cfg_calib = ws.config.calibration
         sq = cfg_calib.square_size_mm

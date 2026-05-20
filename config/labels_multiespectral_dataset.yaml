@@ -233,7 +233,7 @@ classes:
       specific type should be discarded (ground cover is segmentation scope).
     group: infrastructure
     aliases: [tree, palm tree, plant, shrub, bush]
-    min_confidence: 0.40
+    min_confidence: 0.55
     attributes:
       type:
         type: enum
