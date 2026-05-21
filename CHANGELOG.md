@@ -5,7 +5,9 @@ Each release below is pinned to the commit that best represents that snapshot.
 
 Versioning note: minor releases mark visible feature jumps; patch releases cover bugfixes and maintenance updates, including docs/help polish that does not change behavior.
 
-## [Unreleased]
+## [0.10.1](https://github.com/enheragu/multiespectral_check/commit/073f364) - 2026-05-21
+- Export PDF in calibration report and label report (vectorized text via QTextDocument; charts embedded as PNG).
+- Calibration report: pre-compute and cache plot data (chessboard quads, pose diversity) to `.calibration_report_cache.yaml` on solve; dialog loads from cache instead of reloading all corner files on each open. Cache is invalidated when calibration timestamp or GUI version changes.
 
 ## [0.10.0](https://github.com/enheragu/multiespectral_check/commit/8c9c801) - 2026-05-20
 - Inter-frame attribute propagation: new toggle in the Labelling menu (on by default). After any annotation action the system matches annotations in adjacent frames by class and spatial overlap (IoU + Lucas-Kanade optical flow) and copies missing attributes without overwriting existing values. Propagated fields are highlighted in the annotation editor so the user can review and correct them.

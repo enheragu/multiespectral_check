@@ -213,6 +213,17 @@ class _CalibrationSolverTask(QRunnable):
             self._ensure_not_cancelled()
             save_yaml(output_path, final_payload, sort_keys=False)
 
+            # Pre-compute and cache report data (quads + poses for plot charts)
+            try:
+                from backend.services.calibration.calibration_report_cache import build_report_cache
+                build_report_cache(
+                    dataset_path=self.dataset_path,
+                    matrices={ch: v for ch, v in final_payload.get("channels", {}).items()},
+                    file_metadata=final_payload,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
             # Save errors to separate cache file (hidden)
             errors_path = self.dataset_path / config.calibration_errors_filename
             self._ensure_not_cancelled()

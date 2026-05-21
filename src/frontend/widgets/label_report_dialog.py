@@ -14,11 +14,13 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence
 
-from PyQt6.QtCore import Qt, QRectF
-from PyQt6.QtGui import QColor, QPainter, QPen, QPixmap
+from PyQt6.QtCore import Qt, QRectF, QSizeF, QMarginsF
+from PyQt6.QtGui import QColor, QPainter, QPen, QPageLayout, QPageSize, QPixmap, QTextDocument
+from PyQt6.QtPrintSupport import QPrinter
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
+    QFileDialog,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -131,6 +133,7 @@ class LabelReportDialog(QDialog):
 
         card_layout.addStretch(1)
 
+        self._card = card
         scroll = QScrollArea(self)
         scroll.setWidget(card)
         scroll.setWidgetResizable(True)
@@ -138,11 +141,17 @@ class LabelReportDialog(QDialog):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         layout.addWidget(scroll)
 
-        # Refresh button — outside scroll so it is always visible
-        btn = QPushButton("Refresh")
-        btn.setFixedHeight(style.BUTTON_HEIGHT)
-        btn.clicked.connect(self._on_refresh_clicked)
-        layout.addWidget(btn, alignment=Qt.AlignmentFlag.AlignRight)
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        btn_row.setContentsMargins(0, 8, 0, 0)
+        btn_row.addStretch(1)
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.clicked.connect(self._on_refresh_clicked)
+        btn_row.addWidget(refresh_btn)
+        pdf_btn = QPushButton("Export PDF")
+        pdf_btn.clicked.connect(self._export_pdf)
+        btn_row.addWidget(pdf_btn)
+        layout.addLayout(btn_row)
 
         self.resize(max(self.minimumWidth(), 740), 820)
 
@@ -360,6 +369,154 @@ class LabelReportDialog(QDialog):
     def _on_refresh_clicked(self) -> None:
         if self._refresh_callback:
             self._refresh_callback()
+
+    def _build_pdf_html(self) -> str:
+        """Build HTML string for QTextDocument-based PDF export."""
+        import base64
+        from PyQt6.QtCore import QBuffer, QIODevice
+        from config import APP_VERSION
+        from datetime import date
+
+        def _pix_url(pix: QPixmap) -> str:
+            buf = QBuffer()
+            buf.open(QIODevice.OpenModeFlag.WriteOnly)
+            pix.save(buf, "PNG")
+            buf.close()
+            b64 = base64.b64encode(bytes(buf.data())).decode("ascii")
+            return f"data:image/png;base64,{b64}"
+
+        def _row(label: str, value: str) -> str:
+            return f'<tr><td class="lbl" width="33%">{label}</td><td>{value}</td></tr>'
+
+        def _panel(content: str) -> str:
+            return (
+                '<table width="100%" cellspacing="0" cellpadding="0"'
+                ' style="border:1px solid #dde1e7; margin-bottom:8pt;">'
+                f'<tr><td style="padding:6pt;">{content}</td></tr></table>'
+            )
+
+        # ---- header ----
+        total = self.summary.get("total_annotations", 0)
+        n_classes = len(self.summary.get("by_class", {}))
+        meta_parts = [f"Generated: {date.today()}", f"GUI v{APP_VERSION}"]
+        if self._title:
+            meta_parts.append(self._title)
+        if total:
+            meta_parts.append(f"Total: {total}  Classes: {n_classes}")
+        meta_line = " &nbsp;&middot;&nbsp; ".join(meta_parts)
+
+        # ---- overview ----
+        s = self.summary
+        imgs = s.get("images_labeled", {})
+        by_ch = s.get("by_channel", {})
+        by_src = s.get("by_source", {})
+        src_parts = [f"{k}: {v}" for k in ("manual", "reviewed", "auto") if (v := by_src.get(k, 0))]
+        overview_rows = (
+            _row("Total annotations", str(s.get("total_annotations", 0)))
+            + _row("Images labelled", f"visible: {imgs.get('visible', 0)}  ·  lwir: {imgs.get('lwir', 0)}")
+            + _row("Annotations by channel", f"visible: {by_ch.get('visible', 0)}  ·  lwir: {by_ch.get('lwir', 0)}")
+            + _row("Annotations by source", "  ·  ".join(src_parts) if src_parts else "—")
+        )
+
+        # ---- charts (all classes, no filter) ----
+        by_class = s.get("by_class", {})
+        sorted_classes: List = sorted(by_class.items(), key=lambda kv: kv[1].get("total", 0), reverse=True)
+        class_color_map: Dict[str, QColor] = {
+            cid: _CLASS_COLORS[idx % len(_CLASS_COLORS)]
+            for idx, (cid, _) in enumerate(sorted_classes)
+        }
+        charts_html = ""
+        if sorted_classes:
+            cw, ch = _CHART_W, _CHART_H
+            disp_w = 238
+            hist_pix = _render_class_histogram(sorted_classes, class_color_map, cw, ch)
+            all_charts = s.get("charts", {})
+            bbox_pix = _render_bbox_overlay(
+                all_charts.get("bbox_samples", []), cw, ch, QColor(70, 130, 180, 35)
+            )
+            pos_pix = _render_heatmap(
+                all_charts.get("position_grid", []), cw, ch, "x (normalised)", "y (normalised)"
+            )
+            size_pix = _render_heatmap(
+                all_charts.get("size_wh_grid", []), cw, ch, "width", "height"
+            )
+            charts_html = (
+                f'<table width="100%" cellspacing="0"><tr>'
+                f'<td align="center"><img src="{_pix_url(hist_pix)}" width="{disp_w}"/></td>'
+                f'<td align="center"><img src="{_pix_url(bbox_pix)}" width="{disp_w}"/></td>'
+                f'</tr><tr>'
+                f'<td align="center"><img src="{_pix_url(pos_pix)}" width="{disp_w}"/></td>'
+                f'<td align="center"><img src="{_pix_url(size_pix)}" width="{disp_w}"/></td>'
+                f'</tr></table>'
+            )
+
+        # ---- per-class ----
+        classes_html = ""
+        for class_id, cls_data in sorted_classes:
+            cls_name = cls_data.get("name") or class_id
+            total_cls = cls_data.get("total", 0)
+            display = f"{class_id}: {cls_name}" if class_id != cls_name else str(cls_name)
+            cls_rows = ""
+            cls_by_ch = cls_data.get("by_channel", {})
+            ch_parts = [f"{ch}: {cls_by_ch[ch]}" for ch in ("visible", "lwir") if cls_by_ch.get(ch)]
+            if ch_parts:
+                cls_rows += _row("Channels", "  ·  ".join(ch_parts))
+            cls_by_src = cls_data.get("by_source", {})
+            src_p = [f"{k}: {v}" for k in ("manual", "reviewed", "auto") if (v := cls_by_src.get(k, 0))]
+            if src_p:
+                cls_rows += _row("Source", "  ·  ".join(src_p))
+            attrs: Dict[str, Dict[str, int]] = cls_data.get("attributes", {})
+            for attr_name, val_counts in sorted(attrs.items()):
+                sorted_vals = sorted(val_counts.items(), key=lambda kv: kv[1], reverse=True)
+                cls_rows += _row(attr_name, ", ".join(f"{v}: {c}" for v, c in sorted_vals))
+            classes_html += (
+                f'<p style="font-weight:bold; margin:6pt 0 2pt 0;">'
+                f'{display} — {total_cls} annotations</p>'
+                f'<table class="data" width="100%" cellspacing="0" style="margin-left:12pt;">'
+                f'{cls_rows}</table>'
+            )
+
+        css = (
+            "body { font-family: Arial, sans-serif; font-size: 9pt; color: #0f1115; }"
+            " h2 { font-size: 14pt; font-weight: bold; color: #0f1115; margin: 4pt 0 10pt 0; }"
+            " h3 { font-size: 9pt; color: #5c6370; font-weight: bold; margin: 8pt 0 2pt 0; }"
+            " table.data td { padding: 2pt 4pt; vertical-align: top; }"
+            " td.lbl { font-weight: bold; color: #111; }"
+        )
+
+        overview_section = _panel(f'<table class="data" width="100%" cellspacing="0">{overview_rows}</table>')
+        charts_section = _panel(charts_html) if charts_html else ""
+        classes_section = _panel(classes_html) if classes_html else ""
+
+        return (
+            f'<!DOCTYPE html><html><head><meta charset="utf-8"><style>{css}</style></head><body>'
+            f'<p style="color:#9099a8; font-size:8pt; padding-bottom:3pt; margin-bottom:6pt;'
+            f' border-bottom:1px solid #c0c6d0;">{meta_line}</p>'
+            f'<h2>Label Report</h2>'
+            f'<h3>Overview</h3>{overview_section}'
+            f'<h3>Distribution</h3>{charts_section}'
+            f'<h3>Classes</h3>{classes_section}'
+            f'</body></html>'
+        )
+
+    def _export_pdf(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(self, "Export PDF", "label_report.pdf", "PDF Files (*.pdf)")
+        if not path:
+            return
+        if not path.endswith(".pdf"):
+            path += ".pdf"
+
+        printer = QPrinter()
+        printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+        printer.setOutputFileName(path)
+        printer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
+        printer.setPageOrientation(QPageLayout.Orientation.Portrait)
+        printer.setPageMargins(QMarginsF(15, 15, 15, 15), QPageLayout.Unit.Millimeter)
+
+        doc = QTextDocument()
+        doc.setHtml(self._build_pdf_html())
+        doc.setPageSize(QSizeF(printer.pageRect(QPrinter.Unit.Point).size()))
+        getattr(doc, "print")(printer)
 
 
 # ======================================================================

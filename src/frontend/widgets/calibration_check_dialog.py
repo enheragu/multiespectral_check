@@ -7,18 +7,22 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from common.yaml_utils import load_yaml, save_yaml
-from PyQt6.QtCore import Qt, QRectF, QUrl
+from PyQt6.QtCore import Qt, QRect, QRectF, QSizeF, QUrl, QPointF, QMarginsF
 from PyQt6.QtGui import (
     QColor,
     QDesktopServices,
     QPainter,
     QPen,
     QPixmap,
+    QPageLayout,
+    QPageSize,
     QPolygonF,
+    QTextDocument,
 )
-from PyQt6.QtCore import QPointF
+from PyQt6.QtPrintSupport import QPrinter
 from PyQt6.QtWidgets import (
     QDialog,
+    QFileDialog,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -54,9 +58,33 @@ class CalibrationCheckDialog(QDialog):
         self.file_metadata = self._load_file_metadata()
         self.setWindowTitle("Calibration report")
         self.setMinimumWidth(style.DIALOG_REPORT_MIN_W)
+        self._report_data: dict = {}
         self._build_ui()
 
+    def _load_report_data(self) -> None:
+        """Populate self._report_data from cache or by computing from corner files."""
+        if not self.dataset_path:
+            return
+        from config import APP_VERSION
+        from backend.services.calibration.calibration_report_cache import (
+            build_report_cache, load_report_cache,
+        )
+        updated_at = self.file_metadata.get("updated_at")
+        cached = load_report_cache(self.dataset_path, APP_VERSION, updated_at)
+        if cached is not None:
+            self._report_data = cached
+            return
+        # Cache missing or stale — build it now (also writes to disk)
+        build_report_cache(
+            dataset_path=self.dataset_path,
+            matrices=self.matrices,
+            file_metadata={**self.file_metadata, "updated_at": updated_at},
+        )
+        cached = load_report_cache(self.dataset_path, APP_VERSION, updated_at)
+        self._report_data = cached or {}
+
     def _build_ui(self) -> None:
+        self._load_report_data()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(0)
@@ -105,20 +133,32 @@ class CalibrationCheckDialog(QDialog):
 
         card_layout.addStretch(1)
 
-        # Add button to open calibration files (both if available)
-        has_intrinsic = self.intrinsic_path and self.intrinsic_path.exists()
-        has_extrinsic = self.extrinsic_path and self.extrinsic_path.exists()
-        if has_intrinsic or has_extrinsic:
-            open_button = QPushButton("Open calibration files")
-            open_button.setFixedHeight(style.BUTTON_HEIGHT)
-            open_button.clicked.connect(self._open_calibration_files)
-            card_layout.addWidget(open_button, alignment=Qt.AlignmentFlag.AlignRight)
-
+        self._card = card
         scroll = QScrollArea(self)
         scroll.setWidget(card)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         layout.addWidget(scroll)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        btn_row.setContentsMargins(0, 8, 0, 0)
+        from config import APP_VERSION
+        ver_label = QLabel(f"GUI v{APP_VERSION}")
+        ver_label.setStyleSheet("color: #9099a8; font-size: 12px;")
+        btn_row.addWidget(ver_label)
+        btn_row.addStretch(1)
+        has_intrinsic = self.intrinsic_path and self.intrinsic_path.exists()
+        has_extrinsic = self.extrinsic_path and self.extrinsic_path.exists()
+        if has_intrinsic or has_extrinsic:
+            open_button = QPushButton("Open calibration files")
+            open_button.clicked.connect(self._open_calibration_files)
+            btn_row.addWidget(open_button)
+        pdf_button = QPushButton("Export PDF")
+        pdf_button.clicked.connect(self._export_pdf)
+        btn_row.addWidget(pdf_button)
+        layout.addLayout(btn_row)
+
         self.resize(style.DIALOG_REPORT_MIN_W + 40, 800)
 
     def refresh_data(
@@ -395,21 +435,8 @@ class CalibrationCheckDialog(QDialog):
 
     def _chessboard_coverage_group(self) -> Optional[QWidget]:
         """Build side-by-side chessboard coverage charts (LWIR + Visible)."""
-        if not self.dataset_path:
-            return None
-        try:
-            from backend.services.calibration_corners_io import load_corners_for_dataset
-            all_corners = load_corners_for_dataset(self.dataset_path)
-        except Exception:  # noqa: BLE001
-            return None
-        if not all_corners:
-            return None
-
-        # Extract per-channel polygon data (4 outer corners of each chessboard)
-        pattern_size = self.file_metadata.get("pattern_size")  # [cols, rows] or None
-        lwir_quads = _extract_chessboard_quads(all_corners, "lwir", pattern_size)
-        vis_quads = _extract_chessboard_quads(all_corners, "visible", pattern_size)
-
+        lwir_quads = self._report_data.get("lwir_quads") or []
+        vis_quads = self._report_data.get("vis_quads") or []
         if not lwir_quads and not vis_quads:
             return None
 
@@ -444,47 +471,11 @@ class CalibrationCheckDialog(QDialog):
 
     def _pose_diversity_group(self) -> Optional[QWidget]:
         """Build tilt-scatter, distance-histogram, and tilt-vs-distance charts."""
-        if not self.dataset_path:
-            return None
-        try:
-            from backend.services.calibration_corners_io import load_corners_for_dataset
-            all_corners = load_corners_for_dataset(self.dataset_path)
-        except Exception:  # noqa: BLE001
-            return None
-        if not all_corners:
-            return None
-
-        pattern_size = self.file_metadata.get("pattern_size")
-        if not pattern_size:
-            return None
-
-        lwir_payload = self.matrices.get("lwir") or {}
-        vis_payload = self.matrices.get("visible") or {}
-        lwir_poses = _compute_poses(all_corners, "lwir", lwir_payload, pattern_size)
-        vis_poses = _compute_poses(all_corners, "visible", vis_payload, pattern_size)
-
+        lwir_poses = [tuple(p) for p in self._report_data.get("lwir_poses") or []]
+        vis_poses = [tuple(p) for p in self._report_data.get("vis_poses") or []]
         if not lwir_poses and not vis_poses:
             return None
-
-        # Convert distances from grid squares to metres if square_size is known
-        sq_meta = self.file_metadata.get("square_size")
-        square_size_m: Optional[float] = None
-        if isinstance(sq_meta, dict):
-            val = sq_meta.get("value")
-            unit = (sq_meta.get("unit") or "").lower()
-            if isinstance(val, (int, float)):
-                if unit == "mm":
-                    square_size_m = float(val) / 1000.0
-                elif unit == "cm":
-                    square_size_m = float(val) / 100.0
-                elif unit in ("m", "meters"):
-                    square_size_m = float(val)
-        elif isinstance(sq_meta, (int, float)):
-            square_size_m = float(sq_meta) / 1000.0
-        if square_size_m:
-            lwir_poses = [(tx, ty, d * square_size_m) for tx, ty, d in lwir_poses]
-            vis_poses = [(tx, ty, d * square_size_m) for tx, ty, d in vis_poses]
-        dist_unit = "m" if square_size_m else "grid sq."
+        dist_unit = self._report_data.get("dist_unit", "grid sq.")
 
         outer, layout = style.make_panel("pose_diversity_panel", spacing=8)
 
@@ -610,6 +601,307 @@ class CalibrationCheckDialog(QDialog):
                 continue
             lines.append(f"{base}: {trans:.4f} | {rot:.2f} deg")
         return "\n".join(lines) if lines else "—"
+
+    def _build_extrinsic_html_rows(self) -> str:
+        """Return HTML table rows for the extrinsic calibration section."""
+        payload = self.extrinsic or {}
+        translation = payload.get("translation")
+        rotation = payload.get("rotation")
+        if not translation or not rotation:
+            return '<tr><td colspan="2">Not available. Compute the stereo extrinsic transform first.</td></tr>'
+
+        def _row(label: str, value: str) -> str:
+            return f'<tr><td class="lbl" width="33%">{label}</td><td>{value}</td></tr>'
+
+        def _mono(text: str) -> str:
+            return f'<span style="font-family:monospace;">{text}</span>'
+
+        sq_meta = self.file_metadata.get("square_size")
+        square_size_m: Optional[float] = None
+        if isinstance(sq_meta, dict):
+            val = sq_meta.get("value")
+            unit = (sq_meta.get("unit") or "").lower()
+            if isinstance(val, (int, float)):
+                if unit == "mm":
+                    square_size_m = float(val) / 1000.0
+                elif unit == "cm":
+                    square_size_m = float(val) / 100.0
+                elif unit in ("m", "meters"):
+                    square_size_m = float(val)
+        elif isinstance(sq_meta, (int, float)):
+            square_size_m = float(sq_meta) / 1000.0
+
+        rows = ""
+        samples = payload.get("samples", 0)
+        rms = payload.get("reprojection_error")
+        summary = f"Samples: {samples}"
+        if rms is not None:
+            summary += f" | RMS error: {rms:.4f}"
+        rows += _row("Summary", summary)
+
+        updated = payload.get("updated_at")
+        updated_str = str(updated) if updated and not isinstance(updated, dict) else None
+        rows += _row("Computed", self._format_timestamp(updated_str))
+
+        baseline = payload.get("baseline")
+        if baseline is not None and square_size_m:
+            baseline_text = f"{baseline * square_size_m:.4f} m"
+        elif baseline is not None:
+            baseline_text = f"{baseline:.4f} squares"
+        else:
+            baseline_text = "—"
+        rows += _row("Baseline (‖T‖)", baseline_text)
+
+        if square_size_m:
+            t_m = [v * square_size_m for v in translation]
+            translation_text = "[ " + ", ".join(f"{v:.4f}" for v in t_m) + " ]  (m)"
+        else:
+            translation_text = self._format_vector(translation) + "  (pattern squares)"
+        rows += _row("Translation (LWIR → Visible)", _mono(translation_text))
+
+        mat_str = self._format_matrix(rotation).replace("\n", "<br/>")
+        rows += _row("Rotation matrix (LWIR → Visible)", _mono(mat_str))
+
+        try:
+            R = rotation
+            pitch_rad = -math.asin(max(-1.0, min(1.0, R[2][0])))
+            cos_p = math.cos(pitch_rad)
+            if abs(cos_p) > 1e-6:
+                roll_rad = math.atan2(R[2][1] / cos_p, R[2][2] / cos_p)
+                yaw_rad = math.atan2(R[1][0] / cos_p, R[0][0] / cos_p)
+            else:
+                roll_rad = math.atan2(-R[1][2], R[1][1])
+                yaw_rad = 0.0
+            euler_text = (
+                f"roll {math.degrees(roll_rad):.2f}°   "
+                f"pitch {math.degrees(pitch_rad):.2f}°   "
+                f"yaw {math.degrees(yaw_rad):.2f}°"
+            )
+            rows += _row("Rotation (roll/pitch/yaw)", _mono(euler_text))
+        except Exception:  # noqa: BLE001
+            pass
+
+        note = (
+            "Extrinsic transform maps points from the LWIR camera frame into the visible camera frame. "
+            + (f"Translation converted to meters using {square_size_m * 1000:.1f} mm square size. "
+               if square_size_m else "Translation in pattern squares (square size not available). ")
+            + "Rotation shown as ZYX Euler angles."
+        )
+        rows += _row("Note", f'<span style="color:#444; font-size:8pt;">{note}</span>')
+        return rows
+
+    def _build_pdf_html(self) -> str:
+        """Build HTML string for QTextDocument-based PDF export."""
+        import base64
+        from PyQt6.QtCore import QBuffer, QIODevice
+        from config import APP_VERSION
+        from datetime import date, datetime
+
+        def _pix_url(pix: QPixmap) -> str:
+            buf = QBuffer()
+            buf.open(QIODevice.OpenModeFlag.WriteOnly)
+            pix.save(buf, "PNG")
+            buf.close()
+            b64 = base64.b64encode(bytes(buf.data())).decode("ascii")
+            return f"data:image/png;base64,{b64}"
+
+        def _row(label: str, value: str) -> str:
+            return f'<tr><td class="lbl" width="33%">{label}</td><td>{value}</td></tr>'
+
+        def _mono(text: str) -> str:
+            return f'<span style="font-family:monospace;">{text}</span>'
+
+        def _panel(content: str) -> str:
+            return (
+                '<table width="100%" cellspacing="0" cellpadding="0"'
+                ' style="border:1px solid #dde1e7; margin-bottom:8pt;">'
+                f'<tr><td style="padding:6pt;">{content}</td></tr></table>'
+            )
+
+        # ---- header metadata ----
+        cal_raw = self.file_metadata.get("updated_at", "")
+        try:
+            cal_date = (
+                datetime.fromisoformat(cal_raw.replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M")
+                if cal_raw else ""
+            )
+        except Exception:
+            cal_date = cal_raw
+        pattern = self.file_metadata.get("pattern_size")
+        pattern_str = (
+            f"{pattern[0]}×{pattern[1]}"
+            if isinstance(pattern, (list, tuple)) and len(pattern) == 2 else ""
+        )
+        sq = self.file_metadata.get("square_size")
+        sq_str = (
+            f"{sq.get('value')} {sq.get('unit', '')}"
+            if isinstance(sq, dict) and sq.get("value") else ""
+        )
+        file_path = self.file_metadata.get("file_path", "")
+
+        meta_parts = [f"Generated: {date.today()}", f"GUI v{APP_VERSION}"]
+        if cal_date:
+            meta_parts.append(f"Calibration: {cal_date}")
+        if pattern_str:
+            meta_parts.append(f"Pattern: {pattern_str}")
+        if sq_str:
+            meta_parts.append(f"Square: {sq_str}")
+        meta_line = " &nbsp;&middot;&nbsp; ".join(meta_parts)
+        path_line = f'<br/><span style="font-size:7pt;">{file_path}</span>' if file_path else ""
+
+        # ---- calibration information ----
+        info_rows = ""
+        info_rows += _row("Intrinsic file", self.file_metadata.get("intrinsic_file", "—"))
+        info_rows += _row("Extrinsic file", self.file_metadata.get("extrinsic_file", "—"))
+        if file_path:
+            info_rows += _row("Location", file_path)
+        info_rows += _row("Computed", self._format_timestamp(cal_raw))
+        info_rows += _row("Pattern", self._format_pattern_label(pattern))
+        info_rows += _row("Square side", self._format_square_label(sq))
+        if self.dataset_paths:
+            info_rows += _row("Datasets used", ", ".join(Path(p).name for p in self.dataset_paths))
+
+        # ---- intrinsic calibration ----
+        def _channel_rows(key: str, title: str) -> str:
+            payload = self.matrices.get(key)
+            h = f'<tr><td colspan="2"><b>{title}</b></td></tr>'
+            if not payload or not payload.get("camera_matrix"):
+                return h + _row("", "Not available. Compute calibration first.")
+            samples = payload.get("samples", 0)
+            err = payload.get("reprojection_error")
+            summary = f"Samples: {samples}"
+            if err is not None:
+                summary += f" | RMS error: {err:.4f}"
+            h += _row("Summary", summary)
+            mat_str = self._format_matrix(payload.get("camera_matrix")).replace("\n", "<br/>")
+            h += _row("Camera matrix", _mono(mat_str))
+            h += _row("Distortion", _mono(self._format_vector(payload.get("distortion"))))
+            fov_str = self._format_fov(payload.get("camera_matrix"), payload.get("image_size"))
+            if fov_str:
+                h += _row("FOV (H × V)", _mono(fov_str))
+            return h
+
+        intr_rows = _channel_rows("visible", "Visible camera")
+        intr_rows += '<tr><td colspan="2" style="height:6pt;"></td></tr>'
+        intr_rows += _channel_rows("lwir", "LWIR camera")
+
+        # ---- charts ----
+        disp_w = 238  # display width per chart in 2-column layout (A4 usable ~510pt minus padding)
+
+        # Coverage
+        lwir_quads = self._report_data.get("lwir_quads") or []
+        vis_quads = self._report_data.get("vis_quads") or []
+        coverage_html = ""
+        if lwir_quads or vis_quads:
+            cw, ch = style.CHART_W_PAIR, style.CHART_H_PAIR
+            lwir_pix = _render_chessboard_coverage(lwir_quads, cw, ch, "LWIR", QColor(220, 60, 60, 50))
+            vis_pix = _render_chessboard_coverage(vis_quads, cw, ch, "Visible", QColor(60, 120, 220, 50))
+            imgs = (
+                f'<table width="100%" cellspacing="0"><tr>'
+                f'<td align="center"><img src="{_pix_url(lwir_pix)}" width="{disp_w}"/></td>'
+                f'<td align="center"><img src="{_pix_url(vis_pix)}" width="{disp_w}"/></td>'
+                f'</tr></table>'
+            )
+            coverage_html = f'<h3>Chessboard coverage</h3>{_panel(imgs)}'
+
+        # Distortion maps
+        lwir_payload = self.matrices.get("lwir")
+        vis_payload = self.matrices.get("visible")
+        distortion_html = ""
+        if lwir_payload or vis_payload:
+            cw, ch = style.CHART_W_PAIR, style.CHART_H_PAIR
+            lwir_dpix = _render_distortion_map(lwir_payload, cw, ch, "LWIR", QColor(220, 60, 60))
+            vis_dpix = _render_distortion_map(vis_payload, cw, ch, "Visible", QColor(60, 120, 220))
+            imgs = (
+                f'<table width="100%" cellspacing="0"><tr>'
+                f'<td align="center"><img src="{_pix_url(lwir_dpix)}" width="{disp_w}"/></td>'
+                f'<td align="center"><img src="{_pix_url(vis_dpix)}" width="{disp_w}"/></td>'
+                f'</tr></table>'
+            )
+            distortion_html = f'<h3>Distortion map</h3>{_panel(imgs)}'
+
+        # Pose diversity
+        lwir_poses = [tuple(p) for p in self._report_data.get("lwir_poses") or []]
+        vis_poses = [tuple(p) for p in self._report_data.get("vis_poses") or []]
+        dist_unit = self._report_data.get("dist_unit", "grid sq.")
+        pose_html = ""
+        if lwir_poses or vis_poses:
+            cw, ch = style.CHART_W_PAIR, style.CHART_H_GRID
+
+            def _pose_row(lwir_pix: QPixmap, vis_pix: QPixmap, caption: str) -> str:
+                return (
+                    f'<tr>'
+                    f'<td align="center"><img src="{_pix_url(lwir_pix)}" width="{disp_w}"/></td>'
+                    f'<td align="center"><img src="{_pix_url(vis_pix)}" width="{disp_w}"/></td>'
+                    f'</tr>'
+                    f'<tr><td colspan="2" align="center"'
+                    f' style="color:#666; font-size:8pt; font-style:italic; padding-bottom:4pt;">'
+                    f'{caption}</td></tr>'
+                )
+
+            pose_rows = _pose_row(
+                _render_tilt_scatter(lwir_poses, cw, ch, "LWIR — Tilt distribution", QColor(220, 60, 60)),
+                _render_tilt_scatter(vis_poses, cw, ch, "Visible — Tilt distribution", QColor(60, 120, 220)),
+                "Each dot = one image. Good coverage: cloud spread broadly around the origin, not clustered at zero.",
+            )
+            pose_rows += _pose_row(
+                _render_distance_histogram(lwir_poses, cw, ch, "LWIR — Pattern distance distribution", QColor(220, 60, 60), dist_unit),
+                _render_distance_histogram(vis_poses, cw, ch, "Visible — Pattern distance distribution", QColor(60, 120, 220), dist_unit),
+                "Good coverage: bars spanning a wide range. All bars at the same distance limits depth diversity.",
+            )
+            pose_rows += _pose_row(
+                _render_tilt_vs_distance(lwir_poses, cw, ch, "LWIR — Tilt (Y) vs. Distance (X)", QColor(220, 60, 60), dist_unit),
+                _render_tilt_vs_distance(vis_poses, cw, ch, "Visible — Tilt (Y) vs. Distance (X)", QColor(60, 120, 220), dist_unit),
+                "Good coverage: dots spread across both axes with no strong diagonal correlation.",
+            )
+            imgs = f'<table width="100%" cellspacing="0">{pose_rows}</table>'
+            pose_html = f'<h3>Calibration pattern pose diversity</h3>{_panel(imgs)}'
+
+        ext_rows = self._build_extrinsic_html_rows()
+
+        css = (
+            "body { font-family: Arial, sans-serif; font-size: 9pt; color: #0f1115; }"
+            " h2 { font-size: 14pt; font-weight: bold; color: #0f1115; margin: 4pt 0 10pt 0; }"
+            " h3 { font-size: 9pt; color: #5c6370; font-weight: bold; margin: 8pt 0 2pt 0; }"
+            " table.data td { padding: 2pt 4pt; vertical-align: top; }"
+            " td.lbl { font-weight: bold; color: #111; }"
+        )
+
+        return (
+            f'<!DOCTYPE html><html><head><meta charset="utf-8"><style>{css}</style></head><body>'
+            f'<p style="color:#9099a8; font-size:8pt; padding-bottom:3pt; margin-bottom:6pt;'
+            f' border-bottom:1px solid #c0c6d0;">{meta_line}{path_line}</p>'
+            f'<h2>Calibration Report</h2>'
+            f'<h3>Calibration information</h3>'
+            f'{_panel(f"<table class=\'data\' width=\'100%\' cellspacing=\'0\'>{info_rows}</table>")}'
+            f'<h3>Intrinsic calibration</h3>'
+            f'{_panel(f"<table class=\'data\' width=\'100%\' cellspacing=\'0\'>{intr_rows}</table>")}'
+            f'<h3>Extrinsic calibration</h3>'
+            f'{_panel(f"<table class=\'data\' width=\'100%\' cellspacing=\'0\'>{ext_rows}</table>")}'
+            f'{coverage_html}'
+            f'{distortion_html}'
+            f'{pose_html}'
+            f'</body></html>'
+        )
+
+    def _export_pdf(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(self, "Export PDF", "calibration_report.pdf", "PDF Files (*.pdf)")
+        if not path:
+            return
+        if not path.endswith(".pdf"):
+            path += ".pdf"
+
+        printer = QPrinter()
+        printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+        printer.setOutputFileName(path)
+        printer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
+        printer.setPageOrientation(QPageLayout.Orientation.Portrait)
+        printer.setPageMargins(QMarginsF(15, 15, 15, 15), QPageLayout.Unit.Millimeter)
+
+        doc = QTextDocument()
+        doc.setHtml(self._build_pdf_html())
+        doc.setPageSize(QSizeF(printer.pageRect(QPrinter.Unit.Point).size()))
+        getattr(doc, "print")(printer)
 
     def _open_calibration_files(self) -> None:
         """Open both calibration files in external editor."""
@@ -738,43 +1030,6 @@ def _set_tick_font(painter: QPainter) -> None:
     painter.setFont(f)
 
 
-def _extract_chessboard_quads(
-    all_corners: Dict[str, Dict[str, Any]],
-    channel: str,
-    pattern_size: Optional[Any],
-) -> List[List[List[float]]]:
-    """Extract the 4 outer corners of each chessboard detection.
-
-    If *pattern_size* is ``[cols, rows]``, the quad vertices are taken
-    from the known grid positions (indices 0, cols-1, -cols, -1).
-    Otherwise the convex-hull extreme corners are estimated from the
-    first, last, and midpoints of the corner list.
-
-    Returns a list of quads, each quad being 4 points ``[[u, v], …]``.
-    """
-    cols: Optional[int] = None
-    rows: Optional[int] = None
-    if isinstance(pattern_size, (list, tuple)) and len(pattern_size) == 2:
-        cols, rows = int(pattern_size[0]), int(pattern_size[1])
-
-    quads: List[List[List[float]]] = []
-    for _base, data in all_corners.items():
-        corners = data.get(channel)
-        if not corners or len(corners) < 4:
-            continue
-        if cols and rows and len(corners) == cols * rows:
-            quad = [
-                corners[0],
-                corners[cols - 1],
-                corners[-1],
-                corners[-cols],
-            ]
-        else:
-            # Fallback: use first, mid-top, last, mid-bottom as rough quad
-            n = len(corners)
-            quad = [corners[0], corners[n // 2 - 1], corners[-1], corners[n // 2]]
-        quads.append(quad)
-    return quads
 
 
 def _render_chessboard_coverage(
@@ -1066,73 +1321,6 @@ def _map(value: float, src_min: float, src_max: float, dst_min: float, dst_max: 
     return dst_min + (value - src_min) / span * (dst_max - dst_min)
 
 
-def _compute_poses(
-    all_corners: Dict[str, Dict[str, Any]],
-    channel: str,
-    channel_payload: Dict[str, Any],
-    pattern_size: Any,
-) -> List[tuple]:
-    """Compute (tilt_x_deg, tilt_y_deg, distance) for each calibration image.
-
-    Uses cv2.solvePnP with the stored camera_matrix and distortion coefficients
-    to recover the pattern pose from the saved 2-D corner detections.
-    Distance is in pattern-square units (relative, not mm).
-    """
-    try:
-        import cv2
-        import numpy as np
-    except ImportError:
-        return []
-
-    if not channel_payload:
-        return []
-
-    cam_matrix = channel_payload.get("camera_matrix")
-    dist_coeffs = channel_payload.get("distortion")
-    image_size = channel_payload.get("image_size")
-    if not cam_matrix or not dist_coeffs or not image_size or len(image_size) < 2:
-        return []
-
-    if not isinstance(pattern_size, (list, tuple)) or len(pattern_size) < 2:
-        return []
-    cols, rows = int(pattern_size[0]), int(pattern_size[1])
-    expected = cols * rows
-
-    # Object points: integer grid, no physical scale
-    obj_pts = np.zeros((expected, 3), dtype=np.float32)
-    obj_pts[:, :2] = np.mgrid[0:cols, 0:rows].T.reshape(-1, 2)
-
-    cam_mat = np.array(cam_matrix, dtype=np.float64)
-    dist = np.array(dist_coeffs, dtype=np.float64)
-    img_w, img_h = float(image_size[0]), float(image_size[1])
-
-    poses: List[tuple] = []
-    for _base, data in all_corners.items():
-        corners = data.get(channel)
-        if not corners or len(corners) != expected:
-            continue
-        # Corners stored normalised [0,1] → convert to pixels
-        img_pts = np.array(
-            [[c[0] * img_w, c[1] * img_h] for c in corners],
-            dtype=np.float32,
-        ).reshape(-1, 1, 2)
-
-        ok, rvec, tvec = cv2.solvePnP(
-            obj_pts, img_pts, cam_mat, dist, flags=cv2.SOLVEPNP_ITERATIVE
-        )
-        if not ok:
-            continue
-
-        R, _ = cv2.Rodrigues(rvec)
-        # Pattern normal in camera frame = third column of R
-        nx, ny, nz = float(R[0, 2]), float(R[1, 2]), float(R[2, 2])
-        nz_safe = nz if abs(nz) > 1e-6 else 1e-6
-        tilt_x = math.degrees(math.atan2(nx, nz_safe))
-        tilt_y = math.degrees(math.atan2(ny, nz_safe))
-        distance = float(np.linalg.norm(tvec))
-        poses.append((tilt_x, tilt_y, distance))
-
-    return poses
 
 
 def _render_tilt_scatter(
