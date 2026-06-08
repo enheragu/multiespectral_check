@@ -14,6 +14,10 @@ from common.yaml_utils import load_yaml, save_yaml
 IMAGE_EXTS = ('.jpg', '.jpeg', '.png')
 logger = logging.getLogger(__name__)
 
+# Subdirectories that are managed explicitly and must not be treated as companion dirs.
+_MANAGED_SUBDIRS = frozenset({"lwir", "visible", "to_delete", "calibration", "labels"})
+
+
 class DatasetLoader:
     def __init__(self, root_dir: str):
         self.root_dir = Path(root_dir)
@@ -24,12 +28,31 @@ class DatasetLoader:
         self.metadata_cache: Dict[str, Dict] = {}
         self.channel_map: Dict[str, Set[str]] = {}
         self._missing_counts_cache: Optional[Dict[str, int]] = None
+        self.companion_dirs: List[str] = []
+
+    def _discover_companion_dirs(self) -> List[str]:
+        """Return names of extra synchronized data directories (e.g. lidar_range, odom, dht22).
+
+        Any subdirectory that is not in _MANAGED_SUBDIRS and contains at least one
+        file is considered a companion dir.  Files in companion dirs follow the same
+        base-name convention as lwir/visible images and are moved together on delete.
+        """
+        found: List[str] = []
+        if not self.root_dir.is_dir():
+            return found
+        for entry in sorted(self.root_dir.iterdir()):
+            if not entry.is_dir() or entry.name in _MANAGED_SUBDIRS:
+                continue
+            if any(entry.iterdir()):  # non-empty directory
+                found.append(entry.name)
+        return found
 
     def load_dataset(self) -> bool:
         self.image_bases.clear()
         self.metadata_cache.clear()
         self.channel_map.clear()
         self._missing_counts_cache = None
+        self.companion_dirs = self._discover_companion_dirs()
 
         lwir_files = self._get_image_files(self.lwir_dir)
         vis_files = self._get_image_files(self.vis_dir)
@@ -156,6 +179,19 @@ class DatasetLoader:
                     "type": type_dir,
                     "yaml": True,
                 })
+
+        # Companion dirs: move any file whose stem matches the base (any extension)
+        base_stem = Path(base).name
+        for companion in self.companion_dirs:
+            companion_dir = self.root_dir / companion
+            for src in companion_dir.glob(f"{base_stem}.*"):
+                if not src.is_file():
+                    continue
+                destination = self._compute_to_delete_destination(src, companion)
+                if destination is None:
+                    return False
+                move_plan.append({"src": src, "dst": destination, "type": companion})
+
         if not move_plan:
             return False
         performed: List[Dict[str, Any]] = []
@@ -183,10 +219,17 @@ class DatasetLoader:
         return True
 
     def restore_from_trash(self) -> int:
-        restored_pairs = 0
         lwir_restored = self._restore_category("lwir")
         vis_restored = self._restore_category("visible")
         restored_pairs = min(lwir_restored, vis_restored)
+
+        # Restore companion dirs: any to_delete subdir that is not a managed channel
+        _managed_trash = {"lwir", "visible", "reasons"}
+        if self.to_delete_dir.is_dir():
+            for entry in self.to_delete_dir.iterdir():
+                if entry.is_dir() and entry.name not in _managed_trash:
+                    self._restore_companion(entry.name)
+
         if lwir_restored or vis_restored:
             self.load_dataset()
         return restored_pairs
@@ -247,6 +290,26 @@ class DatasetLoader:
             return str(path.relative_to(self.root_dir))
         except ValueError:
             return str(path)
+
+    def _restore_companion(self, companion: str) -> None:
+        """Restore all files from to_delete/{companion}/ back to {companion}/."""
+        src_dir = self.to_delete_dir / companion
+        target_dir = self.root_dir / companion
+        if not src_dir.is_dir():
+            return
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logger.error("Failed to create companion dir %s: %s", target_dir, exc)
+            return
+        for src in src_dir.iterdir():
+            if not src.is_file():
+                continue
+            destination = self._unique_destination(target_dir / src.name)
+            try:
+                src.rename(destination)
+            except OSError as exc:
+                logger.error("Failed to restore companion file %s: %s", src, exc)
 
     def _restore_category(self, category: str) -> int:
         src_dir = self.to_delete_dir / category
