@@ -5,6 +5,13 @@ Each release below is pinned to the commit that best represents that snapshot.
 
 Versioning note: minor releases mark visible feature jumps; patch releases cover bugfixes and maintenance updates, including docs/help polish that does not change behavior.
 
+## [Unreleased]
+- Bugfix: workspace scan silently skipped collections whose folder name matched a reserved word (e.g. `Calibration`); now emits a warning and shows a dismissible banner in the workspace panel listing the affected folder names.
+- Bugfix: taskbar icon missing on GNOME/Wayland; added `setDesktopFileName` call and `scripts/install.sh` to register the `.desktop` entry.
+- Feature: companion directories (`lidar_*`, `odom`, `dht22`, `gnss`, …) are auto-discovered at load time and moved/restored together with `lwir`/`visible` on delete and restore operations. Datasets without extra directories are unaffected.
+- Bugfix: two overlapping tqdm bars appeared in terminal during calibration auto-search; the redundant queue-level bar is now suppressed while auto-search is active.
+- Scripts: `coverage/` subfolder groups the coverage helpers; one-shot migration and utility scripts moved to `deprecated/`.
+
 ## [0.10.1](https://github.com/enheragu/multiespectral_check/commit/073f364) - 2026-05-21
 - Export PDF in calibration report and label report (vectorized text via QTextDocument; charts embedded as PNG).
 - Calibration report: pre-compute and cache plot data (chessboard quads, pose diversity) to `.calibration_report_cache.yaml` on solve; dialog loads from cache instead of reloading all corner files on each open. Cache is invalidated when calibration timestamp or GUI version changes.
