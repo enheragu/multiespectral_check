@@ -636,6 +636,46 @@ class WorkspacePanel(QWidget):
             return
         self._refresh()
 
+    def _make_reserved_banner(self) -> QWidget:
+        """Build the dismissible banner that warns about reserved-name folders."""
+        banner = QWidget(self)
+        banner.setObjectName("reserved_banner")
+        banner.setStyleSheet(
+            "#reserved_banner { background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; }"
+        )
+        row = QHBoxLayout(banner)
+        row.setContentsMargins(10, 6, 6, 6)
+        row.setSpacing(8)
+
+        self._reserved_banner_label = QLabel(banner)
+        self._reserved_banner_label.setWordWrap(True)
+        self._reserved_banner_label.setStyleSheet("color: #856404; background: transparent;")
+        row.addWidget(self._reserved_banner_label, 1)
+
+        close_btn = QPushButton("✕", banner)
+        close_btn.setFlat(True)
+        close_btn.setFixedSize(20, 20)
+        close_btn.setToolTip("Dismiss")
+        close_btn.setStyleSheet(
+            "QPushButton { color: #856404; background: transparent; border: none; font-weight: bold; }"
+            "QPushButton:hover { background: rgba(0,0,0,15); border-radius: 3px; }"
+        )
+        close_btn.clicked.connect(banner.hide)
+        row.addWidget(close_btn)
+        return banner
+
+    def _update_reserved_banner(self, skipped: List[str]) -> None:
+        """Show or hide the reserved-name banner based on skipped folders."""
+        if not skipped:
+            self._reserved_banner.setVisible(False)
+            return
+        names = ", ".join(f"'{n}'" for n in sorted(skipped))
+        self._reserved_banner_label.setText(
+            f"<b>Reserved folder names skipped:</b> {names}. "
+            f"These names are reserved for internal use. Rename the folders to include them in the workspace."
+        )
+        self._reserved_banner.setVisible(True)
+
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         self.path_label = QLabel(f"Workspace: {self.workspace_dir}")
@@ -663,6 +703,11 @@ class WorkspacePanel(QWidget):
         header_row.addWidget(self.progress_placeholder)
         header_row.addWidget(self.open_button)
         layout.addLayout(header_row)
+
+        # Banner shown when folders are skipped because their name is reserved
+        self._reserved_banner = self._make_reserved_banner()
+        self._reserved_banner.setVisible(False)
+        layout.addWidget(self._reserved_banner)
 
         self.table = QTableWidget(0, 8, self)  # 8 columns
         self.table.setHorizontalHeaderLabels([
@@ -750,6 +795,7 @@ class WorkspacePanel(QWidget):
                 self._show_dataset_detected_dialog(ws.name)
 
         log_info(f"Scan complete, applying {len(infos)} results to table...", "WORKSPACE")
+        self._update_reserved_banner(self.workspace_manager.skipped_reserved)
         self._apply_scan_results(infos)
         datasets = len([i for i in self._infos if not i.is_collection])
         collections = len([i for i in self._infos if i.is_collection])

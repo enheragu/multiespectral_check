@@ -21,10 +21,17 @@ class WorkspaceManager:
     - Invalidates workspace cache on changes
     """
 
+    _system_dirs = frozenset({".git", "__pycache__", "to_delete", "trash", ".trash"})
+    _reserved_content_names = frozenset({
+        "labels", "corners", "calibration", "calibration_corners",
+        "annotations", "masks", "output", "outputs", "results",
+    })
+
     def __init__(self, workspace_path: Path, on_dataset_changed: Optional[Callable[[Path], None]] = None) -> None:
         self.workspace_path = workspace_path
         self.handlers: Dict[Path, DatasetHandler] = {}
         self._on_dataset_changed = on_dataset_changed
+        self.skipped_reserved: List[str] = []
         log_info(f"Initialized for {workspace_path}", "[WorkspaceManager]")
 
     @timed
@@ -140,10 +147,21 @@ class WorkspaceManager:
         CRITICAL: Workspace root itself is NEVER included - only its children.
         """
         discovered: List[Path] = []
+        self.skipped_reserved = []
 
         # First pass: find all leaf datasets (directories with visible+lwir)
         for entry in self.workspace_path.iterdir():
-            if not entry.is_dir() or self._is_noise_dir(entry):
+            if not entry.is_dir():
+                continue
+            if self._is_noise_dir(entry):
+                if not self._is_system_dir(entry):
+                    self.skipped_reserved.append(entry.name)
+                    log_warning(
+                        f"Skipping '{entry.name}': name is reserved "
+                        f"({entry.name.lower()!r} is a reserved folder name). "
+                        f"Rename the folder to include it in the workspace.",
+                        "WORKSPACE_MGR",
+                    )
                 continue
 
             # Check if it's a leaf dataset
@@ -171,22 +189,20 @@ class WorkspaceManager:
         """Check if directory is a leaf dataset (has visible and lwir subdirs)."""
         return (path / "visible").is_dir() and (path / "lwir").is_dir()
 
+    def _is_system_dir(self, path: Path) -> bool:
+        """Return True if path is a system/tool directory (silently skipped, no warning)."""
+        return path.name.lower() in self._system_dirs
+
     def _is_noise_dir(self, path: Path) -> bool:
         """Return True if path should be skipped when scanning workspace.
 
-        Excludes:
-        - System directories (.git, __pycache__)
-        - Deleted items (to_delete)
-        - Special folders that look like datasets but aren't (labels, corners, etc.)
+        Excludes system dirs and reserved content folder names that look like
+        datasets but aren't (labels, corners, calibration, annotations…).
+
+        NOTE: reserved content names trigger a log_warning via _discover_dataset_paths
+        so the user knows why their folder is being ignored.
         """
-        # Special folders to exclude (may have lwir/visible but are NOT datasets)
-        EXCLUDED_NAMES = {
-            "to_delete", ".git", "__pycache__",
-            "labels", "corners", "calibration", "calibration_corners",
-            "annotations", "masks", "output", "outputs", "results",
-            "trash", ".trash",
-        }
-        return path.name.lower() in EXCLUDED_NAMES
+        return self._is_system_dir(path) or path.name.lower() in self._reserved_content_names
 
     def _is_collection(self, dataset_path: Path) -> bool:
         """Check if dataset is a collection (has subdirectories that are datasets)."""
