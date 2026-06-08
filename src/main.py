@@ -74,6 +74,8 @@ def main() -> int:
         pass
     try:
         app.setWindowIcon(QIcon(str(Path(__file__).resolve().parent / "frontend" / "resources" / "media" / "logo.ico")))
+        # Required on GNOME/Wayland for the taskbar icon to match the .desktop file
+        app.setDesktopFileName("multispectral-viewer")
     except Exception:
         pass
     after_style = time.perf_counter()
