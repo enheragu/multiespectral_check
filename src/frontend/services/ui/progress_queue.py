@@ -60,6 +60,7 @@ class ProgressQueueManager:
         label: str,
         task_id: str,
         cancel_handler: Optional[Callable[[], None]] = None,
+        suppress_tqdm: bool = False,
     ) -> None:
         state = self._states.get(task_id, ProgressState())
         total = state.total
@@ -82,8 +83,8 @@ class ProgressQueueManager:
             self.tracker.start(task_id, label, pending)
             if cancel_handler:
                 self.cancel_controller.register(task_id, cancel_handler)
-            # Create tqdm bar for terminal output
-            if self._use_tqdm and TQDM_AVAILABLE and tqdm_class is not None:
+            # Create tqdm bar for terminal output (skip if caller already has one)
+            if self._use_tqdm and TQDM_AVAILABLE and tqdm_class is not None and not suppress_tqdm:
                 state.tqdm_bar = tqdm_class(
                     total=pending,
                     desc=label,

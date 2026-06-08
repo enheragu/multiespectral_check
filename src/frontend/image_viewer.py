@@ -3643,11 +3643,15 @@ class ImageViewer(QMainWindow):
             self._outlier_dialog.set_progress(snapshot)
 
     def _handle_calibration_activity_changed(self, pending: int) -> None:
+        # Suppress the queue-level tqdm bar while auto-search is running — auto-search
+        # already has its own "Auto-search calibration" bar, showing both is confusing.
+        suppress_tqdm = bool(getattr(self, "_calib_search_task_id", None))
         self.queue_manager.update(
             pending=pending,
             label="Detecting chessboards",
             task_id=config.progress_task_detection,
             cancel_handler=self.calibration_controller.cancel_all,
+            suppress_tqdm=suppress_tqdm,
         )
         self._update_cancel_button()
 
