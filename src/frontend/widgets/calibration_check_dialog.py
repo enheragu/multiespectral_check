@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -721,10 +722,13 @@ class CalibrationCheckDialog(QDialog):
         # ---- header metadata ----
         cal_raw = self.file_metadata.get("updated_at", "")
         try:
-            cal_date = (
-                datetime.fromisoformat(cal_raw.replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M")
-                if cal_raw else ""
-            )
+            if cal_raw:
+                _c = re.sub(r'([+\-]\d{2}:\d{2})Z$', r'\1', cal_raw)
+                if _c.endswith('Z'):
+                    _c = _c[:-1] + '+00:00'
+                cal_date = datetime.fromisoformat(_c).strftime("%Y-%m-%d %H:%M")
+            else:
+                cal_date = ""
         except Exception:
             cal_date = cal_raw
         pattern = self.file_metadata.get("pattern_size")
@@ -944,7 +948,11 @@ class CalibrationCheckDialog(QDialog):
         if not raw or not isinstance(raw, str):
             return "Not specified"
         try:
-            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            # Normalize malformed "+00:00Z" (offset + trailing Z) before parsing
+            cleaned = re.sub(r'([+\-]\d{2}:\d{2})Z$', r'\1', raw)
+            if cleaned.endswith('Z'):
+                cleaned = cleaned[:-1] + '+00:00'
+            parsed = datetime.fromisoformat(cleaned)
             local_dt = parsed.astimezone()
             return local_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
         except Exception:  # noqa: BLE001
