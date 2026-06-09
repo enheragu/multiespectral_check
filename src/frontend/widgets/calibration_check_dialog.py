@@ -311,7 +311,7 @@ class CalibrationCheckDialog(QDialog):
             )
         frame_note = QLabel(frame_note_text)
         frame_note.setWordWrap(True)
-        frame_note.setStyleSheet("color: #444;")
+        frame_note.setStyleSheet(f"color: {style.TEXT_SECONDARY};")
         frame_note.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         form.addRow(self._field_label("Frame note"), frame_note)
 
@@ -319,7 +319,7 @@ class CalibrationCheckDialog(QDialog):
         rms = payload.get("reprojection_error")
         summary = f"Samples: {samples}"
         if rms is not None:
-            summary += f" | RMS error: {rms:.4f}"
+            summary += f" | RMS error: {rms:.4f} px"
         summary_label = QLabel(summary)
         summary_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         form.addRow(self._field_label("Summary"), summary_label)
@@ -348,13 +348,13 @@ class CalibrationCheckDialog(QDialog):
             translation_text = self._format_vector(translation) + "  (pattern squares)"
         translation_label = QLabel(translation_text)
         translation_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        translation_label.setStyleSheet("font-family: monospace;")
+        translation_label.setStyleSheet(style.MONO_TEXT_STYLE)
         form.addRow(self._field_label("Translation (LWIR → Visible)"), translation_label)
 
         rotation_label = QLabel(self._format_matrix(rotation))
         rotation_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         rotation_label.setWordWrap(True)
-        rotation_label.setStyleSheet("font-family: monospace; padding: 2px 0 8px 0;")
+        rotation_label.setStyleSheet(style.MONO_TEXT_STYLE + " padding: 2px 0 8px 0;")
         form.addRow(self._field_label("Rotation matrix (LWIR → Visible)"), rotation_label)
 
         try:
@@ -374,7 +374,7 @@ class CalibrationCheckDialog(QDialog):
             )
             euler_label = QLabel(euler_text)
             euler_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            euler_label.setStyleSheet("font-family: monospace;")
+            euler_label.setStyleSheet(style.MONO_TEXT_STYLE)
             form.addRow(self._field_label("Rotation (roll/pitch/yaw)"), euler_label)
         except Exception:  # noqa: BLE001
             pass
@@ -414,13 +414,13 @@ class CalibrationCheckDialog(QDialog):
         samples = payload.get("samples", 0)
         error = payload.get("reprojection_error")
         header = QLabel(
-            f"Samples: {samples} | RMS error: {error:.4f}" if error is not None else f"Samples: {samples}"
+            f"Samples: {samples} | RMS error: {error:.4f} px" if error is not None else f"Samples: {samples}"
         )
         form.addRow(self._field_label("Summary"), header)
         matrix = QLabel(self._format_matrix(payload.get("camera_matrix")))
         matrix.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         matrix.setWordWrap(True)
-        matrix.setStyleSheet("font-family: monospace; padding: 2px 0 8px 0;")
+        matrix.setStyleSheet(style.MONO_TEXT_STYLE + " padding: 2px 0 8px 0;")
         form.addRow(self._field_label("Camera matrix"), matrix)
         distortion = QLabel(self._format_vector(payload.get("distortion")))
         distortion.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -429,7 +429,7 @@ class CalibrationCheckDialog(QDialog):
         if fov_text:
             fov_label = QLabel(fov_text)
             fov_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            fov_label.setStyleSheet("font-family: monospace;")
+            fov_label.setStyleSheet(style.MONO_TEXT_STYLE)
             form.addRow(self._field_label("FOV (H × V)"), fov_label)
         layout.addLayout(form)
         return panel
@@ -505,7 +505,7 @@ class CalibrationCheckDialog(QDialog):
             cl.setSpacing(2)
             cl.addWidget(_row(lwir_pix, vis_pix))
             cap = QLabel(caption)
-            cap.setStyleSheet("color: #666; font-size: 10px; font-style: italic;")
+            cap.setStyleSheet(f"color: {style.TEXT_CAPTION}; font-size: 10px; font-style: italic;")
             cap.setAlignment(Qt.AlignmentFlag.AlignCenter)
             cl.addWidget(cap)
             return container
@@ -562,7 +562,7 @@ class CalibrationCheckDialog(QDialog):
 
     def _field_label(self, text: str) -> QLabel:
         label = QLabel(text)
-        label.setStyleSheet("font-weight: 700; color: #111;")
+        label.setStyleSheet(f"font-weight: 700; color: {style.TEXT_TITLE};")
         return label
 
     def _format_matrix(self, matrix) -> str:
@@ -637,7 +637,7 @@ class CalibrationCheckDialog(QDialog):
         rms = payload.get("reprojection_error")
         summary = f"Samples: {samples}"
         if rms is not None:
-            summary += f" | RMS error: {rms:.4f}"
+            summary += f" | RMS error: {rms:.4f} px"
         rows += _row("Summary", summary)
 
         updated = payload.get("updated_at")
@@ -775,7 +775,7 @@ class CalibrationCheckDialog(QDialog):
             err = payload.get("reprojection_error")
             summary = f"Samples: {samples}"
             if err is not None:
-                summary += f" | RMS error: {err:.4f}"
+                summary += f" | RMS error: {err:.4f} px"
             h += _row("Summary", summary)
             mat_str = self._format_matrix(payload.get("camera_matrix")).replace("\n", "<br/>")
             h += _row("Camera matrix", _mono(mat_str))
@@ -864,11 +864,11 @@ class CalibrationCheckDialog(QDialog):
         ext_rows = self._build_extrinsic_html_rows()
 
         css = (
-            "body { font-family: Arial, sans-serif; font-size: 9pt; color: #0f1115; }"
-            " h2 { font-size: 14pt; font-weight: bold; color: #0f1115; margin: 4pt 0 10pt 0; }"
+            f"body {{ font-family: Arial, sans-serif; font-size: 9pt; color: {style.TEXT_TITLE}; }}"
+            f" h2 {{ font-size: 14pt; font-weight: bold; color: {style.TEXT_TITLE}; margin: 4pt 0 10pt 0; }}"
             " h3 { font-size: 9pt; color: #5c6370; font-weight: bold; margin: 8pt 0 2pt 0; }"
             " table.data td { padding: 2pt 4pt; vertical-align: top; }"
-            " td.lbl { font-weight: bold; color: #111; }"
+            f" td.lbl {{ font-weight: bold; color: {style.TEXT_TITLE}; }}"
         )
 
         return (

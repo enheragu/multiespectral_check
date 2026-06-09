@@ -251,7 +251,7 @@ class LabelEditDialog(QDialog):
 
         # Size info label
         self._size_label = QLabel()
-        self._size_label.setStyleSheet("color: #666; font-size: 11px;")
+        self._size_label.setStyleSheet(f"color: {style.TEXT_CAPTION}; font-size: 11px;")
         self._update_size_label()
         bbox_layout.addWidget(self._size_label)
 
@@ -267,13 +267,13 @@ class LabelEditDialog(QDialog):
         # Source (read-only) + Confidence (read-only) on same row
         info_layout = QHBoxLayout()
         self._source_label = QLabel("manual")
-        self._source_label.setStyleSheet("color: #666; font-style: italic;")
+        self._source_label.setStyleSheet(f"color: {style.TEXT_CAPTION}; font-style: italic;")
         info_layout.addWidget(QLabel("Source:"))
         info_layout.addWidget(self._source_label)
         info_layout.addSpacing(20)
         info_layout.addWidget(QLabel("Conf:"))
         self._confidence_label = QLabel("1.00")
-        self._confidence_label.setStyleSheet("color: #666; font-style: italic;")
+        self._confidence_label.setStyleSheet(f"color: {style.TEXT_CAPTION}; font-style: italic;")
         info_layout.addWidget(self._confidence_label)
         info_layout.addStretch()
         universal_layout.addRow(info_layout)
@@ -291,7 +291,7 @@ class LabelEditDialog(QDialog):
         self._truncation_check = QCheckBox("Truncated")
         occlusion_trunc_layout.addWidget(self._truncation_check)
         self._truncation_auto_label = QLabel("")
-        self._truncation_auto_label.setStyleSheet("color: #888; font-size: 10px;")
+        self._truncation_auto_label.setStyleSheet(f"color: {style.TEXT_CAPTION}; font-size: 10px;")
         occlusion_trunc_layout.addWidget(self._truncation_auto_label)
         occlusion_trunc_layout.addStretch()
         universal_layout.addRow(occlusion_trunc_layout)

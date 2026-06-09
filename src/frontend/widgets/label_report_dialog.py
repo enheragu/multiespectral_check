@@ -116,7 +116,7 @@ class LabelReportDialog(QDialog):
 
         if not self.summary or not self.summary.get("total_annotations"):
             empty = QLabel("No labels found.")
-            empty.setStyleSheet("color: #666;")
+            empty.setStyleSheet(f"color: {style.TEXT_CAPTION};")
             card_layout.addWidget(empty)
         else:
             # Overview panel
@@ -357,7 +357,7 @@ class LabelReportDialog(QDialog):
 
     def _field(self, text: str) -> QLabel:
         lbl = QLabel(text)
-        lbl.setStyleSheet("font-weight: 700; color: #111;")
+        lbl.setStyleSheet(f"font-weight: 700; color: {style.TEXT_TITLE};")
         return lbl
 
     def _value(self, text: str) -> QLabel:
@@ -477,11 +477,11 @@ class LabelReportDialog(QDialog):
             )
 
         css = (
-            "body { font-family: Arial, sans-serif; font-size: 9pt; color: #0f1115; }"
-            " h2 { font-size: 14pt; font-weight: bold; color: #0f1115; margin: 4pt 0 10pt 0; }"
+            f"body {{ font-family: Arial, sans-serif; font-size: 9pt; color: {style.TEXT_TITLE}; }}"
+            f" h2 {{ font-size: 14pt; font-weight: bold; color: {style.TEXT_TITLE}; margin: 4pt 0 10pt 0; }}"
             " h3 { font-size: 9pt; color: #5c6370; font-weight: bold; margin: 8pt 0 2pt 0; }"
             " table.data td { padding: 2pt 4pt; vertical-align: top; }"
-            " td.lbl { font-weight: bold; color: #111; }"
+            f" td.lbl {{ font-weight: bold; color: {style.TEXT_TITLE}; }}"
         )
 
         overview_section = _panel(f'<table class="data" width="100%" cellspacing="0">{overview_rows}</table>')

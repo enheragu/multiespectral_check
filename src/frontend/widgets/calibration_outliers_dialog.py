@@ -184,7 +184,7 @@ class CalibrationOutliersDialog(QDialog):
             self.calib_info_label = QLabel()
             self.calib_info_label.setWordWrap(True)
             self.calib_info_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard)
-            self.calib_info_label.setStyleSheet("color: #666; font-size: 11px; margin-top: 6px;")
+            self.calib_info_label.setStyleSheet(f"color: {style.TEXT_CAPTION}; font-size: 11px; margin-top: 6px;")
             self._update_calibration_info_label()
             stats_layout.addWidget(self.calib_info_label)
         else:
