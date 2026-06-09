@@ -10,7 +10,7 @@ from typing import Tuple
 
 
 APP_NAME = "Multispectral Dataset Viewer"
-APP_VERSION = "0.10.1"
+APP_VERSION = "0.10.2"
 APP_DESCRIPTION = "GUI for multispectral dataset review, calibration, and labelling."
 SUPPORT_EMAIL = "e.heredia@umh.es"
 REPO_URL = "https://github.com/enheragu/multiespectral_check"
