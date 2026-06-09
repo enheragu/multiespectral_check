@@ -97,26 +97,68 @@ class _CalibrationSolverTask(QRunnable):
 
         if not obj_points or not img_points or image_size is None:
             return None
-        self._ensure_not_cancelled()
-        retval, camera_matrix, distortion, rvecs, tvecs = cv2.calibrateCamera(
-            obj_points,
-            img_points,
-            image_size,
-            None,
-            None,
-        )
-        per_view_errors: Dict[str, float] = {}
-        for idx, base in enumerate(view_ids):
-            if idx >= len(rvecs) or idx >= len(tvecs):
-                continue
-            projected, _ = cv2.projectPoints(
-                obj_points[idx],
-                rvecs[idx],
-                tvecs[idx],
-                camera_matrix,
-                distortion,
+
+        # Iteratively calibrate and drop views whose per-view reprojection error is a
+        # robust (median + k*MAD) outlier, refitting after each round. The solve runs at
+        # the top of each round, so the final intrinsics always match the surviving views.
+        config = get_config()
+        active = list(range(len(obj_points)))
+        rejected_ids: List[str] = []
+        camera_matrix = distortion = None
+        retval = 0.0
+        kept_errors: Dict[str, float] = {}
+        iteration = 0
+        while True:
+            self._ensure_not_cancelled()
+            retval, camera_matrix, distortion, rvecs, tvecs = cv2.calibrateCamera(
+                [obj_points[i] for i in active],
+                [img_points[i] for i in active],
+                image_size,
+                None,
+                None,
             )
-            reproj = np.linalg.norm(projected.reshape(-1, 2) - img_points[idx], axis=1)
+            view_err: List[float] = []
+            for pos, i in enumerate(active):
+                projected, _ = cv2.projectPoints(obj_points[i], rvecs[pos], tvecs[pos], camera_matrix, distortion)
+                reproj = np.linalg.norm(projected.reshape(-1, 2) - img_points[i], axis=1)
+                view_err.append(float(np.sqrt(np.mean(reproj ** 2))) if reproj.size else float("inf"))
+            kept_errors = {view_ids[i]: e for i, e in zip(active, view_err)}
+            finite = [e for e in view_err if np.isfinite(e)]
+            if not finite:
+                break
+            med = float(np.median(finite))
+            mad = float(np.median([abs(e - med) for e in finite]))
+            threshold = max(
+                med + config.intrinsic_reject_k_mad * 1.4826 * mad,
+                config.intrinsic_reject_floor_px,
+            )
+            keep = [i for i, e in zip(active, view_err) if e <= threshold]
+            if (
+                len(keep) == len(active)
+                or len(keep) < config.intrinsic_reject_min_views
+                or iteration >= config.intrinsic_reject_max_iters - 1
+            ):
+                break
+            rejected_ids.extend(view_ids[i] for i in active if i not in keep)
+            active = keep
+            iteration += 1
+
+        if camera_matrix is None:
+            return None
+
+        # Kept views report their joint-calibration residual; rejected views report their
+        # error against the final intrinsics (solvePnP pose) so the outlier dialog shows why
+        # they were dropped.
+        per_view_errors: Dict[str, float] = dict(kept_errors)
+        for i in range(len(obj_points)):
+            base = view_ids[i]
+            if base in per_view_errors:
+                continue
+            ok, rvec, tvec = cv2.solvePnP(obj_points[i], img_points[i], camera_matrix, distortion)
+            if not ok:
+                continue
+            projected, _ = cv2.projectPoints(obj_points[i], rvec, tvec, camera_matrix, distortion)
+            reproj = np.linalg.norm(projected.reshape(-1, 2) - img_points[i], axis=1)
             if reproj.size:
                 per_view_errors[base] = float(np.sqrt(np.mean(reproj ** 2)))
 
@@ -126,10 +168,12 @@ class _CalibrationSolverTask(QRunnable):
                 "camera_matrix": camera_matrix.tolist(),
                 "distortion": distortion.reshape(-1).tolist(),
                 "image_size": list(image_size),
-                "samples": len(obj_points),
+                "samples": len(active),
+                "rejected_views": len(rejected_ids),
                 "reprojection_error": float(retval),
             },
             "per_view_errors": per_view_errors,
+            "rejected_views": rejected_ids,
         }
 
     def run(self) -> None:  # noqa: D401
@@ -174,6 +218,7 @@ class _CalibrationSolverTask(QRunnable):
                                 errors_payload["channels"][channel] = {
                                     "per_view_errors": solved["per_view_errors"],
                                     "reprojection_error": solved["calibration"]["reprojection_error"],
+                                    "rejected_views": solved.get("rejected_views", []),
                                 }
                         except Exception:
                             # Channel failed, continue with other
@@ -188,6 +233,7 @@ class _CalibrationSolverTask(QRunnable):
                         errors_payload["channels"][channel] = {
                             "per_view_errors": solved["per_view_errors"],
                             "reprojection_error": solved["calibration"]["reprojection_error"],
+                            "rejected_views": solved.get("rejected_views", []),
                         }
 
             if not calibration_payload["channels"]:
@@ -232,10 +278,11 @@ class _CalibrationSolverTask(QRunnable):
             # Return combined payload for GUI with per_view_errors for reproj display
             result_payload = dict(final_payload)
             result_payload["file_path"] = str(output_path)
-            # Inject per_view_errors back into channels for GUI consumption
+            # Inject per_view_errors + rejected_views back into channels for GUI consumption
             for channel, err_data in errors_payload["channels"].items():
                 if channel in result_payload["channels"]:
                     result_payload["channels"][channel]["per_view_errors"] = err_data["per_view_errors"]
+                    result_payload["channels"][channel]["rejected_views"] = err_data.get("rejected_views", [])
 
             try:
                 self.signals.completed.emit(result_payload)

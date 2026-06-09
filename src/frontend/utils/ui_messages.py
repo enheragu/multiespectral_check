@@ -68,10 +68,6 @@ HELP_MENU_SECTIONS: Sequence[Tuple[str, Sequence[Tuple[str, str]]]] = [
                 "manual offset (Apply Parallax Correction toggle); disable it to use pure "
                 "calibration reprojection. Reset Parallax clears only that additive offset.",
             ),
-            (
-                "Corner Display",
-                "Choose which chessboard corners to draw: Original Only, Subpixel Only, or Both (debug).",
-            ),
             ("Show labels", "Draw label boxes on visible/LWIR views when label files exist."),
             ("Show image info overlay", "Display image metadata overlays on top of the images."),
             (
@@ -87,8 +83,6 @@ HELP_MENU_SECTIONS: Sequence[Tuple[str, Sequence[Tuple[str, str]]]] = [
         [
             ("Auto search calibration candidates…", "Automatically search for chessboard patterns across the dataset."),
             ("Detect chessboards", "Detect chessboards on every calibration candidate currently tagged."),
-            ("Refine chessboard corners", "Apply subpixel refinement to existing detections for better accuracy."),
-            ("Use Subpixel Corners", "Toggle whether calibration computation uses subpixel-refined corners."),
             ("Compute calibration matrices", "Solve LWIR and visible camera intrinsic matrices."),
             ("Compute extrinsic transform", "Estimate the stereo transform using paired detections on both cameras."),
             ("Check calibration report", "Open the review dialog to inspect matrices, reprojection errors, and exports."),

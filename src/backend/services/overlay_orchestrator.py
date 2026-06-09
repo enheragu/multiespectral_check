@@ -72,7 +72,6 @@ class OverlayOrchestrator(QObject):
         self.show_labels = False
         self.show_projected_labels = True
         self.show_overlays = True  # Info overlay (status text, calibration markers, corners)
-        self.corner_display_mode = "subpixel"  # "original", "subpixel", "both"
 
         # Cached homography for stereo alignment (computed once per calibration)
         self._cached_homography: Optional[Any] = None
@@ -123,31 +122,9 @@ class OverlayOrchestrator(QObject):
         if calibration_flag and (calib_results.get("lwir") or calib_results.get("visible")):
             calib_corners = self.session.get_corners(base) or {}
 
-        # Determine which corners to show based on corner_display_mode
-        # For each channel, we may have "original", "subpixel", or "both"
-        def get_corners_for_channel(channel: str) -> Tuple[
-            Optional[List[List[float]]],  # primary corners
-            Optional[List[List[float]]],  # secondary corners (only in "both" mode)
-            bool,  # primary is subpixel?
-        ]:
-            original = calib_corners.get(channel)
-            subpixel = calib_corners.get(f"{channel}_subpixel")
-
-            if self.corner_display_mode == "original":
-                return original, None, False
-            elif self.corner_display_mode == "subpixel":
-                # Prefer subpixel if available, fallback to original
-                if subpixel:
-                    return subpixel, None, True
-                return original, None, False
-            else:  # "both"
-                # Primary = subpixel (if available), secondary = original
-                if subpixel:
-                    return subpixel, original, True
-                return original, None, False
-
-        lwir_corners_primary, lwir_corners_secondary, lwir_is_subpixel = get_corners_for_channel("lwir")
-        vis_corners_primary, vis_corners_secondary, vis_is_subpixel = get_corners_for_channel("visible")
+        # findChessboardCornersSB corners are already subpixel-accurate; show them directly.
+        lwir_corners_primary = calib_corners.get("lwir")
+        vis_corners_primary = calib_corners.get("visible")
 
         # Error data
         thresholds = self._get_error_thresholds()
@@ -272,8 +249,6 @@ class OverlayOrchestrator(QObject):
             calibration_auto=calibration_auto,
             calibration_detected=calib_results.get("lwir") if self.show_overlays else None,
             corner_points=lwir_corners_primary,
-            corner_points_secondary=lwir_corners_secondary,
-            corners_refined=lwir_is_subpixel if self.show_overlays else False,
             warning_text=None,
             calibration_errors=calibration_errors,
             stereo_error=stereo_error,
@@ -300,8 +275,6 @@ class OverlayOrchestrator(QObject):
             calibration_auto=calibration_auto,
             calibration_detected=calib_results.get("visible") if self.show_overlays else None,
             corner_points=vis_corners_primary,
-            corner_points_secondary=vis_corners_secondary,
-            corners_refined=vis_is_subpixel if self.show_overlays else False,
             warning_text=None,
             calibration_errors=calibration_errors,
             stereo_error=stereo_error,
@@ -564,21 +537,6 @@ class OverlayOrchestrator(QObject):
         """Set whether to show info overlays (status text, calibration markers, corners)."""
         if show != self.show_overlays:
             self.show_overlays = show
-            self.invalidate()
-
-    def set_corner_display_mode(self, mode: str) -> None:
-        """Set corner display mode.
-
-        Args:
-            mode: One of:
-                - 'original': Show only original detected corners
-                - 'subpixel': Show subpixel-refined corners (if available)
-                - 'both': Show both original and subpixel for comparison
-        """
-        if mode not in ("original", "subpixel", "both"):
-            mode = "subpixel"
-        if mode != self.corner_display_mode:
-            self.corner_display_mode = mode
             self.invalidate()
 
     def _transform_corners_for_rectified(

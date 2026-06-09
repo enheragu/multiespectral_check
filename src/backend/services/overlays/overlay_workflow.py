@@ -30,7 +30,6 @@ LabelOverlay = Tuple[str, float, float, float, float, QColor, bool, bool]
 CALIBRATION_BORDER_COLOR = QColor("#00ffea")
 CALIBRATION_ERROR_COLOR = QColor("#dc3545")
 WARNING_LABEL_COLOR = QColor("#ffb347")
-SUBPIXEL_CORNER_COLOR = QColor("#ff8c00")  # Dark orange for subpixel corners
 
 
 @dataclass
@@ -78,8 +77,6 @@ class OverlayWorkflow:
         calibration_auto: bool,
         calibration_detected: Optional[bool],
         corner_points: Optional[List[List[float]]],
-        corner_points_secondary: Optional[List[List[float]]] = None,
-        corners_refined: bool = False,
         warning_text: Optional[str] = None,
         calibration_errors: Optional[Dict[str, Optional[float]]] = None,
         stereo_error: Optional[float] = None,
@@ -111,8 +108,6 @@ class OverlayWorkflow:
             calibration_auto,
             calibration_detected,
             self._corner_signature(corner_points),
-            self._corner_signature(corner_points_secondary),
-            corners_refined,
             (warning_text or "")[:64],
             _rounded_errors(calibration_errors),
             round(stereo_error, 4) if isinstance(stereo_error, (int, float)) else None,
@@ -293,8 +288,6 @@ class OverlayWorkflow:
         calibration_auto: bool,
         calibration_detected: Optional[bool],
         corner_points: Optional[List[List[float]]],
-        corner_points_secondary: Optional[List[List[float]]] = None,
-        corners_refined: bool = False,
         warning_text: Optional[str],
         calibration_errors: Optional[Dict[str, Optional[float]]],
         stereo_error: Optional[float],
@@ -317,8 +310,6 @@ class OverlayWorkflow:
             calibration_auto,
             calibration_detected,
             corner_points,
-            corner_points_secondary,
-            corners_refined,
             warning_text,
             calibration_errors,
             stereo_error,
@@ -347,13 +338,12 @@ class OverlayWorkflow:
             label_entries.append((label_text, label_color))
         if calibration:
             draw_calibration_overlay(painter, base_pix, CALIBRATION_BORDER_COLOR, max(3, overlay_pen_width + 1))
-            # Build calibration status with Auto/User prefix and refined tag
+            # Build calibration status with Auto/User prefix
             prefix = "Auto" if calibration_auto else "Manual"
-            refined_tag = " (refined)" if corners_refined else ""
             if warning_text:
                 status = f"{prefix}: Calibration. Chessboard discarded"
             elif calibration_detected is not None:
-                status = f"{prefix}: Calibration{refined_tag}"
+                status = f"{prefix}: Calibration"
             else:
                 status = f"{prefix}: Calibration"
             label_entries.append((status, CALIBRATION_BORDER_COLOR))
@@ -449,28 +439,17 @@ class OverlayWorkflow:
                         painter.drawLine(x - r, y, x + r, y)
                         painter.drawLine(x, y - r, x, y + r)
 
-        # Draw secondary corners first (original) so primary (subpixel) draws on top
-        if corner_points_secondary and original_size:
-            # Secondary corners: blue circles (original detection)
-            draw_corner_set(corner_points_secondary, QColor("#4a90d9"), "circle")
-
         if corner_points and original_size:
-            # Primary corners: use orange for subpixel (crosses), cyan for original (circles)
-            if corners_refined:
-                dot_color = SUBPIXEL_CORNER_COLOR  # Orange for subpixel
-                shape = "cross"
-            else:
-                dot_color = WARNING_LABEL_COLOR if warning_text else CALIBRATION_BORDER_COLOR
-                shape = "circle"
+            dot_color = WARNING_LABEL_COLOR if warning_text else CALIBRATION_BORDER_COLOR
             # Log diagnostic info for first corner only
             u0, v0 = corner_points[0]
             log_debug(
                 f"Corner transform [{channel}]: orig_size={original_size}, base={base_w}x{base_h}, "
                 f"has_align={alignment_transform is not None}, view_rectified={view_rectified}, "
-                f"corner0=({u0:.4f},{v0:.4f}), refined={corners_refined}",
+                f"corner0=({u0:.4f},{v0:.4f})",
                 "OVERLAY"
             )
-            draw_corner_set(corner_points, dot_color, shape)
+            draw_corner_set(corner_points, dot_color, "circle")
 
         painter.end()
         bucket = self._overlay_cache.setdefault(base, {})

@@ -66,7 +66,6 @@ class AppConfig:
     # Progress task identifiers
     progress_task_detection: str = "calibration-detect"
     progress_task_signatures: str = "signature-scan"
-    progress_task_refinement: str = "calibration-refine"
     progress_task_solver: str = "calibration-solver"
     progress_task_extrinsic: str = "extrinsic-solver"
     progress_task_save: str = "cache-save"
@@ -85,7 +84,6 @@ class AppConfig:
         return {
             self.progress_task_detection: "Cancelling chessboard detection",
             self.progress_task_signatures: "Cancelling duplicate sweep",
-            self.progress_task_refinement: "Cancelling corner refinement",
             self.progress_task_solver: "Cancelling calibration solve",
             self.progress_task_extrinsic: "Cancelling stereo solve",
             self.progress_task_workspace_scan: "Scanning workspace",
@@ -101,6 +99,20 @@ class AppConfig:
     calibration_intrinsic_filename: str = "calibration_intrinsic.yaml"
     calibration_extrinsic_filename: str = "calibration_extrinsic.yaml"
     calibration_errors_filename: str = ".calibration_errors_cached.yaml"  # Hidden cache file
+
+    # Intrinsic outlier rejection: iterative drop of views whose per-view reprojection
+    # error is a robust (median + k*MAD) outlier, refitting after each round.
+    intrinsic_reject_max_iters: int = 5
+    intrinsic_reject_k_mad: float = 3.5
+    intrinsic_reject_floor_px: float = 0.5
+    intrinsic_reject_min_views: int = 6
+
+    # Extrinsic outlier rejection: iterative drop of pairs whose stereo reprojection
+    # error is a robust (median + k*MAD) outlier, refitting after each round.
+    extrinsic_reject_max_iters: int = 5
+    extrinsic_reject_k_mad: float = 3.5
+    extrinsic_reject_floor_px: float = 0.5
+    extrinsic_reject_min_pairs: int = 10
 
     # Cache files
     summary_cache_filename: str = ".summary_cache.yaml"

@@ -10,7 +10,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from PyQt6.QtGui import QImage, QPixmap
 
-from common.log_utils import log_debug
 from config import get_config
 
 try:  # pragma: no cover - optional dependency
@@ -479,57 +478,8 @@ _ENHANCEMENT_PIPELINE = (
 )
 
 
-def refine_corners_from_path(
-    image_path: Optional[Path],
-    pattern_size: Tuple[int, int],
-    normalized_corners: Optional[List[List[float]]],
-) -> Optional[List[List[float]]]:
-    """Run OpenCV cornerSubPix on disk-backed images using stored normalized corners."""
-    if not normalized_corners:
-        return None
-    array = _array_from_path(image_path)
-    if array is None:
-        return None
-    gray = cv2.cvtColor(array, cv2.COLOR_RGB2GRAY)
-    height, width = gray.shape[:2]
-    expected = pattern_size[0] * pattern_size[1]
-    if len(normalized_corners) != expected:
-        return None
-
-    # Keep original corners for validation
-    original_corners = np.array(
-        [[[float(u) * width, float(v) * height]] for (u, v) in normalized_corners],
-        dtype=np.float32,
-    )
-
-    # cornerSubPix requires shape (N, 1, 2)
-    corners = original_corners.copy()
-
-    # Use very strict criteria for subpixel refinement:
-    # - Small window (3x3) to stay local
-    # - High precision (0.0001 epsilon)
-    # - Limited iterations to prevent drift
-    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 0.0001)
-    cv2.cornerSubPix(gray, corners, (3, 3), (-1, -1), criteria)
-
-    # Validate refinement: reject corners that moved too much
-    # For TRUE subpixel refinement, corners should move < 0.5 pixels
-    # If they move more, the original detection was on a different feature
-    MAX_DISPLACEMENT_PIXELS = 0.5
-    displacements = np.sqrt(np.sum((corners - original_corners) ** 2, axis=2))
-
-    # Count how many corners moved too much
-    bad_count = int(np.sum(displacements > MAX_DISPLACEMENT_PIXELS))
-    total = len(corners)
-
-    if bad_count > 0:
-        # Selective refinement: keep original for corners that moved too much
-        for i in range(len(corners)):
-            if displacements[i, 0] > MAX_DISPLACEMENT_PIXELS:
-                corners[i] = original_corners[i]
-        log_debug(f"Corner refinement: {bad_count}/{total} corners reverted (moved > {MAX_DISPLACEMENT_PIXELS}px)", "CALIB")
-
-    return [[float(point[0][0]) / width, float(point[0][1]) / height] for point in corners]
+# Note: corners from findChessboardCornersSB are already subpixel-accurate, so no
+# additional cornerSubPix refinement is applied (it degraded low-contrast LWIR corners).
 
 
 def evaluate_corner_layout(

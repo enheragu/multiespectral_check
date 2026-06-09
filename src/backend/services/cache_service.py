@@ -401,11 +401,8 @@ class CacheService:
         if total_calib > 0:
             log_info(f"Saving calibration: {total_calib} entries, outliers: lwir={outlier_counts['lwir']} visible={outlier_counts['visible']} stereo={outlier_counts['stereo']}", "CACHE")
 
-        # NOTE: reproj_errors NOT persisted - regenerated from calibration_intrinsic.yaml on load
-
-        # Extrinsic errors (persisted for archived entries restoration)
-        entry["extrinsic_errors"] = {b: float(e) for b, e in cd["extrinsic_errors"].items()
-                                      if isinstance(b, str) and isinstance(e, (int, float))}
+        # NOTE: reproj_errors and extrinsic_errors are NOT persisted here - both are
+        # regenerated from the dedicated .calibration_errors_cached.yaml on load (single source).
 
         # Other fields
         entry["overrides"] = sorted(cd["overrides"])

@@ -132,8 +132,12 @@ class CalibrationOutliersDialog(QDialog):
         card_layout.addWidget(table_title)
 
         hint = QLabel(
-            "Per-channel reprojection error (px). Uncheck LWIR/Visible/Stereo columns to exclude that view from solves."
+            "Per-channel reprojection error (px). The solver already auto-excludes outlier "
+            "views/pairs on each run; this panel is for reviewing and overriding that choice. "
+            "Uncheck a cell to exclude that view from solves, or re-check (or 'Add all') to force it back in, "
+            "then 'Rerun' to recompute."
         )
+        hint.setWordWrap(True)
         hint.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard)
         card_layout.addWidget(hint)
 
@@ -279,14 +283,15 @@ class CalibrationOutliersDialog(QDialog):
                 if isinstance(value, (int, float)) and value is not None:
                     item.setData(Qt.ItemDataRole.UserRole, float(value))
                 self.table.setItem(row_idx, col, item)
-            default_includes = {
+            # Rows are built from cache_data (the single source of truth for outlier flags),
+            # so the include state always reflects the incoming row — this lets solver-side
+            # auto-rejection show up as unchecked instead of being masked by stale local state.
+            current_state = {
                 "lwir": bool(row.get("include_lwir", True)),
                 "visible": bool(row.get("include_visible", True)),
                 "stereo": bool(row.get("include_stereo", True)),
             }
-            # Asegurar que base es str para el dict
             base_str = str(base)
-            current_state = self._include_state.get(base_str, default_includes)
             self._include_state[base_str] = current_state
             for col, channel in ((5, "lwir"), (6, "visible"), (7, "stereo")):
                 include_item = QTableWidgetItem()
@@ -412,9 +417,11 @@ class CalibrationOutliersDialog(QDialog):
             f"<br><b>• Stereo:</b> mean: {_mean_or_dash(stereo_vals)} (min,max): ({_min_or_dash(stereo_vals)},{_max_or_dash(stereo_vals)}) (threshold {thresholds.get('stereo', 0.0):.3f} px, n={stereo_count})",
         ]
         note = (
-            "<br><br><b>Note:</b>Thresholds use median + 3,5·MAD when dispersion exists; otherwise 1.5×median. "
-            "LWIR/Visible thresholds are floored at 0.5 px so tiny errors never flag as outliers. "
-            "Red cells exceed their channel threshold and will be unchecked by Auto-outliers."
+            "<br><br><b>Note:</b> The solver auto-excludes outliers on each run (robust median+MAD on per-view "
+            "reprojection for intrinsics, on stereo reprojection for extrinsics); those show here already unchecked. "
+            "This table's own threshold (median + 2,5·MAD, floored at 0.5 px) only drives the red highlight and the "
+            "Auto-outliers button for manual review. A high residual that survives filtering usually points to weak "
+            "board coverage rather than a single bad view."
         )
         self.stats_label.setText("".join(parts) + note)
 

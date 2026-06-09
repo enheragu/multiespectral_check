@@ -23,7 +23,7 @@ from frontend.resources import icon_path
 
 # Backend services (no Qt dependencies)
 from backend.services import (CalibrationController, CalibrationDebugger,
-                              CalibrationExtrinsicSolver, CalibrationRefiner,
+                              CalibrationExtrinsicSolver,
                               CalibrationSolver, DeferredCalibrationQueue,
                               OverlayPrefetcher,
                               OverlayWorkflow, SignatureController,
@@ -243,14 +243,6 @@ class ImageViewer(QMainWindow):
             preferences.get("apply_parallax_correction", True)
         )
 
-        # Corner display mode: "original", "subpixel", "both"
-        saved_corner_mode = preferences.get("corner_display_mode", "")
-        valid_corner_modes = ("original", "subpixel", "both")
-        if saved_corner_mode in valid_corner_modes:
-            self._corner_display_mode = saved_corner_mode
-        else:
-            self._corner_display_mode = "subpixel"  # Default to subpixel
-
     def _init_controllers(self) -> None:
         """Initialize state management controllers (view, filter, navigation, calibration)."""
         self.view_state = ViewStateController(
@@ -297,9 +289,6 @@ class ImageViewer(QMainWindow):
         self.progress_tracker = ProgressTracker(self._handle_progress_snapshot)
         self.cancel_controller = CancelController()
         self.queue_manager = ProgressQueueManager(self.progress_tracker, self.cancel_controller)
-        self._refine_total = 0
-        self._refine_progress = 0
-        self._refine_tqdm: Optional[Any] = None  # Optional tqdm bar for refinement
         self._background_jobs: List[QRunnable] = []
         self._is_closing = False
 
@@ -446,15 +435,6 @@ class ImageViewer(QMainWindow):
         self._calib_search_found: int = 0
         self._calib_search_tqdm: Optional[tqdm] = None
 
-        self.calibration_refiner = CalibrationRefiner(
-            self.session,
-            config.chessboard_size,
-            self.thread_pool,
-        )
-        self.calibration_refiner.refinementReady.connect(self._handle_refinement_ready)
-        self.calibration_refiner.refinementFailed.connect(self._handle_refinement_failed)
-        self.calibration_refiner.batchFinished.connect(self._handle_refinement_batch_finished)
-
         self.calibration_solver = CalibrationSolver(
             self.session,
             config.chessboard_size,
@@ -548,26 +528,6 @@ class ImageViewer(QMainWindow):
             target_align = align_actions.get(align_mode)
             if target_align and not target_align.isChecked():
                 target_align.setChecked(True)  # QActionGroup will uncheck others
-
-            # Sync corner display action group
-            corner_actions = {
-                "original": getattr(self.ui, "action_corners_original", None),
-                "subpixel": getattr(self.ui, "action_corners_subpixel", None),
-                "both": getattr(self.ui, "action_corners_both", None),
-            }
-            corner_mode = getattr(self, "_corner_display_mode", "subpixel")
-            target_corner = corner_actions.get(corner_mode)
-            if target_corner and not target_corner.isChecked():
-                target_corner.setChecked(True)  # QActionGroup will uncheck others
-
-            # Sync use_subpixel_corners toggle
-            use_subpixel_action = getattr(self.ui, "action_use_subpixel_corners", None)
-            if use_subpixel_action:
-                use_subpixel = self.session.cache_service.get_preference("use_subpixel_corners", False)
-                if use_subpixel_action.isChecked() != use_subpixel:
-                    use_subpixel_action.blockSignals(True)
-                    use_subpixel_action.setChecked(use_subpixel)
-                    use_subpixel_action.blockSignals(False)
 
             self.filter_controller.update_filter_checks()
         finally:
@@ -701,14 +661,6 @@ class ImageViewer(QMainWindow):
         if hasattr(self.ui, "action_export_dataset"):
             self.ui.action_export_dataset.triggered.connect(self._open_export_dialog)
 
-        # Corner display submenu actions - use triggered (QActionGroup handles exclusivity)
-        if hasattr(self.ui, "action_corners_original"):
-            self.ui.action_corners_original.triggered.connect(lambda: self._set_corner_display_mode("original"))
-        if hasattr(self.ui, "action_corners_subpixel"):
-            self.ui.action_corners_subpixel.triggered.connect(lambda: self._set_corner_display_mode("subpixel"))
-        if hasattr(self.ui, "action_corners_both"):
-            self.ui.action_corners_both.triggered.connect(lambda: self._set_corner_display_mode("both"))
-
         if hasattr(self.ui, "action_show_labels"):
             self.ui.action_show_labels.toggled.connect(self._handle_show_labels_toggle)
         if hasattr(self.ui, "action_show_projected_labels"):
@@ -723,10 +675,6 @@ class ImageViewer(QMainWindow):
             )
         if hasattr(self.ui, "action_auto_calibration_search"):
             self.ui.action_auto_calibration_search.triggered.connect(self._handle_auto_calibration_search)
-        if hasattr(self.ui, "action_calibration_refine"):
-            self.ui.action_calibration_refine.triggered.connect(self._handle_refine_calibration_action)
-        if hasattr(self.ui, "action_use_subpixel_corners"):
-            self.ui.action_use_subpixel_corners.toggled.connect(self._handle_use_subpixel_toggle)
         if hasattr(self.ui, "action_calibration_compute"):
             self.ui.action_calibration_compute.triggered.connect(self._handle_compute_calibration_action)
         if hasattr(self.ui, "action_calibration_extrinsic"):
@@ -1808,7 +1756,6 @@ class ImageViewer(QMainWindow):
         self.calibration_controller.cancel_all()
         self.signature_manager.cancel_all()
         self.quality_manager.cancel_all()
-        self.calibration_refiner.cancel()
         self.calibration_solver.cancel()
         self.calibration_extrinsic_solver.cancel()
         self.signature_manager.reset_epoch()
@@ -2242,7 +2189,6 @@ class ImageViewer(QMainWindow):
         self.overlay_orchestrator.set_show_labels(self.view_state.show_labels)
         self.overlay_orchestrator.set_show_projected_labels(self.view_state.show_projected_labels)
         self.overlay_orchestrator.set_show_overlays(self.view_state.show_overlays)
-        self.overlay_orchestrator.set_corner_display_mode(self._corner_display_mode)
 
         return self.overlay_orchestrator.render_pair(base)
 
@@ -3655,59 +3601,6 @@ class ImageViewer(QMainWindow):
         )
         self._update_cancel_button()
 
-    def _start_refinement_progress(self, total: int) -> None:
-        if total <= 0:
-            return
-        self._refine_total = total
-        self._refine_progress = 0
-        self.progress_tracker.start(
-            config.progress_task_refinement,
-            "Refining chessboard corners",
-            total,
-        )
-        self.cancel_controller.register(
-            config.progress_task_refinement,
-            self.calibration_refiner.cancel,
-        )
-        self._update_cancel_button()
-        # Create tqdm bar for terminal output
-        try:
-            self._refine_tqdm = tqdm(
-                total=total,
-                desc="Refining corners",
-                unit="img",
-                leave=False,
-                ncols=100,
-            )
-        except ImportError:
-            self._refine_tqdm = None
-
-    def _advance_refinement_progress(self) -> None:
-        if self._refine_total <= 0:
-            return
-        self._refine_progress = min(self._refine_total, self._refine_progress + 1)
-        self.progress_tracker.update(
-            config.progress_task_refinement,
-            self._refine_progress,
-            self._refine_total,
-        )
-        # Update tqdm bar
-        if self._refine_tqdm:
-            self._refine_tqdm.update(1)
-
-    def _finish_refinement_progress(self) -> None:
-        if self._refine_total <= 0:
-            return
-        self._refine_total = 0
-        self._refine_progress = 0
-        self.progress_tracker.finish(config.progress_task_refinement)
-        self.cancel_controller.unregister(config.progress_task_refinement)
-        self._update_cancel_button()
-        # Close tqdm bar
-        if self._refine_tqdm:
-            self._refine_tqdm.close()
-            self._refine_tqdm = None
-
     def _reset_calibration_jobs(self) -> None:
         self.calibration_controller.reset()
 
@@ -3856,46 +3749,6 @@ class ImageViewer(QMainWindow):
             # Mark cache as dirty to save new auto-marked images
             self._mark_cache_dirty()
 
-    def _handle_refinement_ready(
-        self,
-        base: str,
-        refined: Dict[str, Optional[List[List[float]]]],
-    ) -> None:
-        self._advance_refinement_progress()
-        if base not in self.state.calibration_marked:
-            return
-        # Load existing corners or create new bucket
-        bucket = self.session.get_corners(base) or {}
-        updated = False
-        for channel, points in refined.items():
-            if not points:
-                continue
-            # Store refined corners in *_subpixel keys (preserve originals)
-            subpixel_key = f"{channel}_subpixel"
-            bucket[subpixel_key] = points
-            updated = True
-        if not updated:
-            return
-        # Save corners immediately to disk (triggers flush_dirty_corners on next snapshot)
-        self.session.set_corners(base, bucket)
-        self.invalidate_overlay_cache(base)
-        if self._current_base() == base:
-            self.load_image_pair(base)
-        self._mark_cache_dirty()
-
-    def _handle_refinement_failed(self, base: str, message: str) -> None:
-        self._advance_refinement_progress()
-        self._safe_status_message(f"Subpixel refinement failed for {base}: {message}", 5000)
-
-    def _handle_refinement_batch_finished(self, success: int, failed: int) -> None:
-        self._finish_refinement_progress()
-        if success == 0 and failed == 0:
-            self._safe_status_message("Corner refinement cancelled.", 4000)
-            return
-        summary = f"Corner refinement finished ({success} updated"
-        summary += f", {failed} skipped)" if failed else ")"
-        self._safe_status_message(summary, 4000)
-
     def _handle_calibration_solved(self, payload: Dict[str, Any]) -> None:
         self.progress_tracker.finish(config.progress_task_solver)
         self.cancel_controller.unregister(config.progress_task_solver)
@@ -3904,6 +3757,7 @@ class ImageViewer(QMainWindow):
         if not channels:
             self._safe_status_message("Calibration solver returned no data.", 4000)
             return
+        auto_rejected: Dict[str, Set[str]] = {"lwir": set(), "visible": set(), "stereo": set()}
         for channel, data in channels.items():
             if not isinstance(data, dict):
                 continue
@@ -3915,14 +3769,29 @@ class ImageViewer(QMainWindow):
                     for base, err in per_view.items()
                     if isinstance(base, str) and isinstance(err, (int, float))
                 }
+            rejected = data.get("rejected_views")
+            if channel in ("lwir", "visible") and isinstance(rejected, list):
+                auto_rejected[channel].update(b for b in rejected if isinstance(b, str))
+        # Surface solver-side auto-rejected views as intrinsic outliers so the outlier
+        # dialog shows them excluded (and the user can re-include them with "Add all").
+        rejected_total = len(auto_rejected["lwir"]) + len(auto_rejected["visible"])
+        if rejected_total:
+            self._apply_outlier_selection(
+                {"lwir": set(), "visible": set(), "stereo": set()},
+                auto_rejected,
+                show_status=False,
+            )
         self._mark_cache_dirty()
         if self.view_rectified and self.session.has_images():
             self.load_current()
         file_path = payload.get("file_path") if isinstance(payload, dict) else None
         if file_path:
-            self._safe_status_message(f"Calibration saved to {Path(file_path).name}", 6000)
+            message = f"Calibration saved to {Path(file_path).name}"
         else:
-            self._safe_status_message("Calibration matrices updated.", 6000)
+            message = "Calibration matrices updated."
+        if rejected_total:
+            message += f" — {rejected_total} outlier view(s) auto-excluded"
+        self._safe_status_message(message, 6000)
         self._update_stats_panel()
         self._refresh_outlier_dialog_rows()
         self._refresh_calibration_report_if_open()
@@ -4134,17 +4003,33 @@ class ImageViewer(QMainWindow):
         snapshot = dict(payload)
         file_path = snapshot.pop("file_path", None)
         per_pair = snapshot.pop("per_pair_errors", None)
+        auto_rejected: Set[str] = set()
         if isinstance(per_pair, list):
-            self.state.cache_data["extrinsic_errors"] = {
-                entry.get("base"): float(entry.get("translation_error", 0.0))
-                for entry in per_pair
-                if isinstance(entry, dict) and isinstance(entry.get("base"), str)
-            }
+            errors: Dict[str, float] = {}
+            for entry in per_pair:
+                if not (isinstance(entry, dict) and isinstance(entry.get("base"), str)):
+                    continue
+                reproj = entry.get("stereo_reproj_error")
+                if isinstance(reproj, (int, float)):
+                    errors[entry["base"]] = float(reproj)
+                if entry.get("rejected"):
+                    auto_rejected.add(entry["base"])
+            self.state.cache_data["extrinsic_errors"] = errors
         self.state.cache_data["_extrinsic"] = snapshot
+        # Surface solver-side auto-rejected pairs as stereo outliers so the outlier
+        # dialog shows them excluded (and the user can re-include them with "Add all").
+        if auto_rejected:
+            self._apply_outlier_selection(
+                {"lwir": set(), "visible": set(), "stereo": set()},
+                {"lwir": set(), "visible": set(), "stereo": auto_rejected},
+                show_status=False,
+            )
         self._mark_cache_dirty()
         message = "Stereo calibration updated"
         if file_path:
             message = f"Stereo calibration saved to {Path(file_path).name}"
+        if auto_rejected:
+            message += f" — {len(auto_rejected)} outlier pair(s) auto-excluded"
         self._safe_status_message(message, 6000)
         self._update_stats_panel()
         self._refresh_outlier_dialog_rows()
@@ -4239,7 +4124,6 @@ class ImageViewer(QMainWindow):
         self.signature_manager.cancel_all()
         self.quality_manager.cancel_all()
         self.calibration_controller.cancel_all()
-        self.calibration_refiner.cancel()
         self.calibration_solver.cancel()
         self.calibration_extrinsic_solver.cancel()
         self.dataset_actions.cancel_background_jobs()
@@ -4252,55 +4136,6 @@ class ImageViewer(QMainWindow):
             self.thread_pool.waitForDone(500)
         except Exception:
             pass
-
-    def _collect_refinement_candidates(self) -> List[str]:
-        """Collect images with corners that can be refined."""
-        # Support both datasets and collections
-        image_bases = self.session.get_all_bases()
-        if not image_bases:
-            return []
-        candidates: List[str] = []
-        for base in image_bases:
-            if base not in self.state.calibration_marked:
-                continue
-            # Check results instead of loading corners
-            results = self.state.calibration_results.get(base, {})
-            if results.get("lwir") is True or results.get("visible") is True:
-                candidates.append(base)
-        return candidates
-
-    def _handle_refine_calibration_action(self) -> None:
-        if not require_dataset(self, "Calibration"):
-            return
-        targets = self._collect_refinement_candidates()
-        log_debug(f"[ImageViewer] Refine candidates: {len(targets)} targets")
-        if not targets:
-            QMessageBox.information(
-                self,
-                "Calibration",
-                "Tag images for calibration and run detection before refining corners.",
-            )
-            return
-        reply = QMessageBox.question(
-            self,
-            "Refine corners",
-            f"Refine subpixel corners for {len(targets)} image(s)?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-        log_debug(f"[ImageViewer] Calling refiner.refine with {len(targets)} targets")
-        queued = self.calibration_refiner.refine(targets)
-        log_debug(f"[ImageViewer] Refiner returned queued={queued}")
-        if queued:
-            self._start_refinement_progress(queued)
-            self._safe_status_message(
-                f"Refining chessboard corners for {queued} image(s)…",
-                4000,
-            )
-        else:
-            log_warning("[ImageViewer] Refiner returned 0 queued tasks")
 
     def _handle_auto_calibration_search(self) -> None:
         """Auto-search for calibration candidates by detecting chessboards in unmarked images.
@@ -4418,9 +4253,11 @@ class ImageViewer(QMainWindow):
             self,
             "Compute calibration",
             (
-                f"Compute camera matrices using approximately "
-                f"{channel_counts.get('lwir', 0)} LWIR and {channel_counts.get('visible', 0)} visible sample(s)?\n\n"
-                "This will load corner data from disk."
+                f"Compute camera matrices from up to "
+                f"{channel_counts.get('lwir', 0)} LWIR and {channel_counts.get('visible', 0)} visible candidate view(s)?\n\n"
+                "Corners are loaded from disk. Views whose reprojection error is an outlier are "
+                "removed iteratively (robust median + MAD) and the camera matrix refit, so the "
+                "final view count may be lower. Removed views appear in the calibration outlier panel."
             ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes,
@@ -4478,8 +4315,10 @@ class ImageViewer(QMainWindow):
         reply = QMessageBox.question(
             self,
             "Compute extrinsic transform",
-            f"Compute LWIR ↔ Visible transform using approximately {sample_count} paired sample(s)?\n\n"
-            "This will load corner data from disk.",
+            f"Compute LWIR ↔ Visible transform from up to {sample_count} candidate pair(s)?\n\n"
+            "Corners are loaded from disk. Pairs whose stereo reprojection error is an outlier are "
+            "removed iteratively (robust median + MAD) and the transform refit, so the final pair "
+            "count may be lower. Removed pairs appear in the calibration outlier panel.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes,
         )
@@ -4994,77 +4833,6 @@ class ImageViewer(QMainWindow):
             source_dataset=dataset_path.name,
         )
 
-    def _set_corner_display_mode(self, mode: str) -> None:
-        """Set corner display mode.
-
-        Args:
-            mode: One of:
-                - 'original': Show only original detected corners (blue circles)
-                - 'subpixel': Show subpixel-refined corners (cyan crosses)
-                - 'both': Show both for comparison (debug mode)
-        """
-        # Skip if we're syncing action states (avoid recursion)
-        if getattr(self, "_syncing_actions", False):
-            return
-
-        # Check if subpixel corners exist when switching to subpixel/both mode
-        if mode in ("subpixel", "both"):
-            has_any_subpixel = self._check_has_subpixel_corners()
-            if not has_any_subpixel:
-                QMessageBox.information(
-                    self,
-                    "No Subpixel Corners",
-                    "No subpixel-refined corners found.\n\n"
-                    "Run 'Calibration → Refine chessboard corners' first to generate "
-                    "subpixel-accurate corner positions.\n\n"
-                    "Falling back to original corners.",
-                )
-                # Revert to original mode
-                mode = "original"
-                self._force_corner_action("original")
-
-        self._corner_display_mode = mode
-        self.overlay_orchestrator.set_corner_display_mode(mode)
-        self.session.cache_service.set_preference("corner_display_mode", mode)
-        self.invalidate_overlay_cache()
-
-        base = self._current_base()
-        if base:
-            self.load_image_pair(base)
-
-        mode_labels = {
-            "original": "Original Only",
-            "subpixel": "Subpixel Only",
-            "both": "Both (Debug)",
-        }
-        self._safe_status_message(f"Corner display: {mode_labels.get(mode, mode)}", 2000)
-
-    def _check_has_subpixel_corners(self) -> bool:
-        """Check if any calibration image has subpixel-refined corners."""
-        for base in self.state.calibration_marked:
-            corners = self.session.get_corners(base)
-            if corners:
-                if corners.get("lwir_subpixel") or corners.get("visible_subpixel"):
-                    return True
-        return False
-
-    def _force_corner_action(self, mode: str) -> None:
-        """Force a specific corner display action to be checked."""
-        corner_actions = {
-            "original": getattr(self.ui, "action_corners_original", None),
-            "subpixel": getattr(self.ui, "action_corners_subpixel", None),
-            "both": getattr(self.ui, "action_corners_both", None),
-        }
-        target = corner_actions.get(mode)
-        if target:
-            for action in corner_actions.values():
-                if action:
-                    action.blockSignals(True)
-            target.setChecked(True)
-            for action in corner_actions.values():
-                if action:
-                    action.blockSignals(False)
-
     def _handle_show_labels_toggle(self, enabled: bool) -> None:
         self.view_state.toggle_labels(enabled)
 
@@ -5091,29 +4859,6 @@ class ImageViewer(QMainWindow):
         """Toggle visibility of image info overlays (status text, calibration markers, etc.)."""
         self.view_state.toggle_overlays(enabled)
         self._safe_status_message(f"Image info overlay: {'visible' if enabled else 'hidden'}", 2000)
-
-    def _handle_use_subpixel_toggle(self, enabled: bool) -> None:
-        """Toggle whether calibration uses subpixel-refined corners."""
-        # Check if subpixel corners exist when enabling
-        if enabled and not self._check_has_subpixel_corners():
-            QMessageBox.information(
-                self,
-                "No Subpixel Corners",
-                "No subpixel-refined corners found.\n\n"
-                "Run 'Calibration → Refine chessboard corners' first to generate "
-                "subpixel-accurate corner positions.",
-            )
-            # Revert toggle
-            action = getattr(self.ui, "action_use_subpixel_corners", None)
-            if action:
-                action.blockSignals(True)
-                action.setChecked(False)
-                action.blockSignals(False)
-            return
-
-        self.session.cache_service.set_preference("use_subpixel_corners", enabled)
-        status = "enabled" if enabled else "disabled"
-        self._safe_status_message(f"Use subpixel corners for calibration: {status}", 3000)
 
     def clear_empty_datasets(self) -> None:
         self.dataset_actions.clear_empty_datasets()

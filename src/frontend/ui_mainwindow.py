@@ -353,25 +353,6 @@ class Ui_MainWindow(object):
         self.action_apply_parallax.setChecked(True)
         self.action_reset_parallax = QtGui.QAction("Reset Parallax", MainWindow)
 
-        # Corner Display submenu
-        self.menu_corner_display = QtWidgets.QMenu("Corner Display", MainWindow)
-        self.action_corners_original = QtGui.QAction("Original Only", MainWindow)
-        self.action_corners_original.setCheckable(True)
-        self.action_corners_subpixel = QtGui.QAction("Subpixel Only", MainWindow)
-        self.action_corners_subpixel.setCheckable(True)
-        self.action_corners_both = QtGui.QAction("Both (Debug)", MainWindow)
-        self.action_corners_both.setCheckable(True)
-        self.corner_action_group = QtGui.QActionGroup(MainWindow)
-        self.corner_action_group.addAction(self.action_corners_original)
-        self.corner_action_group.addAction(self.action_corners_subpixel)
-        self.corner_action_group.addAction(self.action_corners_both)
-        self.corner_action_group.setExclusive(True)
-        self.action_corners_subpixel.setChecked(True)  # Default to subpixel
-
-        # Use Subpixel Corners toggle for calibration computation
-        self.action_use_subpixel_corners = QtGui.QAction("Use Subpixel Corners", MainWindow)
-        self.action_use_subpixel_corners.setCheckable(True)
-        self.action_use_subpixel_corners.setChecked(False)  # Default off (use original)
 
         self.action_calibration_debug = QtGui.QAction("Export calibration debug overlays", MainWindow)
         self.action_auto_calibration_search = QtGui.QAction("Auto search calibration candidates…", MainWindow)
@@ -431,7 +412,6 @@ class Ui_MainWindow(object):
             self.action_filter_delete_missing_pair,
         ):
             action.setCheckable(True)
-        self.action_calibration_refine = QtGui.QAction("Refine chessboard corners", MainWindow)
         self.action_calibration_compute = QtGui.QAction("Compute calibration matrices", MainWindow)
         self.action_calibration_extrinsic = QtGui.QAction("Compute extrinsic transform", MainWindow)
         self.action_calibration_check = QtGui.QAction("Check calibration report", MainWindow)
@@ -568,12 +548,6 @@ class Ui_MainWindow(object):
         self.menu_stereo_alignment.addAction(self.action_reset_parallax)
         self.menu_view.addMenu(self.menu_stereo_alignment)
 
-        # Corner Display submenu
-        self.menu_corner_display.addAction(self.action_corners_original)
-        self.menu_corner_display.addAction(self.action_corners_subpixel)
-        self.menu_corner_display.addAction(self.action_corners_both)
-        self.menu_view.addMenu(self.menu_corner_display)
-
         self.menu_view.addSeparator()
         self.menu_labels_display.addAction(self.action_show_labels)
         self.menu_labels_display.addAction(self.action_show_projected_labels)
@@ -597,9 +571,6 @@ class Ui_MainWindow(object):
         self.menu_view.addMenu(self.menu_filter)
         self.menu_calibration.addAction(self.action_auto_calibration_search)
         self.menu_calibration.addAction(self.action_run_calibration)
-        self.menu_calibration.addAction(self.action_calibration_refine)
-        self.menu_calibration.addSeparator()
-        self.menu_calibration.addAction(self.action_use_subpixel_corners)
         self.menu_calibration.addSeparator()
         self.menu_calibration.addAction(self.action_calibration_compute)
         self.menu_calibration.addAction(self.action_calibration_extrinsic)

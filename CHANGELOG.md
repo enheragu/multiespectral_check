@@ -11,6 +11,10 @@ Versioning note: minor releases mark visible feature jumps; patch releases cover
 - Feature: companion directories (`lidar_*`, `odom`, `dht22`, `gnss`, …) are auto-discovered at load time and moved/restored together with `lwir`/`visible` on delete and restore operations. Datasets without extra directories are unaffected.
 - Bugfix: two overlapping tqdm bars appeared in terminal during calibration auto-search; the redundant queue-level bar is now suppressed while auto-search is active.
 - Scripts: `coverage/` subfolder groups the coverage helpers; one-shot migration and utility scripts moved to `deprecated/`.
+- Cleanup: removed the subpixel-refinement feature end to end (refiner, menu entries, `*_subpixel` data); `findChessboardCornersSB` already returns subpixel-accurate corners and the extra pass only degraded low-contrast LWIR.
+- Bugfix: extrinsic outlier filtering used a depth-noisy PnP metric that missed bad pairs; replaced by a per-pair stereo reprojection error. Both intrinsic and extrinsic calibration now auto-reject outliers iteratively (robust median+MAD) by default, with the excluded views/pairs reviewable/re-includable in the outlier panel.
+- Reprojection error now has a single source (the per-view/per-pair residuals cache): the extrinsic value is the RMS of kept per-pair errors, so outlier panel, stats panel and report agree. Removed its duplicate persistence in the summary cache and per-image archive.
+- Bugfix: outlier dialog kept stale checkbox state on refresh, so auto-excluded pairs looked included (and could be re-included on close).
 
 ## [0.10.1](https://github.com/enheragu/multiespectral_check/commit/073f364) - 2026-05-21
 - Export PDF in calibration report and label report (vectorized text via QTextDocument; charts embedded as PNG).

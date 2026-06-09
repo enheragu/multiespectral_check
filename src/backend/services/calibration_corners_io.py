@@ -38,8 +38,8 @@ def get_corners_file(dataset_path: Path, image_base: str) -> Path:
         return calib_dir / f"{image_base}.yaml"
 
 
-# Channels that can have corners (original and subpixel)
-CORNER_CHANNELS = ("lwir", "visible", "lwir_subpixel", "visible_subpixel")
+# Channels that can have corners (findChessboardCornersSB output is already subpixel)
+CORNER_CHANNELS = ("lwir", "visible")
 
 
 def save_corners(
@@ -54,10 +54,8 @@ def save_corners(
         dataset_path: Path to the dataset (or collection root)
         image_base: Image base name (e.g., "IMG_001" or "child_dataset/IMG_001" for collections)
         corners: Dict with corner keys:
-            - "lwir": Original LWIR corners (list of [x, y])
-            - "visible": Original visible corners
-            - "lwir_subpixel": Subpixel-refined LWIR corners (optional)
-            - "visible_subpixel": Subpixel-refined visible corners (optional)
+            - "lwir": LWIR corners (list of [x, y])
+            - "visible": Visible corners
         image_sizes: Optional dict with image sizes per channel:
             - "lwir": (width, height) of LWIR image
             - "visible": (width, height) of visible image
@@ -86,9 +84,7 @@ def save_corners(
     log_debug(f"💾 Saving corners for {image_base} in {dataset_path.name} → {corners_file.relative_to(dataset_path)}", "CORNERS")
     lwir_count = len(serialized.get('lwir', []) or [])
     vis_count = len(serialized.get('visible', []) or [])
-    lwir_sub = len(serialized.get('lwir_subpixel', []) or [])
-    vis_sub = len(serialized.get('visible_subpixel', []) or [])
-    log_debug(f"   LWIR: {lwir_count} corners{f' (+{lwir_sub} subpixel)' if lwir_sub else ''}, VIS: {vis_count} corners{f' (+{vis_sub} subpixel)' if vis_sub else ''}", "CORNERS")
+    log_debug(f"   LWIR: {lwir_count} corners, VIS: {vis_count} corners", "CORNERS")
 
     save_yaml(corners_file, serialized)
 
@@ -139,9 +135,7 @@ def load_corners(dataset_path: Path, image_base: str) -> Optional[Dict[str, Any]
         log_debug(f"📖 Loaded corners for {image_base} from {dataset_path.name}", "CORNERS")
         lwir_count = len(corners.get('lwir', []) or [])
         vis_count = len(corners.get('visible', []) or [])
-        lwir_sub = len(corners.get('lwir_subpixel', []) or [])
-        vis_sub = len(corners.get('visible_subpixel', []) or [])
-        log_debug(f"   LWIR: {lwir_count} corners{f' (+{lwir_sub} subpixel)' if lwir_sub else ''}, VIS: {vis_count} corners{f' (+{vis_sub} subpixel)' if vis_sub else ''}", "CORNERS")
+        log_debug(f"   LWIR: {lwir_count} corners, VIS: {vis_count} corners", "CORNERS")
         return corners
 
     except Exception as e:

@@ -68,7 +68,8 @@ def _normalize_dataset_entry(raw: Any) -> DatasetCache:
     entry["reason_counts"] = raw.get("reason_counts", {}) if isinstance(raw.get("reason_counts"), dict) else {}
 
     entry["calibration"] = raw.get("calibration", {}) if isinstance(raw.get("calibration"), dict) else {}
-    entry["extrinsic_errors"] = raw.get("extrinsic_errors", {}) if isinstance(raw.get("extrinsic_errors"), dict) else {}
+    # extrinsic_errors are not read from the summary cache: they live solely in
+    # .calibration_errors_cached.yaml (single source), loaded in dataset_session.
 
     # overrides: List→Set conversion at load boundary
     raw_overrides = raw.get("overrides", [])
@@ -102,7 +103,7 @@ def serialize_dataset_entry(entry: DatasetCache) -> DatasetCache:
     """
     PERSIST_FIELDS = {
         "marks",  # Source of truth for tagged images
-        "calibration", "extrinsic_errors",  # Calibration data (reproj_errors regenerated from per_view_errors)
+        "calibration",  # Calibration outlier flags/results (reproj + extrinsic errors live in .calibration_errors_cached.yaml)
         "archived", "sweep_flags", "note", "overrides",  # Other state
     }
 

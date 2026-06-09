@@ -513,7 +513,7 @@ class ViewerState:
         - mark_reason, auto_override
         - calibration_marked, calibration_results
         - outliers (lwir, visible, stereo)
-        - reproj_errors, extrinsic_error
+        - reproj_errors
         - calibration_corners
         """
         if base not in self.image_data:
@@ -532,7 +532,6 @@ class ViewerState:
                     "lwir": get_dict_path(self.cache_data, f"reproj_errors.lwir.{base}"),
                     "visible": get_dict_path(self.cache_data, f"reproj_errors.visible.{base}"),
                 },
-                "extrinsic_error": self.cache_data["extrinsic_errors"].get(base),
                 "calibration_corners": self.calibration_corners.get(base),
             }
 

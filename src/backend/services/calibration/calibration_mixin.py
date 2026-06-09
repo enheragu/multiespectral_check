@@ -331,8 +331,6 @@ class CalibrationWorkflowMixin:
         if not loader:
             return samples
         out_intrinsic = self.state.calibration_outliers_intrinsic
-        # Check preference: use subpixel corners if enabled
-        use_subpixel = self.session.cache_service.get_preference("use_subpixel_corners", False)
         for base in loader.image_bases:
             if base not in self.state.calibration_marked:
                 continue
@@ -344,11 +342,7 @@ class CalibrationWorkflowMixin:
             for channel in ("lwir", "visible"):
                 if base in out_intrinsic.get(channel, set()):
                     continue
-                # Use subpixel if enabled AND available, else original
-                if use_subpixel:
-                    points = bucket.get(f"{channel}_subpixel") or bucket.get(channel)
-                else:
-                    points = bucket.get(channel)
+                points = bucket.get(channel)
                 if not points:
                     continue
                 # Get image_size for this channel
@@ -372,19 +366,12 @@ class CalibrationWorkflowMixin:
         if not loader:
             return samples
         out_extrinsic = self.state.calibration_outliers_extrinsic
-        # Check preference: use subpixel corners if enabled
-        use_subpixel = self.session.cache_service.get_preference("use_subpixel_corners", False)
         for base in loader.image_bases:
             if base not in self.state.calibration_marked or base in out_extrinsic:
                 continue
             bucket = self.state.calibration_corners.get(base, {})
-            # Use subpixel if enabled AND available, else original
-            if use_subpixel:
-                lwir_points = bucket.get("lwir_subpixel") or bucket.get("lwir")
-                visible_points = bucket.get("visible_subpixel") or bucket.get("visible")
-            else:
-                lwir_points = bucket.get("lwir")
-                visible_points = bucket.get("visible")
+            lwir_points = bucket.get("lwir")
+            visible_points = bucket.get("visible")
             if not lwir_points or not visible_points:
                 continue
             lwir_path = loader.get_image_path(base, "lwir")

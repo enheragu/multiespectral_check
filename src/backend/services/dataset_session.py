@@ -561,20 +561,12 @@ class DatasetSession:
         Args:
             base: Image base name
             corners: Dict with corner keys:
-                - "lwir": Original LWIR corners
-                - "visible": Original visible corners
-                - "lwir_subpixel": Subpixel-refined LWIR corners (optional)
-                - "visible_subpixel": Subpixel-refined visible corners (optional)
+                - "lwir": LWIR corners
+                - "visible": Visible corners
         """
         lwir_count = len(corners.get('lwir', []) or [])
         vis_count = len(corners.get('visible', []) or [])
-        lwir_sub = len(corners.get('lwir_subpixel', []) or [])
-        vis_sub = len(corners.get('visible_subpixel', []) or [])
-        log_debug(
-            f"set_corners({base}): LWIR={lwir_count}{f'+{lwir_sub}sub' if lwir_sub else ''}, "
-            f"VIS={vis_count}{f'+{vis_sub}sub' if vis_sub else ''}",
-            "SESSION"
-        )
+        log_debug(f"set_corners({base}): LWIR={lwir_count}, VIS={vis_count}", "SESSION")
         # Store directly in cache_data["calibration"] structure
         if "calibration" not in self.state.cache_data:
             self.state.cache_data["calibration"] = {}
@@ -1112,9 +1104,9 @@ class DatasetSession:
                     if isinstance(per_pair, list):
                         for entry in per_pair:
                             if isinstance(entry, dict) and isinstance(entry.get("base"), str):
-                                trans_err = entry.get("translation_error")
-                                if isinstance(trans_err, (int, float)):
-                                    self.state.cache_data["extrinsic_errors"][entry["base"]] = float(trans_err)
+                                reproj = entry.get("stereo_reproj_error")
+                                if isinstance(reproj, (int, float)):
+                                    self.state.cache_data["extrinsic_errors"][entry["base"]] = float(reproj)
                     log_info(f"Loaded calibration errors from {errors_path.name}", "SESSION")
             except (OSError, yaml.YAMLError) as e:
                 log_warning(f"Failed to load calibration errors: {e}", "SESSION")
@@ -1222,12 +1214,8 @@ class DatasetSession:
                 if isinstance(calib_results, dict) and calib_results:
                     calib[base]["results"] = calib_results
 
-            # NOTE: reproj_errors NOT restored from archived - regenerated from calibration file
-
-            # Restore extrinsic error
-            extrinsic_err = entry.get("extrinsic_error")
-            if isinstance(extrinsic_err, (int, float)):
-                self.state.cache_data["extrinsic_errors"][base] = float(extrinsic_err)
+            # NOTE: reproj_errors and extrinsic_errors NOT restored from archived - both are
+            # regenerated from .calibration_errors_cached.yaml on load (single source).
 
             # Restore calibration corners
             calib_corners = entry.get("calibration_corners")
