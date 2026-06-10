@@ -14,9 +14,10 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from PyQt6.QtCore import QEventLoop, QRunnable, Qt, QTimer
 from PyQt6.QtGui import (QAction, QActionGroup, QColor, QIcon, QKeySequence,
                          QPixmap, QShortcut)
-from PyQt6.QtWidgets import (QApplication, QComboBox, QCompleter, QDialog,
-                             QFileDialog, QInputDialog, QMainWindow, QMenu,
-                             QMessageBox, QStyle, QVBoxLayout)
+from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QCompleter,
+                             QDialog, QDialogButtonBox, QFileDialog, QHBoxLayout,
+                             QInputDialog, QLabel, QMainWindow,
+                             QMenu, QMessageBox, QStyle, QVBoxLayout)
 from tqdm import tqdm
 
 from frontend.resources import icon_path
@@ -157,6 +158,15 @@ class ImageViewer(QMainWindow):
 
         self.progress_panel: Optional[ProgressPanel] = None
         self._setup_progress_panel()
+
+        self._status_path_label = QLabel()
+        self._status_path_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self._status_path_label.setStyleSheet("color: palette(mid); padding: 0 6px;")
+        status = self.statusBar()
+        if status is not None:
+            status.addPermanentWidget(self._status_path_label)
 
     def _init_session_and_preferences(self) -> None:
         """Initialize session, state, and load user preferences."""
@@ -2156,6 +2166,7 @@ class ImageViewer(QMainWindow):
             label = FILTER_STATUS_TITLES.get(self.filter_controller.filter_mode, "Filter")
             title += f" · {label} {filter_index}/{filter_total}"
         self.setWindowTitle(title)
+        self._status_path_label.setText(base)
 
     def load_image_pair(self, base: str):
         display_lwir, display_vis = self._render_overlayed_pair(base)
@@ -4143,11 +4154,7 @@ class ImageViewer(QMainWindow):
             pass
 
     def _handle_auto_calibration_search(self) -> None:
-        """Auto-search for calibration candidates by detecting chessboards in unmarked images.
-
-        Searches all images that are NOT marked for delete AND NOT marked for calibration.
-        If a chessboard pattern is detected, the image is auto-marked as calibration candidate.
-        """
+        """Auto-search for calibration candidates by detecting chessboards in all non-deleted images."""
         if not require_dataset(self, "Auto calibration search"):
             return
 
@@ -4159,42 +4166,70 @@ class ImageViewer(QMainWindow):
         else:
             return
 
-        # Get current marks and calibration data
         marks = self.state.cache_data.get("marks", {})
         calibration = self.state.cache_data.get("calibration", {})
 
-        # Filter: exclude images already tagged for delete or calibration
-        candidates = []
+        new_candidates = []
+        already_marked = []
         for base in all_bases:
-            # Skip if marked for delete
             if base in marks:
                 continue
-            # Skip if already marked as calibration (user or auto)
-            # Presence in dict = marked
-            calib_entry = calibration.get(base)
-            if isinstance(calib_entry, dict):
-                continue
-            candidates.append(base)
+            if isinstance(calibration.get(base), dict):
+                already_marked.append(base)
+            else:
+                new_candidates.append(base)
 
-        if not candidates:
-            QMessageBox.information(
-                self,
-                "Auto calibration search",
-                "No candidate images found.\n\n"
-                "All images are either tagged for delete or already marked as calibration.",
-            )
+        if not new_candidates and not already_marked:
+            QMessageBox.information(self, "Auto calibration search",
+                                    "No candidate images found.\n\nAll images are tagged for delete.")
             return
 
-        reply = QMessageBox.question(
-            self,
-            "Auto calibration search",
-            f"Search for chessboard patterns in {len(candidates)} images?\n\n"
-            "Images with detected patterns will be auto-tagged as calibration candidates.\n"
-            "This may take a while for large datasets.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+        # Build confirmation dialog with re-detect checkbox
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Auto calibration search")
+        layout = QVBoxLayout(dlg)
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 16, 16, 12)
+
+        msg = QLabel(
+            f"<b>{len(new_candidates)}</b> new images to scan"
+            + (f", <b>{len(already_marked)}</b> already marked." if already_marked else ".")
         )
-        if reply != QMessageBox.StandardButton.Yes:
+        msg.setWordWrap(True)
+        layout.addWidget(msg)
+
+        redetect_cb = QCheckBox("Re-detect already-marked images (clears existing corner data)")
+        redetect_cb.setChecked(bool(already_marked))
+        layout.addWidget(redetect_cb)
+
+        note = QLabel("<i>Images with detected patterns will be auto-tagged as calibration candidates.</i>")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        redetect = redetect_cb.isChecked()
+        candidates = list(new_candidates)
+        if redetect:
+            candidates = list(already_marked) + candidates
+            # Clear stale outlier flags for re-detected images so calibration
+            # re-evaluates them from scratch with the new corner data.
+            calib = self.state.cache_data.get("calibration", {})
+            for base in already_marked:
+                entry = calib.get(base)
+                if isinstance(entry, dict) and isinstance(entry.get("outlier"), dict):
+                    entry["outlier"] = {"lwir": False, "visible": False, "stereo": False}
+            if already_marked:
+                self._mark_cache_dirty()
+
+        if not candidates:
+            self._safe_status_message("No images to scan", 3000)
             return
 
         # Start progress tracking
@@ -4202,13 +4237,11 @@ class ImageViewer(QMainWindow):
         task_id = "calibration_search"
         self.progress_tracker.start(task_id, f"Searching calibration patterns (0/{total})", total)
 
-        # Track progress via calibration controller signals
         self._calib_search_total = total
         self._calib_search_completed = 0
         self._calib_search_found = 0
         self._calib_search_task_id = task_id
 
-        # Create tqdm bar for terminal output
         try:
             self._calib_search_tqdm = tqdm(
                 total=total,
@@ -4220,8 +4253,7 @@ class ImageViewer(QMainWindow):
         except ImportError:
             self._calib_search_tqdm = None
 
-        # Queue detection - the calibration controller will emit signals
-        queued = self.calibration_controller.prefetch(candidates, force=False)
+        queued = self.calibration_controller.prefetch(candidates, force=redetect)
         if queued > 0:
             self._safe_status_message(f"Searching calibration patterns in {queued} images…", 4000)
         else:
@@ -4269,6 +4301,14 @@ class ImageViewer(QMainWindow):
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
+
+        # Clear stale intrinsic outlier flags — the new solve will re-determine them.
+        calib = self.state.cache_data.get("calibration", {})
+        for entry in calib.values():
+            if isinstance(entry, dict) and isinstance(entry.get("outlier"), dict):
+                entry["outlier"]["lwir"] = False
+                entry["outlier"]["visible"] = False
+        self._mark_cache_dirty()
 
         # NOW load corners and collect samples
         samples = self.calibration_workflow.collect_calibration_samples()
@@ -4329,6 +4369,13 @@ class ImageViewer(QMainWindow):
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
+
+        # Clear stale extrinsic outlier flags — the new solve will re-determine them.
+        calib = self.state.cache_data.get("calibration", {})
+        for entry in calib.values():
+            if isinstance(entry, dict) and isinstance(entry.get("outlier"), dict):
+                entry["outlier"]["stereo"] = False
+        self._mark_cache_dirty()
 
         # NOW load corners
         samples = self.calibration_workflow.collect_extrinsic_samples()

@@ -411,10 +411,13 @@ class CalibrationOutliersDialog(QDialog):
         lwir_count = len(lwir_vals)
         vis_count = len(vis_vals)
         stereo_count = len(stereo_vals)
+        lwir_above = sum(1 for v in lwir_vals if v > thresholds.get("lwir", 0.0))
+        vis_above = sum(1 for v in vis_vals if v > thresholds.get("visible", 0.0))
+        stereo_above = sum(1 for v in stereo_vals if v > thresholds.get("stereo", 0.0))
         parts = [
-            f"<b>• LWIR: </b> mean: {_mean_or_dash(lwir_vals)} (min,max): ({_min_or_dash(lwir_vals)},{_max_or_dash(lwir_vals)}) (threshold {thresholds.get('lwir', 0.0):.3f} px, n={lwir_count})",
-            f"<br><b>• Visible:</b> mean: {_mean_or_dash(vis_vals)} (min,max): ({_min_or_dash(vis_vals)},{_max_or_dash(vis_vals)}) (threshold {thresholds.get('visible', 0.0):.3f} px, n={vis_count})",
-            f"<br><b>• Stereo:</b> mean: {_mean_or_dash(stereo_vals)} (min,max): ({_min_or_dash(stereo_vals)},{_max_or_dash(stereo_vals)}) (threshold {thresholds.get('stereo', 0.0):.3f} px, n={stereo_count})",
+            f"<b>• LWIR: </b> mean: {_mean_or_dash(lwir_vals)} (min,max): ({_min_or_dash(lwir_vals)},{_max_or_dash(lwir_vals)}) (threshold {thresholds.get('lwir', 0.0):.3f} px, n={lwir_count}, above: {lwir_above})",
+            f"<br><b>• Visible:</b> mean: {_mean_or_dash(vis_vals)} (min,max): ({_min_or_dash(vis_vals)},{_max_or_dash(vis_vals)}) (threshold {thresholds.get('visible', 0.0):.3f} px, n={vis_count}, above: {vis_above})",
+            f"<br><b>• Stereo:</b> mean: {_mean_or_dash(stereo_vals)} (min,max): ({_min_or_dash(stereo_vals)},{_max_or_dash(stereo_vals)}) (threshold {thresholds.get('stereo', 0.0):.3f} px, n={stereo_count}, above: {stereo_above})",
         ]
         note = (
             "<br><br><b>Note:</b> The solver auto-excludes outliers on each run (robust median+MAD on per-view "

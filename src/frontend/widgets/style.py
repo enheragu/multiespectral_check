@@ -1,10 +1,14 @@
 """Shared UI style helpers for dialogs and panels."""
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Tuple
 
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QLabel, QVBoxLayout, QWidget
+
+_MEDIA_DIR = Path(__file__).parent.parent / "resources" / "media"
+_CHECKMARK_SVG = str(_MEDIA_DIR / "checkmark_white.svg")
 
 APP_BG = "#eceff3"  # light gray app background
 CARD_BG = "#f9fafc"  # almost-white panels
@@ -190,6 +194,13 @@ def app_stylesheet() -> str:
         f"QLineEdit, QTextEdit, QPlainTextEdit {{ background: {TABLE_BG}; color: {TEXT_PRIMARY};"
         f" border: 1px solid {GROUP_BORDER}; border-radius: 6px; padding: 6px; font-size: {BODY_FONT_SIZE};"
         f" selection-background-color: {TABLE_SELECT_BG}; selection-color: {TEXT_PRIMARY}; }}"
+        f"QCheckBox {{ color: {TEXT_PRIMARY}; font-size: {BODY_FONT_SIZE}; spacing: 6px; }}"
+        f"QCheckBox::indicator {{ width: 15px; height: 15px; border: 1px solid {BUTTON_BORDER_STRONG};"
+        f" border-radius: 3px; background: {CARD_BG}; }}"
+        f"QCheckBox::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT};"
+        f" image: url({_CHECKMARK_SVG}); }}"
+        f"QCheckBox::indicator:disabled {{ background: {BUTTON_BG_DISABLED}; border-color: {BUTTON_BORDER_STRONG}; }}"
+        f"QCheckBox:disabled {{ color: #8d95a3; }}"
     )
 
 

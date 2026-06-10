@@ -138,7 +138,10 @@ class StatsPanel(QWidget):
             positives = sum(1 for ch in ("lwir", "visible") if results.get(ch) is True)
             is_auto = data.get("auto", False)
             corners_data = data.get("corners") or {}
-            has_interp = corners_data.get("lwir_meta") is not None or corners_data.get("visible_meta") is not None
+            has_interp = bool(data.get("has_interp")) or (
+                corners_data.get("lwir_meta") is not None
+                or corners_data.get("visible_meta") is not None
+            )
             if positives >= 2:
                 if is_auto:
                     auto_both += 1
@@ -173,7 +176,7 @@ class StatsPanel(QWidget):
             f"{reason_text(REASON_SYNC)}: {sync_marked}, "
             f"Patterns: {manual_patterns})"
         )
-        manual_interp_str = f", ~{manual_interp} interp" if manual_interp > 0 else ""
+        manual_interp_str = f", {manual_interp} interp" if manual_interp > 0 else ""
         self.label_calibration_manual.setText(
             f"<b>Manual calibration:</b> {calibration_manual} (both: {manual_both}, partial: {manual_partial}, none: {manual_none}{manual_interp_str})"
         )
@@ -188,7 +191,7 @@ class StatsPanel(QWidget):
             f"{reason_text(REASON_MOTION)}: {detected_motion}, "
             f"Patterns: {detected_patterns})"
         )
-        auto_interp_str = f", ~{auto_interp} interp" if auto_interp > 0 else ""
+        auto_interp_str = f", {auto_interp} interp" if auto_interp > 0 else ""
         self.label_calibration_auto.setText(
             f"<b>Auto calibration:</b> {calibration_auto} (both: {auto_both}, partial: {auto_partial}, none: {auto_none}{auto_interp_str})"
         )

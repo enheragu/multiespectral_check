@@ -412,9 +412,11 @@ class CalibrationCheckDialog(QDialog):
             layout.addLayout(form)
             return panel
         samples = payload.get("samples", 0)
+        rejected = payload.get("rejected_views", payload.get("rejected_pairs", 0))
         error = payload.get("reprojection_error")
+        sample_str = f"Samples: {samples} used" + (f", {rejected} rejected" if rejected else "")
         header = QLabel(
-            f"Samples: {samples} | RMS error: {error:.4f} px" if error is not None else f"Samples: {samples}"
+            f"{sample_str} | RMS error: {error:.4f} px" if error is not None else sample_str
         )
         form.addRow(self._field_label("Summary"), header)
         matrix = QLabel(self._format_matrix(payload.get("camera_matrix")))
@@ -634,8 +636,9 @@ class CalibrationCheckDialog(QDialog):
 
         rows = ""
         samples = payload.get("samples", 0)
+        rejected = payload.get("rejected_views", payload.get("rejected_pairs", 0))
         rms = payload.get("reprojection_error")
-        summary = f"Samples: {samples}"
+        summary = f"Samples: {samples} used" + (f", {rejected} rejected" if rejected else "")
         if rms is not None:
             summary += f" | RMS error: {rms:.4f} px"
         rows += _row("Summary", summary)
@@ -772,8 +775,10 @@ class CalibrationCheckDialog(QDialog):
             if not payload or not payload.get("camera_matrix"):
                 return h + _row("", "Not available. Compute calibration first.")
             samples = payload.get("samples", 0)
+            _rej = payload.get("rejected_views", payload.get("rejected_pairs", []))
+            rejected = len(_rej) if isinstance(_rej, list) else int(_rej or 0)
             err = payload.get("reprojection_error")
-            summary = f"Samples: {samples}"
+            summary = f"Samples: {samples} used" + (f", {rejected} rejected" if rejected else "")
             if err is not None:
                 summary += f" | RMS error: {err:.4f} px"
             h += _row("Summary", summary)
