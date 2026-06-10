@@ -10,7 +10,7 @@ from typing import Tuple
 
 
 APP_NAME = "Multispectral Dataset Viewer"
-APP_VERSION = "0.10.3"
+APP_VERSION = "0.10.4"
 APP_DESCRIPTION = "GUI for multispectral dataset review, calibration, and labelling."
 SUPPORT_EMAIL = "e.heredia@umh.es"
 REPO_URL = "https://github.com/enheragu/multiespectral_check"
@@ -101,16 +101,19 @@ class AppConfig:
     calibration_errors_filename: str = ".calibration_errors_cached.yaml"  # Hidden cache file
 
     # Intrinsic outlier rejection: iterative drop of views whose per-view reprojection
-    # error is a robust (median + k*MAD) outlier, refitting after each round.
+    # error is a robust (median + k*1.4826*MAD) outlier, refitting after each round.
+    # k=2.5 ≈ 3.7×MAD; the panel highlights at 2.5×raw-MAD (~1.7σ), so this keeps
+    # slightly more views than the panel threshold while still being tighter than the
+    # previous k=3.5 (≈5.2×MAD).
     intrinsic_reject_max_iters: int = 5
-    intrinsic_reject_k_mad: float = 3.5
+    intrinsic_reject_k_mad: float = 2.5
     intrinsic_reject_floor_px: float = 0.5
     intrinsic_reject_min_views: int = 6
 
     # Extrinsic outlier rejection: iterative drop of pairs whose stereo reprojection
-    # error is a robust (median + k*MAD) outlier, refitting after each round.
+    # error is a robust (median + k*1.4826*MAD) outlier, refitting after each round.
     extrinsic_reject_max_iters: int = 5
-    extrinsic_reject_k_mad: float = 3.5
+    extrinsic_reject_k_mad: float = 2.5
     extrinsic_reject_floor_px: float = 0.5
     extrinsic_reject_min_pairs: int = 10
 

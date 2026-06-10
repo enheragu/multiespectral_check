@@ -7,6 +7,19 @@ Versioning note: minor releases mark visible feature jumps; patch releases cover
 
 ## [Unreleased]
 
+## [0.10.4](https://github.com/enheragu/multiespectral_check/releases/tag/v0.10.4) - 2026-06-10
+- Calibration detection: ROI-based SB fallback rescues boards with complex backgrounds (glass facades, tiled surfaces); classic algo locates board, SB runs on tight crop.
+- Calibration detection: WithMeta ROI refinement upgrades interpolated edge-corner results to fully-direct by retrying SB on a tight crop with stronger contrast.
+- Calibration detection: fast pre-check upgraded to two levels (FAST_CHECK + ADAPTIVE_THRESH on CLAHE downscale); boards too small for pre-check still reach WithMeta fallback.
+- Auto-search dialog: checkbox "Re-detect already-marked images" (checked by default) re-runs detection on the full set; clears stale outlier flags so calibration re-evaluates from scratch.
+- Calibration solve: intrinsic and extrinsic outlier flags reset automatically at the start of each solve so stale flags from previous runs no longer pre-exclude pairs.
+- Calibration outlier policy: tightened rejection threshold from k=3.5 to k=2.5 (MAD-based) for both intrinsic and extrinsic to better exclude noisy borderline views.
+- Calibration report: summary now shows "X used, Y rejected" instead of just sample count; outlier panel shows count of views above threshold.
+- Bugfix: interpolated corner count missing from stats/workspace after restart (`has_interp` not propagated on lazy corner load).
+- Bugfix: forced re-detection of already-marked images did not overwrite corner YAML; stale YAML now deleted if re-detection fails.
+- Bugfix: overlay crash when drawing interpolated corners.
+- UI: consistent `QCheckBox` style with tick mark across all dialogs.
+- Add `docs/CALIBRATION.md` documenting the chessboard detection pipeline and calibration process.
 
 ## [0.10.3](https://github.com/enheragu/multiespectral_check/releases/tag/v0.10.3) - 2026-06-10
 - Calibration corner detection: `findChessboardCornersSBWithMeta` added as last-resort fallback; patterns with ≥75 % directly detected corners are accepted, the rest flagged as interpolated. Partial detection count shown in stats/overlay and persisted in YAML as `*_meta` lists.
