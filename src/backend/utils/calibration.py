@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import atexit
+import math
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -26,8 +27,9 @@ CalibrationMeta = Optional[List[float]]
 CalibrationDebugPayload = Dict[str, Any]
 CalibrationDebugBundle = Dict[str, Optional[CalibrationDebugPayload]]
 
+# Chessboard pattern detection thresholds and configuration
 _META_DIRECT_THRESH = 0.5
-_META_MIN_DIRECT_RATIO = 0.75
+_META_MIN_DIRECT_RATIO = 0.73
 
 EnhancerFunc = Callable[[Any, Optional["_ColorSpaceCache"]], Optional[Any]]
 
@@ -205,8 +207,119 @@ def _downscale_for_detection(array: Any, max_edge: int) -> Any:
 
 def _min_direct_corners(pattern_size: Tuple[int, int]) -> int:
     cols, rows = pattern_size
-    return max(1, int(cols * rows * _META_MIN_DIRECT_RATIO))
+    return max(1, math.ceil(cols * rows * _META_MIN_DIRECT_RATIO))
 
+
+def _has_bad_interpolation_structure(
+    meta_flat: Any, cols: int, rows: int
+) -> bool:
+    """Return True if the interpolation pattern is structurally unsafe.
+
+    Allowed: up to one fully-interpolated boundary row + one boundary column
+    (a corner-block). This covers the common case where the outermost edges
+    of the physical board fall outside SB's detection range.
+
+    Rejected:
+    - Any interior row or column fully interpolated (no direct observations
+      in the middle of the pattern — grid model bridge is unreliable).
+    - More than one fully-interpolated row or column of any kind.
+    """
+    interp = np.asarray(meta_flat) <= _META_DIRECT_THRESH
+    grid = interp.reshape(rows, cols)
+    full_rows = [r for r in range(rows) if grid[r].all()]
+    full_cols = [c for c in range(cols) if grid[:, c].all()]
+    if len(full_rows) > 1 or len(full_cols) > 1:
+        return True
+    boundary_rows = {0, rows - 1}
+    boundary_cols = {0, cols - 1}
+    if any(r not in boundary_rows for r in full_rows):
+        return True
+    if any(c not in boundary_cols for c in full_cols):
+        return True
+    return False
+
+
+
+def _try_roi_based_sb(
+    array: Any,
+    pattern_size: Tuple[int, int],
+    fallback_debug: Optional[CalibrationDebugPayload],
+    cache: Optional[_ColorSpaceCache] = None,
+) -> Tuple[Optional[bool], Optional[List[List[float]]], CalibrationMeta, Optional[CalibrationDebugPayload]]:
+    """Use old findChessboardCorners to locate the board ROI, then re-run SB on the crop.
+
+    SB can fail on high-resolution images with complex backgrounds (e.g., glass facades)
+    because it tries to build a saddle-point connectivity graph over the entire image, gets
+    confused by background structure, and can't isolate the correct grid.
+    The classic algorithm is robust to backgrounds and can locate the board reliably.
+    Once we have the ROI, SB succeeds and returns full subpixel accuracy with no interpolation.
+    """
+    if cv2 is None:
+        return False, None, None, fallback_debug
+    _cache = cache or _ColorSpaceCache(array)
+    raw_gray = _cache.gray()
+    if raw_gray is None:
+        return False, None, None, fallback_debug
+    # Apply CLAHE directly to gray (not via LAB) — consistent with what test enhancers use.
+    try:
+        gray = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(raw_gray)
+    except Exception:  # noqa: BLE001
+        gray = raw_gray
+    full_h, full_w = gray.shape[:2]
+
+    old_flags = cv2.CALIB_CB_ADAPTIVE_THRESH | cv2.CALIB_CB_NORMALIZE_IMAGE
+    ret_old, corners_old = cv2.findChessboardCorners(gray, pattern_size, old_flags)
+    if not ret_old or corners_old is None:
+        return False, None, None, fallback_debug
+
+    cols, rows = pattern_size
+    pts = corners_old.reshape(-1, 2)
+    x1f, y1f = pts.min(axis=0)
+    x2f, y2f = pts.max(axis=0)
+    board_w, board_h = x2f - x1f, y2f - y1f
+    if board_w < 1 or board_h < 1:
+        return False, None, None, fallback_debug
+
+    # Margin = 1.5× one estimated square side, floored at a small minimum.
+    # Larger margins include background structure that confuses SB;
+    # smaller margins risk clipping a corner when old-algo bounds are tight.
+    sq_w = board_w / max(1, cols - 1) if cols > 1 else board_w
+    sq_h = board_h / max(1, rows - 1) if rows > 1 else board_h
+    sq_size = max(1.0, (sq_w + sq_h) / 2.0)
+    margin_x = max(15, int(sq_size * 1.5))
+    margin_y = max(15, int(sq_size * 1.5))
+    rx1 = max(0, int(x1f) - margin_x)
+    ry1 = max(0, int(y1f) - margin_y)
+    rx2 = min(full_w, int(x2f) + margin_x)
+    ry2 = min(full_h, int(y2f) + margin_y)
+    sb_flags = cv2.CALIB_CB_EXHAUSTIVE | cv2.CALIB_CB_ACCURACY
+    roi_base = gray[ry1:ry2, rx1:rx2]
+
+    # Try SB on several ROI variants: base CLAHE, stronger CLAHE, and histogram equalization.
+    # Stronger contrast helps detect outer-edge corners whose saddle-point response is weaker.
+    roi_variants = [roi_base]
+    try:
+        roi_variants.append(cv2.createCLAHE(clipLimit=5.0, tileGridSize=(4, 4)).apply(roi_base))
+        roi_variants.append(cv2.equalizeHist(roi_base))
+    except Exception:  # noqa: BLE001
+        pass
+
+    corners_sb = None
+    for roi_variant in roi_variants:
+        ret_sb, corners_sb = cv2.findChessboardCornersSB(roi_variant, pattern_size, sb_flags)
+        if ret_sb and corners_sb is not None:
+            break
+    if not ret_sb or corners_sb is None:
+        return False, None, None, fallback_debug
+
+    # Map corners back to full-image coordinates and normalize
+    corners_full = corners_sb.reshape(-1, 2).copy()
+    corners_full[:, 0] += rx1
+    corners_full[:, 1] += ry1
+    normalized: List[List[float]] = [
+        [float(p[0]) / full_w, float(p[1]) / full_h] for p in corners_full
+    ]
+    return True, normalized, None, fallback_debug
 
 
 def _try_with_meta(
@@ -223,11 +336,25 @@ def _try_with_meta(
     if cv2 is None or not hasattr(cv2, "findChessboardCornersSBWithMeta"):
         return False, None, None, fallback_debug
     flags = cv2.CALIB_CB_EXHAUSTIVE | cv2.CALIB_CB_ACCURACY
+    cols, rows = pattern_size
     _cache = cache or _ColorSpaceCache(array)
     min_direct = _min_direct_corners(pattern_size)
-    # CLAHE and bilateral are the most effective for LWIR partial patterns.
-    # Keeping this to 2 arrays caps the fallback cost while covering the main failure modes.
-    candidates = [_apply_clahe(array, _cache), _apply_bilateral(array, _cache)]
+    # Build candidate images. Third candidate: bilateral on gray + CLAHE rescues cases where
+    # bilateral on RGB followed by gray conversion is not enough (different frequency response).
+    def _bilateral_clahe_gray(arr: Any) -> Optional[Any]:
+        try:
+            g = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+            bl = cv2.bilateralFilter(g, d=9, sigmaColor=75, sigmaSpace=75)
+            cl = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(bl)
+            return cv2.cvtColor(cl, cv2.COLOR_GRAY2RGB)
+        except Exception:  # noqa: BLE001
+            return None
+
+    candidates = [
+        _apply_clahe(array, _cache),
+        _apply_bilateral(array, _cache),
+        _bilateral_clahe_gray(array),
+    ]
     for arr in candidates:
         if arr is None:
             continue
@@ -240,10 +367,84 @@ def _try_with_meta(
         n_direct = int((m > _META_DIRECT_THRESH).sum())
         if n_direct < min_direct:
             continue
+        if _has_bad_interpolation_structure(m, cols, rows):
+            continue
+        # Before returning the interpolated result, attempt SB on the tight ROI.
+        # WithMeta corners give precise board bounds — SB on that crop may detect
+        # all corners directly, avoiding interpolation entirely.
+        # Use raw-gray CLAHE as the refinement base (more contrast than LAB-CLAHE).
+        raw_g = _cache.gray()
+        try:
+            refine_gray = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(raw_g) if raw_g is not None else gray
+        except Exception:  # noqa: BLE001
+            refine_gray = gray
+        all_pts = corners.reshape(-1, 2)
+        x1c, y1c = all_pts.min(axis=0)
+        x2c, y2c = all_pts.max(axis=0)
+        bw, bh = x2c - x1c, y2c - y1c
+        sq_est = max(1.0, (bw / max(1, cols - 1) + bh / max(1, rows - 1)) / 2.0)
+        margin = max(15, int(sq_est))
+        rx1 = max(0, int(x1c) - margin)
+        ry1 = max(0, int(y1c) - margin)
+        rx2 = min(w, int(x2c) + margin)
+        ry2 = min(h, int(y2c) + margin)
+        roi_g = refine_gray[ry1:ry2, rx1:rx2]
+        sb_flags = cv2.CALIB_CB_EXHAUSTIVE | cv2.CALIB_CB_ACCURACY
+        for roi_variant in [
+            roi_g,
+            cv2.createCLAHE(clipLimit=5.0, tileGridSize=(4, 4)).apply(roi_g),
+            cv2.equalizeHist(roi_g),
+        ]:
+            ret_sb, corners_sb = cv2.findChessboardCornersSB(roi_variant, pattern_size, sb_flags)
+            if ret_sb and corners_sb is not None:
+                # Remap and normalize to full-image coordinates
+                c_full = corners_sb.reshape(-1, 2).copy()
+                c_full[:, 0] += rx1
+                c_full[:, 1] += ry1
+                norm_sb: List[List[float]] = [
+                    [float(p[0]) / w, float(p[1]) / h] for p in c_full
+                ]
+                return True, norm_sb, None, fallback_debug
         normalized: List[List[float]] = [[float(p[0][0]) / w, float(p[0][1]) / h] for p in corners]
         meta: List[float] = m.tolist()
         return True, normalized, meta, fallback_debug
     return False, None, None, fallback_debug
+
+
+def _fast_pattern_present(array: Any, pattern_size: Tuple[int, int]) -> bool:
+    """Two-level pre-check on a downscaled image to avoid expensive processing.
+
+    Level 1 (FAST_CHECK): cheap gradient scan — passes most board images and rejects most empties.
+    Level 2 (ADAPTIVE_THRESH): catches boards that FAST_CHECK misses (e.g., poor contrast, tilt).
+
+    Running both on 640px costs ~30ms total, much cheaper than the enhancer pipeline.
+    Returns False only when both fail → image is treated as having no board.
+    """
+    if cv2 is None:
+        return True
+    gray = cv2.cvtColor(array, cv2.COLOR_RGB2GRAY)
+    h, w = gray.shape[:2]
+    max_edge = 640
+    if max(h, w) > max_edge:
+        scale = max_edge / max(h, w)
+        small = cv2.resize(gray, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_AREA)
+    else:
+        small = gray
+    # Apply CLAHE before checking: improves detection of low-contrast / edge-corner boards
+    # without adding significant cost at this scale.
+    try:
+        small = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(small)
+    except Exception:  # noqa: BLE001
+        pass
+    # Level 1: fast gradient check
+    ret, _ = cv2.findChessboardCorners(small, pattern_size, cv2.CALIB_CB_FAST_CHECK)
+    if ret:
+        return True
+    # Level 2: adaptive threshold check (catches tilted/low-contrast boards)
+    ret, _ = cv2.findChessboardCorners(
+        small, pattern_size, cv2.CALIB_CB_ADAPTIVE_THRESH | cv2.CALIB_CB_NORMALIZE_IMAGE
+    )
+    return bool(ret)
 
 
 def _detect_chessboard_from_array(
@@ -256,6 +457,14 @@ def _detect_chessboard_from_array(
         return found, corners, None, debug_payload
     fallback_debug: Optional[CalibrationDebugPayload] = debug_payload
     cache = _ColorSpaceCache(array)
+    # Fast reject: skip the expensive enhancer pipeline for images with no grid structure.
+    # If both levels of the fast check fail, we still attempt a single cheap WithMeta call as a
+    # last resort — it rescues boards too small or too tilted for the old algorithm at low
+    # resolution but visible to SBWithMeta at full resolution (e.g., tilted boards far away).
+    # WithMeta on a true no-pattern image fails in ~0.5s; this cost is acceptable given
+    # that calibration scans are infrequent.
+    if not _fast_pattern_present(array, pattern_size):
+        return _try_with_meta(array, pattern_size, fallback_debug, cache)
     if not _ENHANCEMENT_PIPELINE:
         return _try_with_meta(array, pattern_size, fallback_debug, cache)
     executor = _get_enhancement_executor()
@@ -282,6 +491,13 @@ def _detect_chessboard_from_array(
         if debug and r_debug is not None and r_label != "base":
             r_debug.setdefault("notes", []).append(f"Enhanced via {r_label}")
         return r_found, r_corners, r_meta, r_debug
+    # ROI-crop fallback: use old algorithm to isolate board region, re-run SB there.
+    # Rescues images where SB fails due to complex backgrounds but the board is fully visible.
+    roi_found, roi_corners, roi_meta, roi_debug = _try_roi_based_sb(
+        array, pattern_size, fallback_debug, cache
+    )
+    if roi_found:
+        return roi_found, roi_corners, roi_meta, roi_debug
     return _try_with_meta(array, pattern_size, fallback_debug, cache)
 
 
