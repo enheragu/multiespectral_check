@@ -7,6 +7,8 @@ Versioning note: minor releases mark visible feature jumps; patch releases cover
 
 ## [Unreleased]
 
+
+## [0.10.3](https://github.com/enheragu/multiespectral_check/commit/6d6c3eb) - 2026-06-10
 - Calibration corner detection: `findChessboardCornersSBWithMeta` added as last-resort fallback; patterns with ≥75 % directly detected corners are accepted, the rest flagged as interpolated. Partial detection count shown in stats/overlay and persisted in YAML as `*_meta` lists.
 - Calibration thread pool: increased worker count for faster parallel detection.
 - Bugfix: workspace panel image count used intersection (complete pairs only), while title bar and carousel used union (all navigable images); both now use union so single-channel images are counted and missing-pair detection remains meaningful.
@@ -189,7 +191,10 @@ Released with updated documentation and in-app help for external users:
 > To commit a new release just add the commit with the version change and everything that needs to be included. Once cotake the short commit tag and add it in the changelog, instead of a new commit add that change to the same commit. Then create the new tag and push it everything to the remote:
 > ```sh
 > git add <files>
-> git commit --amend
+> git commit -m "Release vN.M.P"
+> git rev-parse --short HEAD   # ← use this hash in the changelog link
+> git add CHANGELOG.md
+> git commit --amend --no-edit
 > git tag -a vN.M.P -m "Release vN.M.P"
 > git push origin main
 > git push --tags
