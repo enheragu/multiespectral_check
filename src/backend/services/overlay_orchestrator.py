@@ -124,7 +124,9 @@ class OverlayOrchestrator(QObject):
 
         # findChessboardCornersSB corners are already subpixel-accurate; show them directly.
         lwir_corners_primary = calib_corners.get("lwir")
+        lwir_meta_primary = calib_corners.get("lwir_meta")
         vis_corners_primary = calib_corners.get("visible")
+        vis_meta_primary = calib_corners.get("visible_meta")
 
         # Error data
         thresholds = self._get_error_thresholds()
@@ -231,8 +233,10 @@ class OverlayOrchestrator(QObject):
             calibration_errors = None
             stereo_error = None
             lwir_corners_primary = None
+            lwir_meta_primary = None
             lwir_corners_secondary = None
             vis_corners_primary = None
+            vis_meta_primary = None
             vis_corners_secondary = None
 
         # Render LWIR with overlays
@@ -249,6 +253,7 @@ class OverlayOrchestrator(QObject):
             calibration_auto=calibration_auto,
             calibration_detected=calib_results.get("lwir") if self.show_overlays else None,
             corner_points=lwir_corners_primary,
+            corner_meta=lwir_meta_primary,
             warning_text=None,
             calibration_errors=calibration_errors,
             stereo_error=stereo_error,
@@ -275,6 +280,7 @@ class OverlayOrchestrator(QObject):
             calibration_auto=calibration_auto,
             calibration_detected=calib_results.get("visible") if self.show_overlays else None,
             corner_points=vis_corners_primary,
+            corner_meta=vis_meta_primary,
             warning_text=None,
             calibration_errors=calibration_errors,
             stereo_error=stereo_error,

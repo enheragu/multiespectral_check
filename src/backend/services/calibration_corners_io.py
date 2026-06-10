@@ -71,6 +71,9 @@ def save_corners(
         corner_list = corners.get(channel)
         if corner_list is not None:
             serialized[channel] = [[float(x), float(y)] for x, y in corner_list]
+        meta = corners.get(f"{channel}_meta")
+        if meta is not None:
+            serialized[f"{channel}_meta"] = [float(v) for v in meta]
 
     # Add image sizes if provided
     if image_sizes:
@@ -120,6 +123,9 @@ def load_corners(dataset_path: Path, image_base: str) -> Optional[Dict[str, Any]
                 continue  # Skip None/missing channels
             elif isinstance(corner_data, list):
                 corners[channel] = [[float(pt[0]), float(pt[1])] for pt in corner_data if len(pt) == 2]
+            meta_data = data.get(f"{channel}_meta")
+            if isinstance(meta_data, list):
+                corners[f"{channel}_meta"] = [float(v) for v in meta_data]
 
         # Load image sizes if present
         image_size_data = data.get("image_size")

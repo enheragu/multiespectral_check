@@ -7,6 +7,8 @@ Versioning note: minor releases mark visible feature jumps; patch releases cover
 
 ## [Unreleased]
 
+- Calibration corner detection: added `findChessboardCornersSBWithMeta` as a last-resort fallback (only reached when SB + all enhancers fail). Patterns where ≥75 % of corners are directly detected are accepted; the rest are flagged as interpolated. Add this count to stats and overl. Stored in YAML with `*_meta` lists .
+- More resources to calibration thread pool to run faster.
 
 ## [0.10.2](https://github.com/enheragu/multiespectral_check/commit/a60f23e) - 2026-06-09
 - Bugfix: workspace scan silently skipped collections whose folder name matched a reserved word (e.g. `Calibration`); now emits a warning and shows a dismissible banner in the workspace panel listing the affected folder names.

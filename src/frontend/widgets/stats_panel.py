@@ -128,8 +128,8 @@ class StatsPanel(QWidget):
 
         # Compute per-type detection breakdown (both/partial/none) for auto vs manual
         calib_data = state.cache_data.get("calibration", {})
-        auto_both = auto_partial = auto_none = 0
-        manual_both = manual_partial = manual_none = 0
+        auto_both = auto_partial = auto_none = auto_interp = 0
+        manual_both = manual_partial = manual_none = manual_interp = 0
         for base, data in calib_data.items():
             if not isinstance(data, dict):
                 continue
@@ -137,11 +137,17 @@ class StatsPanel(QWidget):
             results = data.get("results", {})
             positives = sum(1 for ch in ("lwir", "visible") if results.get(ch) is True)
             is_auto = data.get("auto", False)
+            corners_data = data.get("corners") or {}
+            has_interp = corners_data.get("lwir_meta") is not None or corners_data.get("visible_meta") is not None
             if positives >= 2:
                 if is_auto:
                     auto_both += 1
+                    if has_interp:
+                        auto_interp += 1
                 else:
                     manual_both += 1
+                    if has_interp:
+                        manual_interp += 1
             elif positives == 1:
                 if is_auto:
                     auto_partial += 1
@@ -167,8 +173,9 @@ class StatsPanel(QWidget):
             f"{reason_text(REASON_SYNC)}: {sync_marked}, "
             f"Patterns: {manual_patterns})"
         )
+        manual_interp_str = f", ~{manual_interp} interp" if manual_interp > 0 else ""
         self.label_calibration_manual.setText(
-            f"<b>Manual calibration:</b> {calibration_manual} (both: {manual_both}, partial: {manual_partial}, none: {manual_none})"
+            f"<b>Manual calibration:</b> {calibration_manual} (both: {manual_both}, partial: {manual_partial}, none: {manual_none}{manual_interp_str})"
         )
         self.label_outliers_manual.setText(
             f"<b>Outliers:</b> LWIR {outliers_lwir}, Visible {outliers_visible}"
@@ -181,8 +188,9 @@ class StatsPanel(QWidget):
             f"{reason_text(REASON_MOTION)}: {detected_motion}, "
             f"Patterns: {detected_patterns})"
         )
+        auto_interp_str = f", ~{auto_interp} interp" if auto_interp > 0 else ""
         self.label_calibration_auto.setText(
-            f"<b>Auto calibration:</b> {calibration_auto} (both: {auto_both}, partial: {auto_partial}, none: {auto_none})"
+            f"<b>Auto calibration:</b> {calibration_auto} (both: {auto_both}, partial: {auto_partial}, none: {auto_none}{auto_interp_str})"
         )
         self.label_outliers_auto.setText(
             f"<b>Outliers:</b> Stereo {outliers_stereo}"

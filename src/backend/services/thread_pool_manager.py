@@ -43,8 +43,12 @@ class WorkerLimits:
         # Reserve cores for UI and system
         available = max(2, cpu - 1)
 
-        # Heavyweight operations (calibration, scanning)
-        heavyweight_pool = max(2, min(6, available // 2))
+        # Calibration image workers: threads spend most time waiting on futures,
+        # so we can run more of them without CPU contention.
+        calibration_workers = max(2, min(8, cpu - 2))
+
+        # Workspace scan/sweep: Python-heavy (GIL-bound), keep conservative.
+        workspace_workers = max(2, min(6, available // 2))
 
         # Lightweight inflight limits (IO-bound)
         lightweight_limit = max(4, min(8, available))
@@ -54,9 +58,9 @@ class WorkerLimits:
 
         return cls(
             cpu_count=cpu,
-            calibration_detect=heavyweight_pool,
-            workspace_scan=heavyweight_pool,
-            workspace_sweep=heavyweight_pool,
+            calibration_detect=calibration_workers,
+            workspace_scan=workspace_workers,
+            workspace_sweep=workspace_workers,
             signature_scan_inflight=lightweight_limit,
             quality_scan_inflight=lightweight_limit,
             enhancement=enhancement_pool,

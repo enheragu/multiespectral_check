@@ -30,6 +30,8 @@ LabelOverlay = Tuple[str, float, float, float, float, QColor, bool, bool]
 CALIBRATION_BORDER_COLOR = QColor("#00ffea")
 CALIBRATION_ERROR_COLOR = QColor("#dc3545")
 WARNING_LABEL_COLOR = QColor("#ffb347")
+INTERPOLATED_CORNER_COLOR = QColor("#ff8c00")  # orange for interpolated corners
+_META_DIRECT_THRESH = 0.5
 
 
 @dataclass
@@ -62,10 +64,18 @@ class OverlayWorkflow:
                 return False
         return True
 
-    def _corner_signature(self, corner_points: Optional[List[List[float]]]) -> Optional[Tuple[Tuple[float, float], ...]]:
+    def _corner_signature(
+        self,
+        corner_points: Optional[List[List[float]]],
+        corner_meta: Optional[List[float]] = None,
+    ) -> Optional[Tuple[Any, ...]]:
         if not corner_points:
             return None
-        return tuple((round(pt[0], 4), round(pt[1], 4)) for pt in corner_points)
+        pts = tuple((round(pt[0], 4), round(pt[1], 4)) for pt in corner_points)
+        if corner_meta is None:
+            return pts
+        meta_sig = tuple(int(v > _META_DIRECT_THRESH) for v in corner_meta)
+        return pts + (meta_sig,)
 
     def build_signature(
         self,
@@ -83,6 +93,7 @@ class OverlayWorkflow:
         thresholds: Optional[Dict[str, float]] = None,
         label_sig: Optional[Tuple[Any, ...]] = None,
         alignment_output_size: Optional[Tuple[int, int]] = None,
+        corner_meta: Optional[List[float]] = None,
     ) -> Tuple[Any, ...]:
         def _rounded_errors(errors: Optional[Dict[str, Optional[float]]]) -> Optional[Tuple[Tuple[str, float], ...]]:
             if not errors:
@@ -107,7 +118,7 @@ class OverlayWorkflow:
             calibration,
             calibration_auto,
             calibration_detected,
-            self._corner_signature(corner_points),
+            self._corner_signature(corner_points, corner_meta),
             (warning_text or "")[:64],
             _rounded_errors(calibration_errors),
             round(stereo_error, 4) if isinstance(stereo_error, (int, float)) else None,
@@ -288,6 +299,7 @@ class OverlayWorkflow:
         calibration_auto: bool,
         calibration_detected: Optional[bool],
         corner_points: Optional[List[List[float]]],
+        corner_meta: Optional[List[float]] = None,
         warning_text: Optional[str],
         calibration_errors: Optional[Dict[str, Optional[float]]],
         stereo_error: Optional[float],
@@ -316,6 +328,7 @@ class OverlayWorkflow:
             thresholds,
             label_sig,
             alignment_output_size=alignment_transform.output_size if alignment_transform else None,
+            corner_meta=corner_meta,
         )
         cached = self._get_cached_overlay(base, channel, signature)
         if cached is not None:
@@ -383,10 +396,8 @@ class OverlayWorkflow:
         def draw_corner_set(
             points: List[List[float]],
             color: QColor,
-            shape: str = "circle",  # "circle" or "cross"
+            meta: Optional[List[float]] = None,
         ) -> None:
-            painter.setPen(color)
-            painter.setBrush(color)
             r = max(3, overlay_pen_width)
             orig_w, orig_h = original_size  # type: ignore[misc]
 
@@ -402,11 +413,16 @@ class OverlayWorkflow:
                     )
                 for i in range(len(points)):
                     x, y = int(output_coords[i, 0]), int(output_coords[i, 1])
-                    if shape == "circle":
+                    is_interp = meta is not None and i < len(meta) and meta[i] <= _META_DIRECT_THRESH
+                    if is_interp:
+                        painter.setPen(INTERPOLATED_CORNER_COLOR)
+                        painter.setBrush(Qt.BrushStyle.NoBrush)
+                        painter.drawLine(x - r, y - r, x + r, y + r)
+                        painter.drawLine(x - r, y + r, x + r, y - r)
+                    else:
+                        painter.setPen(color)
+                        painter.setBrush(color)
                         painter.drawEllipse(QPoint(x, y), r, r)
-                    else:  # cross
-                        painter.drawLine(x - r, y, x + r, y)
-                        painter.drawLine(x, y - r, x, y + r)
             else:
                 # No alignment - batch process all corners
                 scale_x = base_w / orig_w if orig_w > 0 else 1.0
@@ -423,7 +439,6 @@ class OverlayWorkflow:
                         new_cam, _ = cv2.getOptimalNewCameraMatrix(
                             cam, dist, (orig_w, orig_h), 1, (orig_w, orig_h)
                         )
-                        # Reshape for undistortPoints: (N, 1, 2)
                         pts_reshaped = coords.reshape(-1, 1, 2)
                         undistorted = cv2.undistortPoints(pts_reshaped, cam, dist, P=new_cam)
                         coords = undistorted.reshape(-1, 2)
@@ -431,17 +446,21 @@ class OverlayWorkflow:
                         pass
 
                 # Scale and draw
-                for orig_x, orig_y in coords:
+                for i, (orig_x, orig_y) in enumerate(coords):
                     x, y = int(orig_x * scale_x), int(orig_y * scale_y)
-                    if shape == "circle":
+                    is_interp = meta is not None and i < len(meta) and meta[i] <= _META_DIRECT_THRESH
+                    if is_interp:
+                        painter.setPen(INTERPOLATED_CORNER_COLOR)
+                        painter.setBrush(Qt.BrushStyle.NoBrush)
+                        painter.drawLine(x - r, y - r, x + r, y + r)
+                        painter.drawLine(x - r, y + r, x + r, y - r)
+                    else:
+                        painter.setPen(color)
+                        painter.setBrush(color)
                         painter.drawEllipse(QPoint(x, y), r, r)
-                    else:  # cross
-                        painter.drawLine(x - r, y, x + r, y)
-                        painter.drawLine(x, y - r, x, y + r)
 
         if corner_points and original_size:
             dot_color = WARNING_LABEL_COLOR if warning_text else CALIBRATION_BORDER_COLOR
-            # Log diagnostic info for first corner only
             u0, v0 = corner_points[0]
             log_debug(
                 f"Corner transform [{channel}]: orig_size={original_size}, base={base_w}x{base_h}, "
@@ -449,7 +468,7 @@ class OverlayWorkflow:
                 f"corner0=({u0:.4f},{v0:.4f})",
                 "OVERLAY"
             )
-            draw_corner_set(corner_points, dot_color, "circle")
+            draw_corner_set(corner_points, dot_color, corner_meta)
 
         painter.end()
         bucket = self._overlay_cache.setdefault(base, {})

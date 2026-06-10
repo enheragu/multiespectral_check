@@ -22,15 +22,21 @@ except ImportError:  # pragma: no cover
 
 CalibrationResult = Dict[str, Optional[bool]]
 CalibrationCorners = Dict[str, Optional[List[List[float]]]]
+CalibrationMeta = Optional[List[float]]
 CalibrationDebugPayload = Dict[str, Any]
 CalibrationDebugBundle = Dict[str, Optional[CalibrationDebugPayload]]
+
+_META_DIRECT_THRESH = 0.5
+_META_MIN_DIRECT_RATIO = 0.75
 
 EnhancerFunc = Callable[[Any, Optional["_ColorSpaceCache"]], Optional[Any]]
 
 
 def _default_enhancement_worker_cap() -> int:
     cpu_count = os.cpu_count() or 2
-    return max(1, min(2, max(1, cpu_count // 2)))
+    # Image-level threads mostly wait on as_completed, so enhancement workers can
+    # use most available cores. Leave 2 for UI + OS; cap at 8 on high-core machines.
+    return max(2, min(8, cpu_count - 2))
 
 
 def _resolve_enhancement_worker_cap() -> int:
@@ -115,17 +121,16 @@ def _run_enhanced_detection(
     cache: _ColorSpaceCache,
     pattern_size: Tuple[int, int],
     debug: bool,
-) -> Tuple[str, Tuple[Optional[bool], Optional[List[List[float]]], Optional[CalibrationDebugPayload]]]:
+) -> Tuple[str, Tuple[Optional[bool], Optional[List[List[float]]], CalibrationMeta, Optional[CalibrationDebugPayload]]]:
     source = cache.rgb()
     try:
         enhanced = enhancer(source, cache)
     except TypeError:
-        # Fallback for enhancers that don't accept cache parameter
         enhanced = enhancer(source, None)  # type: ignore[call-arg]
     except Exception:  # noqa: BLE001
-        return label, (False, None, None)
+        return label, (False, None, None, None)
     if enhanced is None:
-        return label, (False, None, None)
+        return label, (False, None, None, None)
     return label, _run_chessboard_detection(enhanced, pattern_size, debug)
 
 
@@ -198,62 +203,102 @@ def _downscale_for_detection(array: Any, max_edge: int) -> Any:
     return cv2.resize(array, new_size, interpolation=cv2.INTER_AREA)
 
 
+def _min_direct_corners(pattern_size: Tuple[int, int]) -> int:
+    cols, rows = pattern_size
+    return max(1, int(cols * rows * _META_MIN_DIRECT_RATIO))
+
+
+
+def _try_with_meta(
+    array: Any,
+    pattern_size: Tuple[int, int],
+    fallback_debug: Optional[CalibrationDebugPayload],
+    cache: Optional[_ColorSpaceCache] = None,
+) -> Tuple[Optional[bool], Optional[List[List[float]]], CalibrationMeta, Optional[CalibrationDebugPayload]]:
+    """Final fallback: allow OpenCV to interpolate missing corners via findChessboardCornersSBWithMeta.
+
+    Called only after all findChessboardCornersSB attempts (base + all enhancers) have failed.
+    WithMeta is slower on no-pattern images, so it is deliberately kept out of the hot path.
+    """
+    if cv2 is None or not hasattr(cv2, "findChessboardCornersSBWithMeta"):
+        return False, None, None, fallback_debug
+    flags = cv2.CALIB_CB_EXHAUSTIVE | cv2.CALIB_CB_ACCURACY
+    _cache = cache or _ColorSpaceCache(array)
+    min_direct = _min_direct_corners(pattern_size)
+    # CLAHE and bilateral are the most effective for LWIR partial patterns.
+    # Keeping this to 2 arrays caps the fallback cost while covering the main failure modes.
+    candidates = [_apply_clahe(array, _cache), _apply_bilateral(array, _cache)]
+    for arr in candidates:
+        if arr is None:
+            continue
+        gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+        h, w = gray.shape[:2]
+        ret, corners, meta_arr = cv2.findChessboardCornersSBWithMeta(gray, pattern_size, flags)
+        if not ret or corners is None or meta_arr is None:
+            continue
+        m = meta_arr.ravel()
+        n_direct = int((m > _META_DIRECT_THRESH).sum())
+        if n_direct < min_direct:
+            continue
+        normalized: List[List[float]] = [[float(p[0][0]) / w, float(p[0][1]) / h] for p in corners]
+        meta: List[float] = m.tolist()
+        return True, normalized, meta, fallback_debug
+    return False, None, None, fallback_debug
+
+
 def _detect_chessboard_from_array(
     array: Any,
     pattern_size: Tuple[int, int],
     debug: bool = False,
-) -> Tuple[Optional[bool], Optional[List[List[float]]], Optional[CalibrationDebugPayload]]:
-    found, corners, debug_payload = _run_chessboard_detection(array, pattern_size, debug)
+) -> Tuple[Optional[bool], Optional[List[List[float]]], CalibrationMeta, Optional[CalibrationDebugPayload]]:
+    found, corners, _, debug_payload = _run_chessboard_detection(array, pattern_size, debug)
     if found:
-        return found, corners, debug_payload
+        return found, corners, None, debug_payload
     fallback_debug: Optional[CalibrationDebugPayload] = debug_payload
-    if not _ENHANCEMENT_PIPELINE:
-        return False, None, fallback_debug
     cache = _ColorSpaceCache(array)
+    if not _ENHANCEMENT_PIPELINE:
+        return _try_with_meta(array, pattern_size, fallback_debug, cache)
     executor = _get_enhancement_executor()
     if executor is None:
-        return False, None, fallback_debug
-    futures = []
-    results: Optional[Tuple[Optional[bool], Optional[List[List[float]]], Optional[CalibrationDebugPayload], str]] = None
-    for enhancer_name, enhancer in _ENHANCEMENT_PIPELINE:
-        futures.append(
-            executor.submit(
-                _run_enhanced_detection,
-                enhancer_name,
-                enhancer,
-                cache,
-                pattern_size,
-                debug,
-            )
-        )
+        return _try_with_meta(array, pattern_size, fallback_debug, cache)
+    futures = [
+        executor.submit(_run_enhanced_detection, name, enh, cache, pattern_size, debug)
+        for name, enh in _ENHANCEMENT_PIPELINE
+    ]
+    result: Optional[Tuple[bool, Any, CalibrationMeta, Any, str]] = None
     for future in as_completed(futures):
         enh_label, enh_result = future.result()
-        enh_found, enh_corners, enh_debug = enh_result
+        enh_found, enh_corners, enh_meta, enh_debug = enh_result
         if enh_found:
             for pending in futures:
                 if pending is not future:
                     pending.cancel()
-            results = (enh_found, enh_corners, enh_debug, enh_label)
+            result = (enh_found, enh_corners, enh_meta, enh_debug, enh_label)
             break
         if debug and fallback_debug is None and enh_debug is not None:
             fallback_debug = enh_debug
-    if results:
-        enh_found, enh_corners, enh_debug, enh_label = results
-        if debug and enh_debug is not None and enh_label != "base":
-            enh_debug.setdefault("notes", []).append(f"Enhanced via {enh_label}")
-        return enh_found, enh_corners, enh_debug
-    return False, None, fallback_debug
+    if result:
+        r_found, r_corners, r_meta, r_debug, r_label = result
+        if debug and r_debug is not None and r_label != "base":
+            r_debug.setdefault("notes", []).append(f"Enhanced via {r_label}")
+        return r_found, r_corners, r_meta, r_debug
+    return _try_with_meta(array, pattern_size, fallback_debug, cache)
 
 
 def _run_chessboard_detection(
     array: Any,
     pattern_size: Tuple[int, int],
     debug: bool = False,
-) -> Tuple[Optional[bool], Optional[List[List[float]]], Optional[CalibrationDebugPayload]]:
+) -> Tuple[Optional[bool], Optional[List[List[float]]], CalibrationMeta, Optional[CalibrationDebugPayload]]:
     gray = cv2.cvtColor(array, cv2.COLOR_RGB2GRAY)
     height, width = gray.shape[:2]
     flags = cv2.CALIB_CB_EXHAUSTIVE | cv2.CALIB_CB_ACCURACY
     corners = None
+    meta: CalibrationMeta = None
+
+    # findChessboardCornersSB fails fast on no-pattern images; use it as the primary path.
+    # WithMeta is reserved for the final fallback phase (_try_with_meta) after all SB
+    # attempts have failed — it is slower on negative cases because it attempts grid fitting.
     if hasattr(cv2, "findChessboardCornersSB"):
         found, corners = cv2.findChessboardCornersSB(gray, pattern_size, flags)
     else:
@@ -263,6 +308,7 @@ def _run_chessboard_detection(
             | cv2.CALIB_CB_FAST_CHECK
         )
         found, corners = cv2.findChessboardCorners(gray, pattern_size, legacy_flags)
+
     normalized: Optional[List[List[float]]] = None
     if found and corners is not None:
         normalized = [
@@ -294,18 +340,19 @@ def _run_chessboard_detection(
             "expected_corners": expected,
             "pixmap": _array_to_pixmap(debug_rgb),
         }
-    return bool(found), normalized, debug_payload
+    # meta is always None here: findChessboardCornersSB only returns full detections.
+    return bool(found), normalized, None, debug_payload
 
 
 def detect_chessboard(
     pixmap: Optional[QPixmap],
     pattern_size: Tuple[int, int],
     debug: bool = False,
-) -> Tuple[Optional[bool], Optional[List[List[float]]], Optional[CalibrationDebugPayload]]:
-    """Return detection result plus normalized corners and optional debug payload."""
+) -> Tuple[Optional[bool], Optional[List[List[float]]], CalibrationMeta, Optional[CalibrationDebugPayload]]:
+    """Return detection result, normalized corners, optional meta, and optional debug payload."""
     array = _pixmap_to_rgb_array(pixmap)
     if array is None:
-        return None, None, None
+        return None, None, None, None
     return _detect_chessboard_from_array(array, pattern_size, debug)
 
 
@@ -323,22 +370,22 @@ def _array_from_path(image_path: Optional[Path]) -> Optional[Any]:
 def detect_chessboard_from_path(
     image_path: Optional[Path],
     pattern_size: Tuple[int, int],
-) -> Tuple[Optional[bool], Optional[List[List[float]]], Optional[Tuple[int, int]]]:
+) -> Tuple[Optional[bool], Optional[List[List[float]]], CalibrationMeta, Optional[Tuple[int, int]]]:
     """Detect chessboard corners loading the image directly from disk.
 
     Returns:
-        Tuple of (found, corners, image_size) where image_size is (width, height)
+        Tuple of (found, corners, meta, image_size) where image_size is (width, height)
+        and meta is None when all corners are directly detected.
     """
     array = _array_from_path(image_path)
     if array is None:
-        return None, None, None
-    # Get original image size before downscaling (height, width in numpy)
+        return None, None, None, None
     h, w = array.shape[:2]
     image_size = (w, h)  # (width, height)
     config = get_config()
     array = _downscale_for_detection(array, config.calibration_detection_max_edge)
-    found, corners, _ = _detect_chessboard_from_array(array, pattern_size, debug=False)
-    return found, corners, image_size
+    found, corners, meta, _ = _detect_chessboard_from_array(array, pattern_size, debug=False)
+    return found, corners, meta, image_size
 
 
 def _apply_clahe(array: Any, cache: Optional[_ColorSpaceCache] = None) -> Optional[Any]:
@@ -555,34 +602,41 @@ def analyze_pair(
     debug: bool = False,
 ) -> Tuple[CalibrationResult, CalibrationCorners, str, CalibrationDebugBundle]:
     """Return calibration detection results, status summary, and optional debug data."""
-    lwir_result, lwir_corners, lwir_debug = detect_chessboard(lwir_pixmap, pattern_size, debug=debug)
-    vis_result, vis_corners, vis_debug = detect_chessboard(vis_pixmap, pattern_size, debug=debug)
+    lwir_result, lwir_corners, lwir_meta, lwir_debug = detect_chessboard(lwir_pixmap, pattern_size, debug=debug)
+    vis_result, vis_corners, vis_meta, vis_debug = detect_chessboard(vis_pixmap, pattern_size, debug=debug)
     status_parts: List[str] = []
     expected = pattern_size[0] * pattern_size[1]
     if cv2 is None or np is None:
         status_parts.append("Install opencv-python to enable chessboard detection")
     else:
         specs = (
-            ("LWIR", lwir_result, lwir_corners),
-            ("Visible", vis_result, vis_corners),
+            ("LWIR", lwir_result, lwir_corners, lwir_meta),
+            ("Visible", vis_result, vis_corners, vis_meta),
         )
-        for label, result, corner_list in specs:
+        for label, result, corner_list, meta in specs:
             if result is True:
                 entry = f"{label}: detected"
+                if meta is not None:
+                    n_interp = sum(1 for v in meta if v <= _META_DIRECT_THRESH)
+                    entry += f" ({n_interp}/{expected} interpolated)"
             elif result is False:
                 entry = f"{label}: not found"
             else:
                 continue
             if debug:
                 count = len(corner_list or [])
-                entry += f" ({count}/{expected} corners)"
+                entry += f" [{count}/{expected} corners]"
             status_parts.append(entry)
         if not status_parts:
             status_parts.append("Chessboard detection skipped")
     status_msg = f"Calibration tagged for {base} ({'; '.join(status_parts)})"
 
-    # Build corners dict with image sizes for calibration solver
+    # Build corners dict with image sizes and meta for calibration solver
     corners: CalibrationCorners = {"lwir": lwir_corners, "visible": vis_corners}
+    if lwir_meta is not None:
+        corners["lwir_meta"] = lwir_meta  # type: ignore[typeddict-item]
+    if vis_meta is not None:
+        corners["visible_meta"] = vis_meta  # type: ignore[typeddict-item]
 
     # Add image sizes from pixmaps (needed for calibration solver)
     image_sizes: Dict[str, Tuple[int, int]] = {}
@@ -604,11 +658,15 @@ def analyze_pair_from_paths(
     pattern_size: Tuple[int, int],
 ) -> Tuple[CalibrationResult, CalibrationCorners]:
     """Detect chessboards directly from image files (no QPixmap dependency)."""
-    lwir_result, lwir_corners, lwir_size = detect_chessboard_from_path(lwir_path, pattern_size)
-    vis_result, vis_corners, vis_size = detect_chessboard_from_path(vis_path, pattern_size)
+    lwir_result, lwir_corners, lwir_meta, lwir_size = detect_chessboard_from_path(lwir_path, pattern_size)
+    vis_result, vis_corners, vis_meta, vis_size = detect_chessboard_from_path(vis_path, pattern_size)
 
-    # Build corners dict with image sizes
+    # Build corners dict with image sizes and meta
     corners: CalibrationCorners = {"lwir": lwir_corners, "visible": vis_corners}
+    if lwir_meta is not None:
+        corners["lwir_meta"] = lwir_meta  # type: ignore[typeddict-item]
+    if vis_meta is not None:
+        corners["visible_meta"] = vis_meta  # type: ignore[typeddict-item]
 
     # Add image sizes (needed for calibration solver to avoid imread)
     image_sizes: Dict[str, Tuple[int, int]] = {}
