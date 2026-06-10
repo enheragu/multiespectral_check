@@ -53,11 +53,13 @@ def empty_stats_dict() -> Dict[str, Any]:
                 "both": 0,
                 "partial": 0,
                 "none": 0,
+                "interp": 0,
             },
             "auto": {
                 "both": 0,
                 "partial": 0,
                 "none": 0,
+                "interp": 0,
             },
             "outlier": {
                 "lwir": 0,
@@ -263,11 +265,13 @@ class DatasetStats:
         manual_both = user_data.get("both", 0) or 0
         manual_partial = user_data.get("partial", 0) or 0
         manual_none = user_data.get("none", 0) or 0
+        manual_interp = user_data.get("interp", 0) or 0
         manual_total = manual_both + manual_partial + manual_none
 
         auto_both = auto_data.get("both", 0) or 0
         auto_partial = auto_data.get("partial", 0) or 0
         auto_none = auto_data.get("none", 0) or 0
+        auto_interp = auto_data.get("interp", 0) or 0
         auto_total = auto_both + auto_partial + auto_none
 
         calib_total = manual_total + auto_total
@@ -284,6 +288,8 @@ class DatasetStats:
             manual_parts.append(f"partial {manual_partial}")
         if manual_none > 0 or not compact:
             manual_parts.append(f"none {manual_none}")
+        if manual_interp > 0:
+            manual_parts.append(f"{manual_interp} interp")
         manual_breakdown = f" ({', '.join(manual_parts)})" if manual_parts else ""
         lines.append(f"Manual: {manual_total}{manual_breakdown}")
 
@@ -295,6 +301,8 @@ class DatasetStats:
             auto_parts.append(f"partial {auto_partial}")
         if auto_none > 0 or not compact:
             auto_parts.append(f"none {auto_none}")
+        if auto_interp > 0:
+            auto_parts.append(f"{auto_interp} interp")
         auto_breakdown = f" ({', '.join(auto_parts)})" if auto_parts else ""
         lines.append(f"Auto: {auto_total}{auto_breakdown}")
 

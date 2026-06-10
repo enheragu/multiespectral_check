@@ -44,12 +44,12 @@ class PatternSweepRunnable(QRunnable):
                 return
             matched: Dict[str, str] = {}
 
-            with tqdm(total=total, desc="Pattern sweep", unit="img", leave=False) as pbar:
+            with tqdm(total=total, desc="Pattern sweep", unit="img", leave=False, position=0, dynamic_miniters=False) as pbar:
                 for idx, (base, vis_path, lwir_path) in enumerate(self._items, start=1):
                     pattern_name = matcher.match_any_paths_detailed([vis_path, lwir_path])
                     if pattern_name:
                         matched[base] = pattern_name
-                        pbar.set_postfix({"matched": len(matched)})
+                        pbar.set_postfix({"matched": len(matched)}, refresh=False)
 
                     pbar.update(1)
 

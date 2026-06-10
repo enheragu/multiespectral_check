@@ -6,8 +6,8 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
-from PyQt6.QtCore import QPoint
-from PyQt6.QtGui import QColor, QPainter, QPixmap
+from PyQt6.QtCore import QPoint, Qt
+from PyQt6.QtGui import QColor, QPainter, QPen, QPixmap
 
 from backend.services.lru_index import LRUIndex
 from backend.utils.overlays import (
@@ -399,6 +399,8 @@ class OverlayWorkflow:
             meta: Optional[List[float]] = None,
         ) -> None:
             r = max(3, overlay_pen_width)
+            r_interp = max(4, overlay_pen_width + 1)
+            pen_interp = QPen(INTERPOLATED_CORNER_COLOR, overlay_pen_width)
             orig_w, orig_h = original_size  # type: ignore[misc]
 
             if alignment_transform:
@@ -415,10 +417,10 @@ class OverlayWorkflow:
                     x, y = int(output_coords[i, 0]), int(output_coords[i, 1])
                     is_interp = meta is not None and i < len(meta) and meta[i] <= _META_DIRECT_THRESH
                     if is_interp:
-                        painter.setPen(INTERPOLATED_CORNER_COLOR)
+                        painter.setPen(pen_interp)
                         painter.setBrush(Qt.BrushStyle.NoBrush)
-                        painter.drawLine(x - r, y - r, x + r, y + r)
-                        painter.drawLine(x - r, y + r, x + r, y - r)
+                        painter.drawLine(x - r_interp, y - r_interp, x + r_interp, y + r_interp)
+                        painter.drawLine(x - r_interp, y + r_interp, x + r_interp, y - r_interp)
                     else:
                         painter.setPen(color)
                         painter.setBrush(color)
@@ -450,10 +452,10 @@ class OverlayWorkflow:
                     x, y = int(orig_x * scale_x), int(orig_y * scale_y)
                     is_interp = meta is not None and i < len(meta) and meta[i] <= _META_DIRECT_THRESH
                     if is_interp:
-                        painter.setPen(INTERPOLATED_CORNER_COLOR)
+                        painter.setPen(pen_interp)
                         painter.setBrush(Qt.BrushStyle.NoBrush)
-                        painter.drawLine(x - r, y - r, x + r, y + r)
-                        painter.drawLine(x - r, y + r, x + r, y - r)
+                        painter.drawLine(x - r_interp, y - r_interp, x + r_interp, y + r_interp)
+                        painter.drawLine(x - r_interp, y + r_interp, x + r_interp, y - r_interp)
                     else:
                         painter.setPen(color)
                         painter.setBrush(color)

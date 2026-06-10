@@ -573,6 +573,11 @@ class DatasetSession:
         if base not in self.state.cache_data["calibration"]:
             self.state.cache_data["calibration"][base] = {}
         self.state.cache_data["calibration"][base]["corners"] = corners
+        has_interp = (
+            corners.get("lwir_meta") is not None
+            or corners.get("visible_meta") is not None
+        )
+        self.state.cache_data["calibration"][base]["has_interp"] = has_interp
         self._dirty_corners.add(base)
         self.mark_cache_dirty()
 
@@ -595,6 +600,11 @@ class DatasetSession:
                 if base not in self.state.cache_data["calibration"]:
                     self.state.cache_data["calibration"][base] = {}
                 self.state.cache_data["calibration"][base]["corners"] = corners
+                has_interp = (
+                    corners.get("lwir_meta") is not None
+                    or corners.get("visible_meta") is not None
+                )
+                self.state.cache_data["calibration"][base]["has_interp"] = has_interp
                 return corners
 
         return None

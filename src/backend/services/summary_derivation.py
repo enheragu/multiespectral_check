@@ -105,10 +105,12 @@ def derive_summary_from_entry(entry: DatasetCache) -> Dict[str, Any]:
     calib_user_both = 0
     calib_user_partial = 0
     calib_user_none = 0
+    calib_user_interp = 0
 
     calib_auto_both = 0
     calib_auto_partial = 0
     calib_auto_none = 0
+    calib_auto_interp = 0
 
     outlier_lwir = 0
     outlier_visible = 0
@@ -132,6 +134,7 @@ def derive_summary_from_entry(entry: DatasetCache) -> Dict[str, Any]:
                 detection_type = "partial"
 
         # Count by auto/user (only breakdown, no totals)
+        has_interp = bool(calib_entry.get("has_interp"))
         if is_auto:
             if detection_type == "both":
                 calib_auto_both += 1
@@ -139,6 +142,8 @@ def derive_summary_from_entry(entry: DatasetCache) -> Dict[str, Any]:
                 calib_auto_partial += 1
             else:
                 calib_auto_none += 1
+            if has_interp:
+                calib_auto_interp += 1
         else:
             if detection_type == "both":
                 calib_user_both += 1
@@ -146,6 +151,8 @@ def derive_summary_from_entry(entry: DatasetCache) -> Dict[str, Any]:
                 calib_user_partial += 1
             else:
                 calib_user_none += 1
+            if has_interp:
+                calib_user_interp += 1
 
         # Outliers (nested format)
         outlier_dict = calib_entry.get("outlier", {})
@@ -161,9 +168,11 @@ def derive_summary_from_entry(entry: DatasetCache) -> Dict[str, Any]:
     stats["calibration"]["user"]["both"] = calib_user_both
     stats["calibration"]["user"]["partial"] = calib_user_partial
     stats["calibration"]["user"]["none"] = calib_user_none
+    stats["calibration"]["user"]["interp"] = calib_user_interp
     stats["calibration"]["auto"]["both"] = calib_auto_both
     stats["calibration"]["auto"]["partial"] = calib_auto_partial
     stats["calibration"]["auto"]["none"] = calib_auto_none
+    stats["calibration"]["auto"]["interp"] = calib_auto_interp
     stats["calibration"]["outlier"]["lwir"] = outlier_lwir
     stats["calibration"]["outlier"]["visible"] = outlier_visible
     stats["calibration"]["outlier"]["stereo"] = outlier_stereo

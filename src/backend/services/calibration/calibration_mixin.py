@@ -223,6 +223,14 @@ class CalibrationWorkflowMixin:
         calib_dict[base]["results"] = normalized_results
         calib_dict[base]["corners"] = normalized_corners
 
+        # Persist corners to YAML (covers re-detection of already-marked images).
+        # If re-detection failed for an already-marked image, delete the stale YAML so
+        # the missing-detection state is visible (instead of serving old stale data).
+        if has_detection:
+            self._persist_auto_detected_corners(base, normalized_corners)
+        elif hasattr(self.session, "delete_corners"):
+            self.session.delete_corners(base)
+
         self.state.refresh_calibration_entry(base)
         self.invalidate_overlay_cache(base)
         current = self._current_base()

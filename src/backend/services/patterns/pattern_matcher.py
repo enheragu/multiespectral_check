@@ -200,7 +200,7 @@ class PatternMatcher:
                 log_debug(f"  Pattern {template.name}: ssim={ssim_score:.3f} (threshold={self.threshold})", "PATTERN")
 
             if ssim_score >= self.threshold:
-                log_info(f"Pattern match: {template.name} (hist={hist_score:.3f}, ssim={ssim_score:.3f})", "PATTERN")
+                log_debug(f"Pattern match: {template.name} (hist={hist_score:.3f}, ssim={ssim_score:.3f})", "PATTERN")
                 return template.name
 
         return None

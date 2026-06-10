@@ -562,7 +562,7 @@ def serialize_calibration(
             outlier_visible = False
             outlier_stereo = False
 
-        payload[base] = {
+        base_payload: Dict[str, Any] = {
             "auto": bool(entry.get("auto", False)),
             "outlier": {
                 "lwir": outlier_lwir,
@@ -571,6 +571,9 @@ def serialize_calibration(
             },
             "results": entry.get("results", {}),
         }
+        if entry.get("has_interp"):
+            base_payload["has_interp"] = True
+        payload[base] = base_payload
     return payload
 
 
@@ -612,11 +615,14 @@ def deserialize_calibration(raw: Any) -> Dict[str, Dict[str, Any]]:
             outlier = {"lwir": False, "visible": False, "stereo": False}
 
         # Presence in dict = marked (no explicit 'marked' field stored)
-        calibration[base] = {
+        base_entry: Dict[str, Any] = {
             "auto": bool(entry.get("auto", False)),
             "outlier": outlier,
             "results": results,
         }
+        if entry.get("has_interp"):
+            base_entry["has_interp"] = True
+        calibration[base] = base_entry
 
     # Log loaded calibration outliers for debugging
     outlier_counts = {"lwir": 0, "visible": 0, "stereo": 0}
