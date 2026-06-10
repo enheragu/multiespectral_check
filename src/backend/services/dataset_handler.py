@@ -297,8 +297,7 @@ class DatasetHandler(QObject):
 
         lwir_bases = _extract_bases(lwir_dir)
         visible_bases = _extract_bases(visible_dir)
-        # Use intersection for actual pairs (both sides must exist)
-        return len(lwir_bases & visible_bases)
+        return len(lwir_bases | visible_bases)
 
     def mark_dirty(self) -> None:
         """Mark cache dirty and restart debounce timer."""

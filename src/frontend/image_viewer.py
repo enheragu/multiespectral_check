@@ -3599,6 +3599,11 @@ class ImageViewer(QMainWindow):
             cancel_handler=self.calibration_controller.cancel_all,
             suppress_tqdm=suppress_tqdm,
         )
+        # When the queue goes idle, force-close the auto-search task if still open
+        # (covers cancellations and detection failures that skip calibrationDetectionCompleted)
+        if pending <= 0 and getattr(self, "_calib_search_task_id", None):
+            self.progress_tracker.finish(self._calib_search_task_id)
+            self._calib_search_task_id = None
         self._update_cancel_button()
 
     def _reset_calibration_jobs(self) -> None:

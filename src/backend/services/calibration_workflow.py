@@ -228,6 +228,7 @@ class CalibrationWorkflow(QObject):
     def handle_calibration_failed(self, base: str, message: str) -> None:
         """Handle calibration failure."""
         self.statusMessage.emit(f"Calibration analysis failed for {base}: {message}", 6000)
+        self.calibrationDetectionCompleted.emit(base, False)
 
     def _sanitize_calibration_payload(
         self,

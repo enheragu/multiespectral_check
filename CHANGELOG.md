@@ -7,8 +7,10 @@ Versioning note: minor releases mark visible feature jumps; patch releases cover
 
 ## [Unreleased]
 
-- Calibration corner detection: added `findChessboardCornersSBWithMeta` as a last-resort fallback (only reached when SB + all enhancers fail). Patterns where ≥75 % of corners are directly detected are accepted; the rest are flagged as interpolated. Add this count to stats and overl. Stored in YAML with `*_meta` lists .
-- More resources to calibration thread pool to run faster.
+- Calibration corner detection: `findChessboardCornersSBWithMeta` added as last-resort fallback; patterns with ≥75 % directly detected corners are accepted, the rest flagged as interpolated. Partial detection count shown in stats/overlay and persisted in YAML as `*_meta` lists.
+- Calibration thread pool: increased worker count for faster parallel detection.
+- Bugfix: workspace panel image count used intersection (complete pairs only), while title bar and carousel used union (all navigable images); both now use union so single-channel images are counted and missing-pair detection remains meaningful.
+- Bugfix: autosearch progress bar lingered indefinitely after completion when any detection failed (e.g. images missing LWIR); failed detections now advance the progress counter and the bar force-closes when the detection queue goes idle.
 
 ## [0.10.2](https://github.com/enheragu/multiespectral_check/commit/a60f23e) - 2026-06-09
 - Bugfix: workspace scan silently skipped collections whose folder name matched a reserved word (e.g. `Calibration`); now emits a warning and shows a dismissible banner in the workspace panel listing the affected folder names.
@@ -179,3 +181,16 @@ Released with updated documentation and in-app help for external users:
 - UI framework: `ui_mainwindow.py` with menu/toolbar; dialog infrastructure (calibration check, outliers, help); panels for stats and progress.
 - Styling and widgets: unified theming, zoom/pan controls, and responsive layout framework.
 - Documentation: README with project overview and requirements tracking.
+
+
+# Useful notes :)
+
+
+> To commit a new release just add the commit with the version change and everything that needs to be included. Once cotake the short commit tag and add it in the changelog, instead of a new commit add that change to the same commit. Then create the new tag and push it everything to the remote:
+> ```sh
+> git add <files>
+> git commit --amend
+> git tag -a vN.M.P -m "Release vN.M.P"
+> git push origin main
+> git push --tags
+> ```
