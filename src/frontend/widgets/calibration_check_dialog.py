@@ -412,7 +412,8 @@ class CalibrationCheckDialog(QDialog):
             layout.addLayout(form)
             return panel
         samples = payload.get("samples", 0)
-        rejected = payload.get("rejected_views", payload.get("rejected_pairs", 0))
+        _rejected = payload.get("rejected_views", payload.get("rejected_pairs", []))
+        rejected = len(_rejected) if isinstance(_rejected, list) else int(_rejected or 0)
         error = payload.get("reprojection_error")
         sample_str = f"Samples: {samples} used" + (f", {rejected} rejected" if rejected else "")
         header = QLabel(
@@ -636,7 +637,8 @@ class CalibrationCheckDialog(QDialog):
 
         rows = ""
         samples = payload.get("samples", 0)
-        rejected = payload.get("rejected_views", payload.get("rejected_pairs", 0))
+        _rejected = payload.get("rejected_views", payload.get("rejected_pairs", []))
+        rejected = len(_rejected) if isinstance(_rejected, list) else int(_rejected or 0)
         rms = payload.get("reprojection_error")
         summary = f"Samples: {samples} used" + (f", {rejected} rejected" if rejected else "")
         if rms is not None:

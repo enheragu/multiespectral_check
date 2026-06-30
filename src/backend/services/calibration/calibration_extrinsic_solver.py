@@ -38,6 +38,7 @@ class CalibrationExtrinsicSample:
 class _ExtrinsicTaskSignals(QObject):
     completed = pyqtSignal(dict)
     failed = pyqtSignal(str)
+    progress = pyqtSignal(str, str)  # (channel, live status message)
 
     def __init__(self) -> None:
         super().__init__()
@@ -289,15 +290,28 @@ class _CalibrationExtrinsicTask(QRunnable):
                     [visible_points[i] for i in active],
                     camera_lwir, dist_lwir, camera_visible, dist_visible, image_size,
                 )
+                # Detailed line to the terminal; short label to the GUI bar.
+                log_info(
+                    f"[stereo] iter {iteration + 1}/{config.extrinsic_reject_max_iters} · "
+                    f"{len(active)} pairs · RMS {retval:.3f}px"
+                )
+                self.signals.progress.emit("stereo", f"i{iteration + 1} {retval:.2f}px")
                 errs = reproj_for(active, rotation, translation)
                 finite = [e for e in errs if np.isfinite(e)]
                 if not finite:
                     break
-                med = float(np.median(finite))
-                mad = float(np.median([abs(e - med) for e in finite]))
-                threshold = max(
-                    med + config.extrinsic_reject_k_mad * 1.4826 * mad,
-                    config.extrinsic_reject_floor_px,
+                # Ceiling-first: drop absolute-absurd pairs BEFORE the robust stats so gross outliers
+                # don't inflate median/MAD and loosen the band. More aggressive descent; the per-pair
+                # floor still protects genuinely low-error pairs.
+                plausible = [e for e in finite if e <= config.extrinsic_reject_ceiling_px] or finite
+                med = float(np.median(plausible))
+                mad = float(np.median([abs(e - med) for e in plausible]))
+                threshold = min(
+                    max(
+                        med + config.extrinsic_reject_k_mad * 1.4826 * mad,
+                        config.extrinsic_reject_floor_px,
+                    ),
+                    config.extrinsic_reject_ceiling_px,
                 )
                 keep = [i for i, e in zip(active, errs) if e <= threshold]
                 if (
@@ -416,6 +430,7 @@ class CalibrationExtrinsicSolver(QObject):
 
     extrinsicSolved = pyqtSignal(dict)
     extrinsicFailed = pyqtSignal(str)
+    extrinsicProgress = pyqtSignal(str, str)  # (channel, live status message)
 
     def __init__(
         self,
@@ -458,6 +473,7 @@ class CalibrationExtrinsicSolver(QObject):
         )
         task.signals.completed.connect(self._handle_task_completed)
         task.signals.failed.connect(self._handle_task_failed)
+        task.signals.progress.connect(self.extrinsicProgress)
         self._active_task = task
         if self.thread_pool is not None:
             self.thread_pool.start(task)

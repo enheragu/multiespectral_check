@@ -13,6 +13,7 @@ from backend.services.progress_tracker import ProgressTracker
 from backend.services.quality.quality_controller import QualityController, QualityMetrics
 from backend.services.dataset_session import DatasetSession
 from common.reasons import REASON_BLURRY, REASON_MOTION
+from config import get_config
 
 
 @dataclass
@@ -118,13 +119,15 @@ class QualityScanManager(QObject):
     def _finalize_job(self, base: Optional[str], *, success: bool) -> None:
         if not base:
             return
+        # Inform the runner to free the in-flight slot and advance the queue (mirrors
+        # SignatureScanManager). Without this the runner's _pending grows monotonically and,
+        # once max_inflight bases are dispatched, no further images are ever scheduled.
+        self._queue_runner.mark_completed(base)
         self._pending.discard(base)
         if success:
             self._completed.add(base)
         if not self._queue_runner.queued_count and not self._pending:
             self._finalize_marks()
-        else:
-            self._queue_runner._timer.start(self.timer_interval_ms)
         self._update_progress()
 
     def _handle_ready(self, index: int, base: str, lwir: QualityMetrics, vis: QualityMetrics) -> None:
@@ -169,6 +172,13 @@ class QualityScanManager(QObject):
                     lap_values[channel].append(metrics.laplacian_var)
                 if metrics and metrics.anisotropy is not None:
                     aniso_values[channel].append(metrics.anisotropy)
+        # Median sharpness per channel gates motion: a sharp scene can be naturally
+        # anisotropic (horizon, road) without any motion blur, so motion candidates
+        # must also be at-or-below typical sharpness.
+        lap_median = {
+            ch: (float(np.median(vals)) if len(vals) >= get_config().quality_sweep_min_samples else None)
+            for ch, vals in lap_values.items()
+        }
         thresholds = {
             "lap": {
                 ch: self._compute_blur_threshold(vals)
@@ -190,8 +200,15 @@ class QualityScanManager(QObject):
                 aniso = metrics.anisotropy
                 blur_thr = thresholds["lap"].get(channel)
                 motion_thr = thresholds["aniso"].get(channel)
+                med_lap = lap_median.get(channel)
                 is_blur = blur_thr is not None and lap <= blur_thr
-                is_motion = motion_thr is not None and aniso is not None and aniso >= motion_thr
+                is_motion = (
+                    motion_thr is not None
+                    and aniso is not None
+                    and aniso >= motion_thr
+                    and med_lap is not None
+                    and lap <= med_lap
+                )
                 if is_motion:
                     reason = REASON_MOTION
                     break
@@ -216,15 +233,18 @@ class QualityScanManager(QObject):
     """
     @staticmethod
     def _compute_blur_threshold(values: List[float]) -> Optional[float]:
-        if not values:
+        cfg = get_config()
+        if len(values) < cfg.quality_sweep_min_samples:
             return None
         arr = np.array(values, dtype=float)
         med = float(np.median(arr))
         mad = float(np.median(np.abs(arr - med)))
         sigma = 1.4826 * mad if mad > 0 else 0.0
-        # Loosen blur cutoff: median minus 1.5 sigma, but never above 70% of median.
-        thr = med - 1.5 * sigma
-        thr = min(thr, med * 0.7)
+        # Blurry only if BOTH a statistical outlier (median - k*sigma) and a clear
+        # relative drop in sharpness (<= rel_cap * median). The relative cap avoids
+        # marking the bottom of a uniformly-OK distribution as "blurry".
+        thr = med - cfg.quality_blur_k_mad * sigma
+        thr = min(thr, med * cfg.quality_blur_rel_cap)
         return max(thr, 0.0)
 
     """
@@ -232,12 +252,12 @@ class QualityScanManager(QObject):
     """
     @staticmethod
     def _compute_aniso_threshold(values: List[float]) -> Optional[float]:
-        if not values:
+        cfg = get_config()
+        if len(values) < cfg.quality_sweep_min_samples:
             return None
         arr = np.array(values, dtype=float)
         med = float(np.median(arr))
         mad = float(np.median(np.abs(arr - med)))
         sigma = 1.4826 * mad if mad > 0 else 0.0
-        # Slightly more permissive motion cutoff.
-        thr = med + 1.5 * sigma
-        return max(thr, 1.3)
+        thr = med + cfg.quality_motion_k_mad * sigma
+        return max(thr, cfg.quality_motion_floor)

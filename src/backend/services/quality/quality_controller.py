@@ -97,21 +97,11 @@ class QualityController(IndexedQueueController[str, QualityTask]):
         """Set the dataset loader for quality scans."""
         self.loader = loader
 
-    def schedule(self, item: Tuple[int, str], *, force: bool = False, priority: str = "normal") -> bool:
-        """Schedule quality scan for given index and base.
-
-        Args:
-            item: Tuple of (index, base)
-            force: Force rescan even if already scanned
-            priority: Priority level (not used for quality)
-
-        Returns:
-            bool: True if scheduled successfully
-        """
-        index, base = item
-        if not self.loader or not base or index < 0:
-            return False
-        return self.schedule_indexed(index, base, force=force)
+    # Note: scheduling goes through BaseQueueController.schedule((index, base)),
+    # which validates the item via _can_schedule_item below. Do NOT override
+    # schedule() here to call schedule_indexed(): IndexedQueueController.
+    # schedule_indexed() calls back into schedule(), so an override would
+    # recurse infinitely (RecursionError, crashes the app on the first item).
 
     # --------------------------------------------------------------
     # IndexedQueueController abstract method implementations

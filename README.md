@@ -109,6 +109,7 @@ Note that collections are optional and can be used to group specific sets (all c
 ## 📚 Extra documentation
 
 - [GUI_FUNCTIONALITIES.md](docs/GUI_FUNCTIONALITIES.md) — Detailed information about the functionalities included in the GUI.
+- [CALIBRATION.md](docs/CALIBRATION.md) — Chessboard calibration pipeline: corner detection and the intrinsic/extrinsic solve.
 - [DESIGN_PHILOSOPHY.md](docs/DESIGN_PHILOSOPHY.md) — Design and coding philosophy followed (at least tried to) in this project.
 - [CHANGELOG.md](CHANGELOG.md) — Semantic history of the project and the current version baseline used by the About dialog.
 

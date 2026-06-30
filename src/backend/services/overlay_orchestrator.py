@@ -201,6 +201,10 @@ class OverlayOrchestrator(QObject):
                 # Cache hit - use cached aligned pixmaps
                 display_lwir, display_vis = cache[3], cache[4]
                 alignment_transform = cache[7]
+                # Keep the global transform in sync with the displayed base. Readers
+                # (image_viewer corner geometry at 2696/2880) use cache_data["_alignment_transform"],
+                # which otherwise retains the previous base's transform on a cache hit.
+                self.state.cache_data["_alignment_transform"] = alignment_transform
                 log_debug(f"Alignment cache hit for {base}", "ALIGN")
             else:
                 # Cache miss - compute alignment

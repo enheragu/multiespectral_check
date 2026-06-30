@@ -1297,7 +1297,7 @@ def align_fov_with_padding(
 
         log_debug(f"align_fov_with_padding: result lwir={lwir_pm.width()}x{lwir_pm.height()}, vis={vis_pm.width()}x{vis_pm.height()}", "ALIGN")
 
-        return (lwir_pm or lwir_pixmap, vis_pm or vis_pixmap, transform)
+        return (_pixmap_or(lwir_pm, lwir_pixmap), _pixmap_or(vis_pm, vis_pixmap), transform)
 
     except Exception as e:
         log_warning(f"align_fov_with_padding failed: {e}", "ALIGN")
@@ -1496,7 +1496,7 @@ def align_fov_crop(
 
         log_debug(f"align_fov_crop: result {out_w}x{out_h}", "ALIGN")
 
-        return (lwir_pm or lwir_pixmap, vis_pm or vis_pixmap, transform)
+        return (_pixmap_or(lwir_pm, lwir_pixmap), _pixmap_or(vis_pm, vis_pixmap), transform)
 
     except Exception as e:
         log_warning(f"align_fov_crop failed: {e}", "ALIGN")
@@ -1664,7 +1664,7 @@ def align_max_overlap(
 
         log_debug(f"align_max_overlap: result {out_w}x{out_h}", "ALIGN")
 
-        return (lwir_pm or lwir_pixmap, vis_pm or vis_pixmap, transform)
+        return (_pixmap_or(lwir_pm, lwir_pixmap), _pixmap_or(vis_pm, vis_pixmap), transform)
 
     except Exception as e:
         log_warning(f"align_max_overlap failed: {e}", "ALIGN")
@@ -1794,9 +1794,9 @@ def draw_fov_overlay(
         log_debug(f"draw_fov_overlay: result pixmap null={result_pm.isNull()}", "ALIGN")
 
         if source_channel == "lwir":
-            return (result_pm or lwir_pixmap, vis_pixmap)
+            return (_pixmap_or(result_pm, lwir_pixmap), vis_pixmap)
         else:
-            return (lwir_pixmap, result_pm or vis_pixmap)
+            return (lwir_pixmap, _pixmap_or(result_pm, vis_pixmap))
 
     except Exception as e:
         log_warning(f"Failed to draw FOV overlay: {e}", "ALIGN")
@@ -2060,7 +2060,7 @@ def apply_stereo_rectification(
         lwir_pm = _array_to_pixmap(lwir_rect)
         vis_pm = _array_to_pixmap(vis_rect)
 
-        return (lwir_pm or lwir_pixmap, vis_pm or vis_pixmap)
+        return (_pixmap_or(lwir_pm, lwir_pixmap), _pixmap_or(vis_pm, vis_pixmap))
 
     except Exception as e:
         log_warning(f"apply_stereo_rectification failed: {e}", "ALIGN")
@@ -2205,6 +2205,12 @@ def _array_to_pixmap(arr: Any) -> QPixmap:
 
     except Exception:
         return QPixmap()
+
+
+def _pixmap_or(pm: QPixmap, fallback: QPixmap) -> QPixmap:
+    """Return pm unless it is null/empty. A null QPixmap is still truthy in Python, so the
+    idiom `pm or fallback` never actually falls back — callers must test isNull() explicitly."""
+    return pm if pm is not None and not pm.isNull() else fallback
 
 
 def get_alignment_info(

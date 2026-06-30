@@ -5,7 +5,6 @@ Provides:
 - LabelConfig: Schema configuration with classes and attributes
 - LabelStorage: Persistence layer for labels per dataset/channel
 - DetectionModel: Abstract interface for pluggable detection models
-- SchemaConverter: Abstract interface for format conversions (COCO, YOLO, etc.)
 - BBox transformation: Project labels between cameras (computed, not stored)
 
 Use LabelService as the main entry point.
@@ -16,13 +15,9 @@ Module Structure:
     ├── label_types.py      - Core types (Annotation, ImageLabels, etc.)
     ├── label_storage.py    - Persistence layer
     ├── bbox_transform.py   - Cross-channel projection
-    ├── detection/          - Detection model interfaces
-    │   ├── base.py         - DetectionModel ABC, ClassMapper
-    │   └── yolov8.py       - YOLOv8 implementation
-    └── converters/         - Format converters
-        ├── base.py         - SchemaConverter/Exporter ABCs
-        ├── coco.py         - COCO format converter
-        └── yolo.py         - YOLO format converter/exporter
+    └── detection/          - Detection model interfaces
+        ├── base.py         - DetectionModel ABC, ClassMapper
+        └── yolov8.py       - YOLOv8 implementation
 """
 
 # Main service - primary entry point
@@ -49,17 +44,6 @@ from .detection import (
     get_default_coco_mapper,
     detection_to_annotation,
     detections_to_annotations,
-)
-
-# Format converters
-from .converters import (
-    BatchConversionResult,
-    ConversionResult,
-    SchemaConverter,
-    SchemaExporter,
-    CocoToSchemaConverter,
-    YoloToSchemaConverter,
-    SchemaToYoloExporter,
 )
 
 # BBox transformation
@@ -89,14 +73,6 @@ __all__ = [
     "get_default_coco_mapper",
     "detection_to_annotation",
     "detections_to_annotations",
-    # Converters
-    "BatchConversionResult",
-    "ConversionResult",
-    "SchemaConverter",
-    "SchemaExporter",
-    "CocoToSchemaConverter",
-    "YoloToSchemaConverter",
-    "SchemaToYoloExporter",
     # BBox transform
     "project_bbox_to_other_channel",
     "project_annotations_to_other_channel",

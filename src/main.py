@@ -28,6 +28,9 @@ def _apply_style(app: QApplication) -> None:
         app.setStyle(style)
     from frontend.widgets import style as ui_style
 
+    # Force a light palette BEFORE the stylesheet so widgets the stylesheet does not target
+    # (QSpinBox, QComboBox, …) never inherit a dark OS theme (black-on-black inputs).
+    app.setPalette(ui_style.light_palette())
     ui_style.apply_app_style(app)
     # print(f"Qt styles available: {available}; using: {prefer}")
 

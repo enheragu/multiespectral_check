@@ -13,7 +13,9 @@ from PyQt6.QtWidgets import QMessageBox
 
 from backend.services.calibration.calibration_extrinsic_solver import CalibrationExtrinsicSample
 from backend.services.calibration.calibration_solver import CalibrationSample
+from backend.services.calibration.view_selection import ViewCandidate, select_calibration_views
 from common.log_utils import log_debug
+from config import get_config
 
 if TYPE_CHECKING:
     from backend.services.dataset_session import DatasetSession
@@ -263,39 +265,64 @@ class CalibrationWorkflow(QObject):
                     counts[channel] += 1
         return counts
 
-    def collect_calibration_samples(self) -> List[CalibrationSample]:
-        """Collect calibration samples for intrinsic calibration."""
-        samples: List[CalibrationSample] = []
+    def collect_calibration_samples(self, max_views: Optional[int] = None) -> List[CalibrationSample]:
+        """Collect calibration samples for intrinsic calibration.
 
+        If ``max_views`` is set, each channel is capped to that many views by a
+        priority selection (direct corners > both-channel detection > image/pose
+        coverage) before the solve — see ``view_selection.select_calibration_views``.
+        ``calibrateCamera`` cost is superlinear in view count, so this keeps the
+        same precision in minutes instead of ~1h on hundreds of views.
+        """
         # Get image bases from loader or collection
         image_bases = self.session.get_all_bases()
         if not image_bases:
-            return samples
+            return []
 
+        # Build lightweight per-channel candidate records (corners loaded once per
+        # base; no source images loaded). Selection is then a pure function per channel.
         out_intrinsic = self.state.calibration_outliers_intrinsic
+        per_channel: Dict[str, List[ViewCandidate]] = {"lwir": [], "visible": []}
         for base in image_bases:
             if base not in self.state.calibration_marked:
                 continue
             bucket = self.session.get_corners(base) or {}  # Lazy load corners
-            # Get image_size from corners file
             image_sizes = bucket.get("image_size", {})
+            results = self.state.calibration_results.get(base, {})
+            in_both = results.get("lwir") is True and results.get("visible") is True
             for channel in ("lwir", "visible"):
                 if base in out_intrinsic.get(channel, set()):
                     continue
                 points = bucket.get(channel)
                 if not points:
                     continue
-                # Get image_size for this channel
                 size = image_sizes.get(channel)
                 if not size:
                     # Skip if no image_size available (need to re-run chessboard detection)
                     continue
+                per_channel[channel].append(
+                    ViewCandidate(
+                        key=(base, channel),
+                        corners=points,
+                        image_size=tuple(size),  # type: ignore[arg-type]
+                        is_direct=bucket.get(f"{channel}_meta") is None,
+                        in_both=in_both,
+                    )
+                )
+
+        pattern_size = get_config().chessboard_size
+        samples: List[CalibrationSample] = []
+        for channel, candidates in per_channel.items():
+            if max_views and max_views > 0:
+                candidates = select_calibration_views(candidates, max_views, pattern_size=pattern_size)
+            for cand in candidates:
+                base, ch = cand.key  # type: ignore[misc]
                 samples.append(
                     CalibrationSample(
                         base=base,
-                        channel=channel,
-                        corners=points,
-                        image_size=tuple(size),  # type: ignore[arg-type]
+                        channel=ch,
+                        corners=cand.corners,
+                        image_size=tuple(cand.image_size),  # type: ignore[arg-type]
                     )
                 )
         return samples
@@ -320,16 +347,22 @@ class CalibrationWorkflow(QObject):
                 count += 1
         return count
 
-    def collect_extrinsic_samples(self) -> List[CalibrationExtrinsicSample]:
-        """Collect samples for extrinsic calibration."""
-        samples: List[CalibrationExtrinsicSample] = []
+    def collect_extrinsic_samples(self, max_views: Optional[int] = None) -> List[CalibrationExtrinsicSample]:
+        """Collect samples for extrinsic calibration.
 
-        # Get image bases from loader or collection
+        If ``max_views`` is set, the candidate pairs are capped to that many by the same
+        priority selection used for intrinsic (direct corners > board-pose coverage). A pair
+        is "direct" only if NEITHER channel was interpolated; ``in_both`` is always True here
+        (pairs are both-detected by definition), so it is a no-op preference. stereoCalibrate
+        is superlinear in pair count, so this keeps the first (full-set) rejection round fast.
+        """
         image_bases = self.session.get_all_bases()
         if not image_bases:
-            return samples
+            return []
 
         out_extrinsic = self.state.calibration_outliers_extrinsic
+        by_base: Dict[str, CalibrationExtrinsicSample] = {}
+        candidates: List[ViewCandidate] = []
         for base in image_bases:
             if base not in self.state.calibration_marked or base in out_extrinsic:
                 continue
@@ -342,13 +375,28 @@ class CalibrationWorkflow(QObject):
             vis_path = self.session.get_image_path(base, "visible")
             if not lwir_path or not vis_path or not lwir_path.exists() or not vis_path.exists():
                 continue
-            samples.append(
-                CalibrationExtrinsicSample(
-                    base=base,
-                    lwir_path=lwir_path,
-                    visible_path=vis_path,
-                    lwir_corners=lwir_points,
-                    visible_corners=visible_points,
-                )
+            by_base[base] = CalibrationExtrinsicSample(
+                base=base,
+                lwir_path=lwir_path,
+                visible_path=vis_path,
+                lwir_corners=lwir_points,
+                visible_corners=visible_points,
             )
-        return samples
+            if max_views and max_views > 0:
+                size = (bucket.get("image_size", {}) or {}).get("lwir") or (640, 480)
+                candidates.append(
+                    ViewCandidate(
+                        key=base,
+                        corners=lwir_points,
+                        image_size=tuple(size),  # type: ignore[arg-type]
+                        is_direct=bucket.get("lwir_meta") is None and bucket.get("visible_meta") is None,
+                        in_both=True,
+                    )
+                )
+
+        if max_views and max_views > 0 and len(by_base) > max_views:
+            selected = select_calibration_views(
+                candidates, max_views, pattern_size=get_config().chessboard_size
+            )
+            return [by_base[cand.key] for cand in selected]  # type: ignore[index]
+        return list(by_base.values())

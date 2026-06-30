@@ -1,11 +1,38 @@
 # Changelog
 
+All notable changes to this project are documented in this file. The format follows the spirit of
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — an `[Unreleased]` section plus
+versioned, dated entries in reverse-chronological order, SemVer — but changes are listed as
+flat bullets prefixed by type (`Bugfix:`, `Feature:`, …) rather than grouped into
+Added/Changed/Fixed sections.
+
 Note: Current runtime version is defined in [src/config.py](src/config.py).
 Each release links to its git tag.
 
 Versioning note: minor releases mark visible feature jumps; patch releases cover bugfixes and maintenance updates, including docs/help polish that does not change behavior.
 
 ## [Unreleased]
+
+## [0.11.0](https://github.com/enheragu/multiespectral_check/releases/tag/v0.11.0) - 2026-06-20
+- Calibration: the intrinsic and stereo solves show live progress (round + RMS) instead of an opaque spinner.
+- Calibration: the compute popups can cap how many views/pairs a solve uses (or "Use all"), keeping the best by priority. Solving is superlinear while precision saturates early, so large sets calibrate in minutes instead of ~1h.
+- Calibration: added an absolute reprojection-error ceiling on top of the robust median+MAD rejection, so absurd views/pairs (e.g. motion-blurred LWIR) are always dropped even when the whole distribution is poor; config-tunable (`*_reject_ceiling_px`).
+- Calibration: solving a collection removes any per-child calibration / error-cache files (the collection's calibration lives at its root), so a child opened standalone can't load stale matrices; standalone datasets are untouched.
+- Calibration: the workspace default calibration is stored as paths relative to the workspace root, so it survives the workspace being moved or remounted; a default whose files are missing now logs a warning instead of silently falling back to none.
+- Calibration detection: replaced global contrast equalization with adaptive local/per-image enhancers so faint boards against high-contrast backgrounds aren't washed out (~11% faster per image, no detection regressions); added `[DETECT]` per-stage logging to reveal whether a board is lost at detection or at acceptance.
+- Theme: force a light palette at startup so inputs no longer render black-on-black under a dark OS theme.
+- Cleanup: removed dead code with no consumers (verified) — `calibration_mixin.py`, `cache_consistency.py`, `filter_workflow_mixin.py`, the `labels/converters/` package, and several orphaned helpers/guards/imports.
+- Bugfix (critical): the blur/motion sweep crashed the app on the first image (`RecursionError` from a self-recursing `schedule()`; hit every dataset, not a RAM/size issue) and, once past that, stalled after `max_inflight` images (the runner's in-flight set never drained). Both fixed.
+- Blur/motion sweep: less noisy auto-marking — motion now also requires at-or-below-median sharpness (a sharp horizon is no longer flagged as motion), blur needs a clearer relative sharpness drop, marking is skipped below a minimum sample count, and thresholds are config-tunable (`quality_*`). It suggests review candidates, not a ground-truth blur gate.
+- Bugfix: loading a dataset or switching workspace now fully unloads the previous collection/session (loader, collection, dataset path), instead of leaving a foreign set loaded — fixes e.g. a freshly-opened dataset showing hundreds of foreign `missing_pair` marks.
+- Bugfix: two alignment rendering bugs — a null `QPixmap` is truthy so `pm or original` fallbacks never fired (now via `isNull()`), and an alignment cache hit didn't refresh the global transform (corner geometry could use the previous image's).
+- Bugfix: two cache-persistence bugs — dataset load reset `sweep_flags` to all-False (clobbering hydrated values), and a flush queued during another flush was re-queued forever and never written (state could be lost on close).
+- Bugfix: workspace "Delete by reason" and trash-restore ignored the unified `{reason, auto}` mark format (matched nothing / didn't reinstate marks); restore now also preserves the `auto` flag.
+- Bugfix: "Label dataset" crashed with `AttributeError` on a never-assigned `self.config`; now uses the module-level `config` singleton.
+- Bugfix: editing a workspace note dropped the dataset's `labels_total`; now uses `dataclasses.replace` to preserve all fields.
+- Bugfix: collection mark/calibration distribution split namespaced bases inconsistently (first vs last `/`); all sites now route through `_split_base`, fixing misrouting on nested layouts.
+- Bugfix: `update_annotation` could edit a different box by falling back to the id as a list index; now returns False on an unknown id.
+- Bugfix: calibration report summary listed every rejected view name instead of the count, overflowing the dialog.
 
 ## [0.10.4](https://github.com/enheragu/multiespectral_check/releases/tag/v0.10.4) - 2026-06-10
 - Calibration detection: ROI-based SB fallback rescues boards with complex backgrounds (glass facades, tiled surfaces); classic algo locates board, SB runs on tight crop.

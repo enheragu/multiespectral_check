@@ -41,39 +41,3 @@ def require_images(viewer: "ImageViewer", title: str = "Action") -> bool:
         QMessageBox.information(viewer, title, "Load a dataset first.")
         return False
     return True
-
-
-def require_calibration_data(viewer: "ImageViewer", title: str = "Calibration") -> bool:
-    """Check if calibration data exists. Show warning if not.
-
-    Args:
-        viewer: ImageViewer instance
-        title: Dialog title for the warning
-
-    Returns:
-        True if calibration data exists, False otherwise
-    """
-    if not any(data for data in viewer.state.cache_data["_matrices"].values()):
-        QMessageBox.information(
-            viewer,
-            title,
-            "No calibration data available. Run calibration first.",
-        )
-        return False
-    return True
-
-
-def require_dataset_path(viewer: "ImageViewer", title: str = "Action") -> bool:
-    """Check if dataset path is set. Show warning if not.
-
-    Args:
-        viewer: ImageViewer instance
-        title: Dialog title for the warning
-
-    Returns:
-        True if dataset path is set, False otherwise
-    """
-    if not viewer.session.dataset_path:
-        QMessageBox.information(viewer, title, "Load a dataset first.")
-        return False
-    return True

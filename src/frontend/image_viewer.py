@@ -450,8 +450,10 @@ class ImageViewer(QMainWindow):
             config.chessboard_size,
             self.thread_pool,
         )
+        self._solve_progress: Dict[str, str] = {}
         self.calibration_solver.calibrationSolved.connect(self._handle_calibration_solved)
         self.calibration_solver.calibrationFailed.connect(self._handle_calibration_solver_failed)
+        self.calibration_solver.calibrationProgress.connect(self._on_calibration_progress)
 
         self.calibration_extrinsic_solver = CalibrationExtrinsicSolver(
             self.session,
@@ -460,6 +462,7 @@ class ImageViewer(QMainWindow):
         )
         self.calibration_extrinsic_solver.extrinsicSolved.connect(self._handle_extrinsic_solved)
         self.calibration_extrinsic_solver.extrinsicFailed.connect(self._handle_extrinsic_failed)
+        self.calibration_extrinsic_solver.extrinsicProgress.connect(self._on_extrinsic_progress)
 
         self.signature_manager.signatureReady.connect(self._handle_signature_ready)
         self.signature_manager.signatureFailed.connect(self._handle_signature_failed)
@@ -1338,6 +1341,12 @@ class ImageViewer(QMainWindow):
         dir_path = QFileDialog.getExistingDirectory(self, "Select workspace directory", start_dir)
         if not dir_path:
             return
+        # Close the dataset/collection from the previous workspace and show a clean screen.
+        # Flush first so any pending changes of the previous dataset are saved before reset.
+        if self.session.cache_dirty:
+            self._flush_cache(wait=True)
+        self._reset_runtime_state()
+        self._show_empty_state()
         self.workspace_dir = dir_path
         try:
             get_cache_coordinator().set_workspace(Path(dir_path))
@@ -1495,9 +1504,10 @@ class ImageViewer(QMainWindow):
             session = DatasetSession()
             if not session.load(info.path):
                 continue
-            # Filter marks by reason - only keep matching ones temporarily
+            # Filter marks by reason - only keep matching ones temporarily.
+            # marks values are unified dicts {"reason": str, "auto": bool}; compare on "reason".
             marks = session.state.cache_data.get("marks", {})
-            to_delete = {base: r for base, r in marks.items() if r == reason}
+            to_delete = {base: r for base, r in marks.items() if isinstance(r, dict) and r.get("reason") == reason}
             if to_delete:
                 # Temporarily replace marks with filtered set, delete, then restore
                 original_marks = dict(marks)
@@ -3436,7 +3446,7 @@ class ImageViewer(QMainWindow):
         channel = self._label_channel()
         bases = list(loader.image_bases)
         total = len(bases)
-        task_id = self.config.progress_task_label_dataset
+        task_id = config.progress_task_label_dataset
         self.progress_tracker.start(task_id, "Labelling dataset…", total)
         QApplication.processEvents()
 
@@ -3530,7 +3540,11 @@ class ImageViewer(QMainWindow):
         # Check if there's pending work and start it
         pending = self._cache_flush_coordinator.mark_completed()
         if pending is not None:
-            self._dispatch_cache_flush(pending)
+            # mark_completed() kept inflight=True for this queued payload, so start its runnable
+            # directly. Routing back through _dispatch_cache_flush() would call request_flush(),
+            # see inflight=True, and re-queue it forever (never dispatched) -> lost on close.
+            runnable = CacheFlushRunnable(pending, self._cache_flush_notifier)
+            self.thread_pool.start(runnable)
 
     def _wait_for_cache_flush(self) -> None:
         if self._cache_flush_coordinator.is_idle():
@@ -3765,6 +3779,19 @@ class ImageViewer(QMainWindow):
             # Mark cache as dirty to save new auto-marked images
             self._mark_cache_dirty()
 
+    def _on_calibration_progress(self, channel: str, message: str) -> None:
+        """Live per-channel status during the intrinsic solve (channels run in parallel).
+
+        Kept short so it fits the progress bar; the solver logs the full per-iteration
+        detail (view count, etc.) to the terminal.
+        """
+        self._solve_progress[channel] = message
+        short = {"lwir": "LWIR", "visible": "VIS"}
+        label = " · ".join(
+            f"{short.get(ch, ch.upper())} {msg}" for ch, msg in self._solve_progress.items()
+        )
+        self.progress_tracker.set_busy(config.progress_task_solver, label)
+
     def _handle_calibration_solved(self, payload: Dict[str, Any]) -> None:
         self.progress_tracker.finish(config.progress_task_solver)
         self.cancel_controller.unregister(config.progress_task_solver)
@@ -3773,6 +3800,11 @@ class ImageViewer(QMainWindow):
         if not channels:
             self._safe_status_message("Calibration solver returned no data.", 4000)
             return
+        # A collection writes its calibration at the collection root; drop any stale per-child
+        # calibration so a child opened standalone does not silently load its own old matrices.
+        removed = self.session.clear_child_calibration_files()
+        if removed:
+            self._safe_status_message(f"Cleared {removed} stale child calibration file(s).", 4000)
         auto_rejected: Dict[str, Set[str]] = {"lwir": set(), "visible": set(), "stereo": set()}
         for channel, data in channels.items():
             if not isinstance(data, dict):
@@ -4012,10 +4044,16 @@ class ImageViewer(QMainWindow):
         self._update_cancel_button()
         self._safe_status_message(f"Calibration solve failed: {message}", 6000)
 
+    def _on_extrinsic_progress(self, channel: str, message: str) -> None:
+        """Live status during the extrinsic (stereo) solve."""
+        self.progress_tracker.set_busy(config.progress_task_extrinsic, f"Stereo · {message}")
+
     def _handle_extrinsic_solved(self, payload: Dict[str, Any]) -> None:
         self.progress_tracker.finish(config.progress_task_extrinsic)
         self.cancel_controller.unregister(config.progress_task_extrinsic)
         self._update_cancel_button()
+        # Same as intrinsic: collection extrinsic lives at the root, so drop stale per-child files.
+        self.session.clear_child_calibration_files()
         snapshot = dict(payload)
         file_path = snapshot.pop("file_path", None)
         per_pair = snapshot.pop("per_pair_errors", None)
@@ -4260,6 +4298,68 @@ class ImageViewer(QMainWindow):
             self.progress_tracker.finish(task_id)
             self._safe_status_message("No images queued for pattern detection", 3000)
 
+    def _ask_view_cap(
+        self, available: int, default_cap: int, *, noun: str, detail: str, minimum: int
+    ) -> Tuple[bool, Optional[int]]:
+        """Shared popup to cap how many views/pairs a calibration solve uses.
+
+        Explains the time/precision trade-off and lets the user pick a number or tick
+        "Use all" (disables the input → no cap). Returns (ok, max_views): ok=False if the
+        dialog is cancelled; max_views=None means no cap (use every candidate).
+        """
+        from PyQt6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox,
+                                     QHBoxLayout, QSpinBox, QVBoxLayout)
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Compute calibration")
+        layout = QVBoxLayout(dialog)
+        message = QLabel(detail)
+        message.setWordWrap(True)
+        layout.addWidget(message)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel(f"{noun} to keep:"))
+        spin = QSpinBox()
+        spin.setRange(min(minimum, available), max(1, available))
+        spin.setValue(min(default_cap, available))
+        row.addWidget(spin)
+        use_all = QCheckBox("Use all")
+        use_all.toggled.connect(spin.setDisabled)
+        row.addWidget(use_all)
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return False, None
+        return True, (None if use_all.isChecked() else spin.value())
+
+    def _ask_calibration_view_cap(self, channel_counts: Dict[str, int]) -> Tuple[bool, Optional[int]]:
+        """Intrinsic view-cap popup (per channel). Delegates to _ask_view_cap."""
+        available = max(channel_counts.get("lwir", 0), channel_counts.get("visible", 0))
+        detail = (
+            f"Up to {channel_counts.get('lwir', 0)} LWIR and {channel_counts.get('visible', 0)} visible candidate view(s).\n\n"
+            "calibrateCamera time grows faster than linearly with the view count, but precision "
+            "saturates from ~30-50 views — keeping ~100-150 well-spread views gives the same result "
+            "in minutes instead of ~1 hour on the full set. Views are picked by priority: direct "
+            "(non-interpolated) corners, detected in both channels, and spread across image position "
+            "and board pose.\n\n"
+            "Outliers are still removed iteratively after the solve (robust median + MAD)."
+        )
+        return self._ask_view_cap(
+            available,
+            config.intrinsic_max_views_default,
+            noun="Views per channel",
+            detail=detail,
+            minimum=config.intrinsic_reject_min_views,
+        )
+
     def _handle_compute_calibration_action(self) -> None:
         if not require_dataset(self, "Calibration"):
             return
@@ -4285,21 +4385,10 @@ class ImageViewer(QMainWindow):
             )
             return
 
-        # Show confirmation BEFORE loading corners
-        reply = QMessageBox.question(
-            self,
-            "Compute calibration",
-            (
-                f"Compute camera matrices from up to "
-                f"{channel_counts.get('lwir', 0)} LWIR and {channel_counts.get('visible', 0)} visible candidate view(s)?\n\n"
-                "Corners are loaded from disk. Views whose reprojection error is an outlier are "
-                "removed iteratively (robust median + MAD) and the camera matrix refit, so the "
-                "final view count may be lower. Removed views appear in the calibration outlier panel."
-            ),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
+        # Confirm + view-cap popup: explain the time/precision trade-off; the user picks a
+        # per-channel cap, or ticks "Use all" to disable the cap and keep every view.
+        ok, max_views = self._ask_calibration_view_cap(channel_counts)
+        if not ok:
             return
 
         # Clear stale intrinsic outlier flags — the new solve will re-determine them.
@@ -4310,8 +4399,8 @@ class ImageViewer(QMainWindow):
                 entry["outlier"]["visible"] = False
         self._mark_cache_dirty()
 
-        # NOW load corners and collect samples
-        samples = self.calibration_workflow.collect_calibration_samples()
+        # NOW load corners and collect samples (capped per channel by the chosen view count)
+        samples = self.calibration_workflow.collect_calibration_samples(max_views=max_views)
         if not samples:
             QMessageBox.information(
                 self,
@@ -4321,6 +4410,7 @@ class ImageViewer(QMainWindow):
             return
 
         if self.calibration_solver.solve(samples):
+            self._solve_progress = {}
             self.progress_tracker.set_busy(
                 config.progress_task_solver,
                 "Computing calibration matrices…",
@@ -4356,18 +4446,25 @@ class ImageViewer(QMainWindow):
             )
             return
 
-        # Show confirmation BEFORE loading corners
-        reply = QMessageBox.question(
-            self,
-            "Compute extrinsic transform",
-            f"Compute LWIR ↔ Visible transform from up to {sample_count} candidate pair(s)?\n\n"
-            "Corners are loaded from disk. Pairs whose stereo reprojection error is an outlier are "
-            "removed iteratively (robust median + MAD) and the transform refit, so the final pair "
-            "count may be lower. Removed pairs appear in the calibration outlier panel.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
+        # Confirm + view-cap popup (same as intrinsic): stereoCalibrate is superlinear (~quadratic)
+        # in pair count, so let the user cap the pairs (or tick "Use all"). Outlier rejection still runs.
+        detail = (
+            f"Up to {sample_count} candidate pair(s) detected on both cameras.\n\n"
+            "stereoCalibrate time grows faster than linearly with the pair count (≈quadratic), while "
+            "the rigid transform saturates with far fewer good pairs — keeping ~200 well-spread pairs "
+            "is much faster on large sets. Pairs are picked by priority: direct (non-interpolated) "
+            "corners and spread across board pose.\n\n"
+            "Pairs whose stereo reprojection error is an outlier are still removed iteratively after "
+            "the solve (robust median + MAD); removed pairs appear in the calibration outlier panel."
         )
-        if reply != QMessageBox.StandardButton.Yes:
+        ok, max_views = self._ask_view_cap(
+            sample_count,
+            config.extrinsic_max_pairs_default,
+            noun="Pairs",
+            detail=detail,
+            minimum=config.extrinsic_reject_min_pairs,
+        )
+        if not ok:
             return
 
         # Clear stale extrinsic outlier flags — the new solve will re-determine them.
@@ -4377,8 +4474,8 @@ class ImageViewer(QMainWindow):
                 entry["outlier"]["stereo"] = False
         self._mark_cache_dirty()
 
-        # NOW load corners
-        samples = self.calibration_workflow.collect_extrinsic_samples()
+        # NOW load corners (capped by the chosen pair count)
+        samples = self.calibration_workflow.collect_extrinsic_samples(max_views=max_views)
         if len(samples) < 3:
             QMessageBox.information(
                 self,

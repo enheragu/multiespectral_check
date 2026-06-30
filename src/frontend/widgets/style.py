@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Tuple
 
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QPalette
 from PyQt6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 _MEDIA_DIR = Path(__file__).parent.parent / "resources" / "media"
@@ -210,6 +210,34 @@ def section_title_style() -> str:
 
 def monospace_text_style() -> str:
     return MONO_TEXT_STYLE.replace("12.5px", BODY_FONT_SIZE)
+
+
+def light_palette() -> QPalette:
+    """Fixed light QPalette so the app renders identically under any OS theme.
+
+    The stylesheet (app_stylesheet) explicitly colors most widgets, but widgets it does
+    NOT target (QSpinBox, QComboBox, QAbstractSpinBox, …) otherwise inherit the SYSTEM
+    palette — under a dark OS theme that gives them a dark background while the stylesheet's
+    global dark text stays dark, i.e. unreadable black-on-black. Forcing a light palette
+    closes that gap at the root, without per-widget QSS that can break spin-box arrows.
+    """
+    pal = QPalette()
+    pal.setColor(QPalette.ColorRole.Window, QColor(APP_BG))
+    pal.setColor(QPalette.ColorRole.WindowText, QColor(TEXT_PRIMARY))
+    pal.setColor(QPalette.ColorRole.Base, QColor(TABLE_BG))
+    pal.setColor(QPalette.ColorRole.AlternateBase, QColor(TABLE_ALT_BG))
+    pal.setColor(QPalette.ColorRole.Text, QColor(TEXT_PRIMARY))
+    pal.setColor(QPalette.ColorRole.Button, QColor(BUTTON_BG))
+    pal.setColor(QPalette.ColorRole.ButtonText, QColor(TEXT_PRIMARY))
+    pal.setColor(QPalette.ColorRole.ToolTipBase, QColor(GROUP_BG))
+    pal.setColor(QPalette.ColorRole.ToolTipText, QColor(TEXT_PRIMARY))
+    pal.setColor(QPalette.ColorRole.Highlight, QColor(TABLE_SELECT_BG))
+    pal.setColor(QPalette.ColorRole.HighlightedText, QColor(TABLE_SELECT_FG))
+    pal.setColor(QPalette.ColorRole.PlaceholderText, QColor(TEXT_CAPTION))
+    disabled = QColor("#8d95a3")
+    for role in (QPalette.ColorRole.Text, QPalette.ColorRole.WindowText, QPalette.ColorRole.ButtonText):
+        pal.setColor(QPalette.ColorGroup.Disabled, role, disabled)
+    return pal
 
 
 def apply_app_style(app) -> None:

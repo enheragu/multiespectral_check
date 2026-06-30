@@ -269,7 +269,7 @@ class Collection:
         for prefixed_base, mark_entry in marks.items():
             if "/" not in prefixed_base:
                 continue
-            child_key, local_base = prefixed_base.split("/", 1)
+            child_key, local_base = self._split_base(prefixed_base)
             child_marks.setdefault(child_key, {})[local_base] = mark_entry
 
         # Process calibration data - only marked entries (presence = marked)
@@ -277,7 +277,7 @@ class Collection:
         for prefixed_base in calibration_marked:
             if "/" not in prefixed_base:
                 continue
-            child_key, local_base = prefixed_base.split("/", 1)
+            child_key, local_base = self._split_base(prefixed_base)
             # Get full calibration entry if available, or create minimal one
             calib_entry = calibration_data.get(prefixed_base, {})
             # Presence in dict = marked (no explicit field needed)

@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from PyQt6.QtGui import QImage, QPixmap
 
 from config import get_config
+from common.log_utils import log_debug
 
 try:  # pragma: no cover - optional dependency
     import cv2  # type: ignore
@@ -366,8 +367,10 @@ def _try_with_meta(
         m = meta_arr.ravel()
         n_direct = int((m > _META_DIRECT_THRESH).sum())
         if n_direct < min_direct:
+            log_debug(f"stage=withmeta result=discard_lowdirect direct={n_direct}/{cols * rows} min={min_direct}", "DETECT")
             continue
         if _has_bad_interpolation_structure(m, cols, rows):
+            log_debug("stage=withmeta result=discard_badstruct", "DETECT")
             continue
         # Before returning the interpolated result, attempt SB on the tight ROI.
         # WithMeta corners give precise board bounds — SB on that crop may detect
@@ -404,10 +407,13 @@ def _try_with_meta(
                 norm_sb: List[List[float]] = [
                     [float(p[0]) / w, float(p[1]) / h] for p in c_full
                 ]
+                log_debug("stage=withmeta_refine result=found_direct", "DETECT")
                 return True, norm_sb, None, fallback_debug
         normalized: List[List[float]] = [[float(p[0][0]) / w, float(p[0][1]) / h] for p in corners]
         meta: List[float] = m.tolist()
+        log_debug(f"stage=withmeta result=found_interp direct={n_direct}/{cols * rows}", "DETECT")
         return True, normalized, meta, fallback_debug
+    log_debug("stage=none result=not_found", "DETECT")
     return False, None, None, fallback_debug
 
 
@@ -454,17 +460,26 @@ def _detect_chessboard_from_array(
 ) -> Tuple[Optional[bool], Optional[List[List[float]]], CalibrationMeta, Optional[CalibrationDebugPayload]]:
     found, corners, _, debug_payload = _run_chessboard_detection(array, pattern_size, debug)
     if found:
+        log_debug("stage=base_sb result=found", "DETECT")
         return found, corners, None, debug_payload
     fallback_debug: Optional[CalibrationDebugPayload] = debug_payload
     cache = _ColorSpaceCache(array)
-    # Fast reject: skip the expensive enhancer pipeline for images with no grid structure.
-    # If both levels of the fast check fail, we still attempt a single cheap WithMeta call as a
-    # last resort — it rescues boards too small or too tilted for the old algorithm at low
-    # resolution but visible to SBWithMeta at full resolution (e.g., tilted boards far away).
-    # WithMeta on a true no-pattern image fails in ~0.5s; this cost is acceptable given
-    # that calibration scans are infrequent.
+    # Fast reject: skip the expensive pipeline for images with no grid structure. If both levels
+    # of the fast check fail, we still attempt a single cheap WithMeta call as a last resort — it
+    # rescues boards too small or too tilted for the old algorithm at low resolution but visible to
+    # SBWithMeta at full resolution (e.g., tilted boards far away).
     if not _fast_pattern_present(array, pattern_size):
+        log_debug("stage=fast_precheck result=rejected", "DETECT")
         return _try_with_meta(array, pattern_size, fallback_debug, cache)
+    # ROI-first: locate the board with the classic detector and run SB on the tight crop BEFORE the
+    # global enhancer pipeline. On success this skips the whole 9-transform pass; and because the
+    # global enhancers can wash out a locally-faint board, the localized path is tried first.
+    roi_found, roi_corners, roi_meta, roi_debug = _try_roi_based_sb(
+        array, pattern_size, fallback_debug, cache
+    )
+    if roi_found:
+        log_debug("stage=roi_sb result=found", "DETECT")
+        return roi_found, roi_corners, roi_meta, roi_debug
     if not _ENHANCEMENT_PIPELINE:
         return _try_with_meta(array, pattern_size, fallback_debug, cache)
     executor = _get_enhancement_executor()
@@ -488,16 +503,10 @@ def _detect_chessboard_from_array(
             fallback_debug = enh_debug
     if result:
         r_found, r_corners, r_meta, r_debug, r_label = result
+        log_debug(f"stage=enhancer:{r_label} result=found", "DETECT")
         if debug and r_debug is not None and r_label != "base":
             r_debug.setdefault("notes", []).append(f"Enhanced via {r_label}")
         return r_found, r_corners, r_meta, r_debug
-    # ROI-crop fallback: use old algorithm to isolate board region, re-run SB there.
-    # Rescues images where SB fails due to complex backgrounds but the board is fully visible.
-    roi_found, roi_corners, roi_meta, roi_debug = _try_roi_based_sb(
-        array, pattern_size, fallback_debug, cache
-    )
-    if roi_found:
-        return roi_found, roi_corners, roi_meta, roi_debug
     return _try_with_meta(array, pattern_size, fallback_debug, cache)
 
 
@@ -651,46 +660,71 @@ def _apply_visible_boost(array: Any, cache: Optional[_ColorSpaceCache] = None) -
         h, s, v = cv2.split(hsv)
         clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(6, 6))
         v = clahe.apply(v)
-        s = cv2.equalizeHist(s)
+        # Saturation left untouched: equalizeHist(s) is global and does not help a B/W board.
         boosted = cv2.merge((h, s, v))
         return cv2.cvtColor(boosted, cv2.COLOR_HSV2RGB)
     except Exception:  # noqa: BLE001
         return None
 
 
-def _apply_gray_equalize(array: Any, cache: Optional[_ColorSpaceCache] = None) -> Optional[Any]:
-    if cv2 is None:
+def _apply_local_norm(array: Any, cache: Optional[_ColorSpaceCache] = None) -> Optional[Any]:
+    """Local contrast normalization: (x - local_mean) / (local_std + floor).
+
+    Adaptive replacement for global equalizeHist. Reveals the board's local checker contrast
+    regardless of global brightness, so a dim board against a bright background is no longer
+    compressed into a narrow band. The std floor (8) is a contrast limit that prevents noise
+    blow-up in flat regions (which would otherwise create false saddle points for SB).
+    """
+    if cv2 is None or np is None:
         return None
     try:
         gray = cache.gray() if cache else cv2.cvtColor(array, cv2.COLOR_RGB2GRAY)
         if gray is None:
             return None
-        eq = cv2.equalizeHist(gray)
-        return cv2.cvtColor(eq, cv2.COLOR_GRAY2RGB)
+        f = gray.astype(np.float32)
+        local_mean = cv2.GaussianBlur(f, (0, 0), sigmaX=11.0)
+        local_sq = cv2.GaussianBlur(f * f, (0, 0), sigmaX=11.0)
+        local_std = np.sqrt(np.maximum(local_sq - local_mean * local_mean, 0.0))
+        norm = (f - local_mean) / (local_std + 8.0)
+        out = np.clip(norm * 40.0 + 128.0, 0, 255).astype(np.uint8)
+        return cv2.cvtColor(out, cv2.COLOR_GRAY2RGB)
     except Exception:  # noqa: BLE001
         return None
 
 
-def _apply_contrast_stretch(array: Any, cache: Optional[_ColorSpaceCache] = None) -> Optional[Any]:
-    if cv2 is None:
-        return None
-    try:
-        lab = cache.lab() if cache else cv2.cvtColor(array, cv2.COLOR_RGB2LAB)
-        if lab is None:
-            return None
-        l, a, b = cv2.split(lab)
-        stretched = cv2.normalize(l, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
-        merged = cv2.merge((stretched, a, b))
-        return cv2.cvtColor(merged, cv2.COLOR_LAB2RGB)
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def _apply_gamma_boost(array: Any, cache: Optional[_ColorSpaceCache] = None, gamma: float = 0.7) -> Optional[Any]:
+def _apply_illumination_flatten(array: Any, cache: Optional[_ColorSpaceCache] = None) -> Optional[Any]:
+    """Homomorphic illumination flattening: divide by a large-sigma blur to remove slow lighting
+    gradients, then a final CLAHE. Adaptive replacement for the global LAB min-max stretch, which a
+    single bright pixel (sky, window, reflection) could dominate, leaving the board flat.
+    """
     if cv2 is None or np is None:
         return None
     try:
-        gamma = max(0.05, float(gamma))
+        gray = cache.gray() if cache else cv2.cvtColor(array, cv2.COLOR_RGB2GRAY)
+        if gray is None:
+            return None
+        f = gray.astype(np.float32) + 1.0
+        illum = cv2.GaussianBlur(f, (0, 0), sigmaX=25.0) + 1.0
+        flat = np.clip(f / illum * 128.0, 0, 255).astype(np.uint8)
+        out = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(flat)
+        return cv2.cvtColor(out, cv2.COLOR_GRAY2RGB)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _apply_adaptive_gamma(array: Any, cache: Optional[_ColorSpaceCache] = None) -> Optional[Any]:
+    """Per-image auto gamma: choose gamma so the image mean maps to mid-gray. Adapts to each
+    frame's exposure (over/under-exposed boards) instead of a fixed gamma. Being monotonic, unlike
+    histogram equalization it cannot compress the board's local contrast.
+    """
+    if cv2 is None or np is None:
+        return None
+    try:
+        gray = cache.gray() if cache else cv2.cvtColor(array, cv2.COLOR_RGB2GRAY)
+        if gray is None:
+            return None
+        mean = min(max(float(np.mean(gray)) / 255.0, 0.02), 0.98)
+        gamma = min(max(math.log(0.5) / math.log(mean), 0.3), 3.0)
         inv_gamma = 1.0 / gamma
         table = np.array([(i / 255.0) ** inv_gamma * 255 for i in range(256)], dtype=np.uint8)
         return cv2.LUT(array, table)
@@ -730,9 +764,9 @@ def _apply_adaptive_binary(array: Any, cache: Optional[_ColorSpaceCache] = None)
 
 _ENHANCEMENT_PIPELINE = (
     ("clahe", _apply_clahe),
-    ("gray_equalize", _apply_gray_equalize),
-    ("contrast_stretch", _apply_contrast_stretch),
-    ("gamma_boost", _apply_gamma_boost),
+    ("local_norm", _apply_local_norm),
+    ("illum_flatten", _apply_illumination_flatten),
+    ("adaptive_gamma", _apply_adaptive_gamma),
     ("bilateral", _apply_bilateral),
     ("unsharp", _apply_unsharp_mask),
     ("visible_boost", _apply_visible_boost),

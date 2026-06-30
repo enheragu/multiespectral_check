@@ -1,14 +1,12 @@
 """High-level cache and calibration persistence helpers."""
 from __future__ import annotations
 
-import os
 import time
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
-from backend.services.handler_registry import get_handler_registry
 from backend.utils.cache import (CacheData, DatasetCache,
                                  deserialize_dataset_entry,
                                  ensure_dataset_entry, load_cache, save_cache,
@@ -38,94 +36,6 @@ def _is_collection(dataset_path: Path) -> bool:
         if (entry / "lwir").exists() and (entry / "visible").exists():
             return True
     return False
-
-
-def _distribute_collection_marks(dataset_path: Path, entry: DatasetCache) -> None:
-    """Distribute collection marks to child datasets based on base name prefixes.
-
-    Collection marks have prefixed bases like "child_name/base".
-    This extracts them and saves to the appropriate child's cache.
-
-    Marks are in unified format: {base: {reason: str, auto: bool}}
-    """
-    marks = entry.get("marks", {})
-
-    if not marks:
-        return
-
-    debug = os.environ.get("DEBUG_CACHE", "").lower() in {"1", "true", "on"}
-
-    # Group marks by child dataset (unified format: base -> {reason, auto})
-    child_marks: Dict[str, Dict[str, Dict[str, Any]]] = {}
-
-    # Process marks
-    for base, mark_entry in marks.items():
-        if "/" not in base:
-            continue  # Not a prefixed mark, skip
-        child_name, local_base = base.split("/", 1)
-        if child_name not in child_marks:
-            child_marks[child_name] = {}
-        child_marks[child_name][local_base] = mark_entry
-
-    # Save to each child's cache
-    for child_name in child_marks.keys():
-        child_path = dataset_path / child_name
-        if not child_path.exists():
-            if debug:
-                log_warning(f"Collection child path not found: {child_path}", "CACHE")
-            continue
-
-        child_cache_path = child_path / DATASET_CACHE_FILENAME
-        child_entry = load_dataset_cache_file(child_cache_path)
-
-        # Track if we actually make changes
-        has_changes = False
-
-        # Merge marks (unified format: base -> {reason, auto})
-        existing_marks = child_entry.get("marks", {})
-        if isinstance(existing_marks, dict):
-            existing_marks = dict(existing_marks)
-        else:
-            existing_marks = {}
-
-        marks_to_add = child_marks.get(child_name, {})
-        # Check if marks would actually add something new
-        for base, mark_entry in marks_to_add.items():
-            if base not in existing_marks or existing_marks[base] != mark_entry:
-                has_changes = True
-                break
-
-        if has_changes:
-            existing_marks.update(marks_to_add)
-            child_entry["marks"] = existing_marks
-
-        # Only save and notify if there were actual changes
-        if not has_changes:
-            if debug:
-                log_debug(f"Child {child_name}: no new marks to distribute (already has them)", "CACHE")
-            continue
-
-        # Update reason_counts
-        reason_counts: Dict[str, int] = {}
-        for base, mark_entry in existing_marks.items():
-            if not isinstance(mark_entry, dict):
-                continue
-            reason = mark_entry.get("reason", "")
-            if reason:
-                reason_counts[reason] = reason_counts.get(reason, 0) + 1
-
-        child_entry["reason_counts"] = reason_counts
-
-        # Save child cache
-        save_dataset_cache_file(child_cache_path, child_entry)
-
-        # Notify handler registry that child cache was updated
-        get_handler_registry().notify_cache_changed(child_path)
-
-        if debug:
-            mark_count = len(marks_to_add)
-            auto_count = sum(1 for m in marks_to_add.values() if isinstance(m, dict) and m.get("auto"))
-            log_info(f"Distributed to {child_name}: {mark_count} marks ({auto_count} auto)", "CACHE")
 
 
 @dataclass(frozen=True)

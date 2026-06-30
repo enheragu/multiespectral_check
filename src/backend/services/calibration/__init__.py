@@ -6,7 +6,6 @@ Exports background workers, mixins, and queue helpers used by the viewer to keep
 from .calibration_controller import CalibrationController
 from .calibration_debugger import CalibrationDebugger
 from .calibration_extrinsic_solver import CalibrationExtrinsicSample, CalibrationExtrinsicSolver
-from .calibration_mixin import CalibrationWorkflowMixin
 from .calibration_queue import DeferredCalibrationQueue
 from .calibration_solver import CalibrationSample, CalibrationSolver
 
@@ -17,6 +16,5 @@ __all__ = [
     "CalibrationExtrinsicSolver",
     "CalibrationSample",
     "CalibrationSolver",
-    "CalibrationWorkflowMixin",
     "DeferredCalibrationQueue",
 ]

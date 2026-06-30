@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal
 
 from backend.services.dataset_session import DatasetSession
+from common.log_utils import log_info
 from common.yaml_utils import load_yaml, save_yaml
 from config import get_config
 
@@ -32,6 +33,7 @@ class CalibrationSample:
 class _SolverTaskSignals(QObject):
     completed = pyqtSignal(dict)
     failed = pyqtSignal(str)
+    progress = pyqtSignal(str, str)  # (channel, live status message)
 
     def __init__(self) -> None:
         super().__init__()
@@ -69,6 +71,7 @@ class _CalibrationSolverTask(QRunnable):
         self._ensure_not_cancelled()
         if len(channel_samples) < 3:
             return None
+        channel = channel_samples[0].channel
         obj_points: List[Any] = []
         img_points: List[Any] = []
         view_ids: List[str] = []
@@ -117,6 +120,13 @@ class _CalibrationSolverTask(QRunnable):
                 None,
                 None,
             )
+            # Detailed line scrolls in the terminal (room for full info); the GUI bar gets a
+            # short label (it only has the progress-bar width).
+            log_info(
+                f"[calib {channel}] iter {iteration + 1}/{config.intrinsic_reject_max_iters} · "
+                f"{len(active)} views · RMS {retval:.3f}px"
+            )
+            self.signals.progress.emit(channel, f"i{iteration + 1} {retval:.2f}px")
             view_err: List[float] = []
             for pos, i in enumerate(active):
                 projected, _ = cv2.projectPoints(obj_points[i], rvecs[pos], tvecs[pos], camera_matrix, distortion)
@@ -126,11 +136,18 @@ class _CalibrationSolverTask(QRunnable):
             finite = [e for e in view_err if np.isfinite(e)]
             if not finite:
                 break
-            med = float(np.median(finite))
-            mad = float(np.median([abs(e - med) for e in finite]))
-            threshold = max(
-                med + config.intrinsic_reject_k_mad * 1.4826 * mad,
-                config.intrinsic_reject_floor_px,
+            # Ceiling-first: drop absolute-absurd views BEFORE the robust stats so gross outliers
+            # don't inflate median/MAD and loosen the band. This makes the descent more aggressive;
+            # the per-view floor still protects genuinely low-error views.
+            plausible = [e for e in finite if e <= config.intrinsic_reject_ceiling_px] or finite
+            med = float(np.median(plausible))
+            mad = float(np.median([abs(e - med) for e in plausible]))
+            threshold = min(
+                max(
+                    med + config.intrinsic_reject_k_mad * 1.4826 * mad,
+                    config.intrinsic_reject_floor_px,
+                ),
+                config.intrinsic_reject_ceiling_px,
             )
             keep = [i for i, e in zip(active, view_err) if e <= threshold]
             if (
@@ -302,6 +319,7 @@ class CalibrationSolver(QObject):
 
     calibrationSolved = pyqtSignal(dict)
     calibrationFailed = pyqtSignal(str)
+    calibrationProgress = pyqtSignal(str, str)  # (channel, live status message)
 
     def __init__(
         self,
@@ -333,6 +351,7 @@ class CalibrationSolver(QObject):
         task = _CalibrationSolverTask(dataset_path, self.pattern_size, sample_list)
         task.signals.completed.connect(self._handle_task_completed)
         task.signals.failed.connect(self._handle_task_failed)
+        task.signals.progress.connect(self.calibrationProgress)
         self._active_task = task
         if self.thread_pool is not None:
             self.thread_pool.start(task)

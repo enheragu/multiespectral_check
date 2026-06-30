@@ -62,12 +62,6 @@ class DatasetSession:
         self._archived_entries: Dict[str, Dict[str, Any]] = {}
         self._dirty_corners: Set[str] = set()  # Track which image bases have modified corners
         self._collection_save_logged = False  # Throttle repetitive collection save logs
-        self._sweep_flags: Dict[str, bool] = {
-            "missing": False,
-            "duplicates": False,
-            "quality": False,
-            "patterns": False,
-        }
 
     # ------------------------------------------------------------------
     # Dataset lifecycle
@@ -76,9 +70,15 @@ class DatasetSession:
         return self.cache_service.last_dataset()
 
     def reset_state(self) -> None:
+        # Full unload: after this the session holds no dataset/collection and has_images() is False.
+        self.loader = None
+        self.collection = None
+        self.dataset_path = None
+        self.loaded_kind = None
+        self.cache_service.set_active_dataset(None)
         self.state.reset()
         self._pixmap_cache_order.clear()
-        self.loaded_kind = None
+        self._archived_entries.clear()
 
     def load(self, dir_path: Path) -> bool:
         log_debug(f"DatasetSession.load() called: {dir_path}", "SESSION")
@@ -86,6 +86,7 @@ class DatasetSession:
         if not loader.load_dataset():
             log_warning("DatasetLoader.load_dataset() failed", "SESSION")
             self.loader = None
+            self.collection = None
             self.dataset_path = None
             self.loaded_kind = None
             self.cache_service.set_active_dataset(None)
@@ -94,6 +95,7 @@ class DatasetSession:
             self._archived_entries.clear()
             return False
         self.loader = loader
+        self.collection = None  # Loading a standalone dataset must clear any previously-loaded collection
         self.dataset_path = dir_path
         self.loaded_kind = "dataset"
         log_info(f"Dataset loaded successfully: {dir_path.name}, pairs={len(loader.image_bases)}", "SESSION")
@@ -106,11 +108,7 @@ class DatasetSession:
         self._hydrate_from_cache()
         self._load_calibration_files()  # Load calibration matrices from YAML files
         self._validate_bottom_up_consistency()
-        # Apply cached sweep flags to state
-        self.state.cache_data["sweep_flags"]["missing"] = self._sweep_flags.get("missing", False)
-        self.state.cache_data["sweep_flags"]["duplicates"] = self._sweep_flags.get("duplicates", False)
-        self.state.cache_data["sweep_flags"]["quality"] = self._sweep_flags.get("quality", False)
-        self.state.cache_data["sweep_flags"]["patterns"] = self._sweep_flags.get("patterns", False)
+        # Sweep flags were already restored into cache_data["sweep_flags"] by _hydrate_from_cache().
         self._filter_state_by_loader()
         self._auto_mark_missing_pairs()
         self.mark_cache_dirty()
@@ -913,27 +911,6 @@ class DatasetSession:
         """
         return self.prepare_display_pair(base, view_rectified=False)
 
-    def _get_cached_pixmap(self, base: str, channel: str) -> Optional[Optional[QPixmap]]:
-        entry = self.state.pixmap_cache.get(base)
-        if entry and channel in entry:
-            self._pixmap_cache_order.touch(f"{base}:{channel}")
-            return entry[channel]
-        return None
-
-    def _set_cached_pixmap(self, base: str, channel: str, pixmap: Optional[QPixmap]) -> None:
-        bucket = self.state.pixmap_cache.setdefault(base, {})
-        bucket[channel] = pixmap
-        key = f"{base}:{channel}"
-        evicted = self._pixmap_cache_order.touch(key)
-        for dropped in evicted:
-            if dropped and ":" in str(dropped):
-                b, ch = str(dropped).split(":", 1)
-                cached_bucket = self.state.pixmap_cache.get(b)
-                if cached_bucket:
-                    cached_bucket.pop(ch, None)
-                    if not cached_bucket:
-                        self.state.pixmap_cache.pop(b, None)
-
     def _clear_pixmap_cache(self) -> None:
         self.state.pixmap_cache.clear()
         self._pixmap_cache_order.clear()
@@ -1030,6 +1007,34 @@ class DatasetSession:
         auto_mark_count = sum(1 for entry in self.state.cache_data["marks"].values()
                               if isinstance(entry, dict) and entry.get("auto", False))
         log_debug(f"Hydrated cache: {len(self.state.cache_data['marks'])} marks ({auto_mark_count} auto), sweep_flags={self.state.cache_data['sweep_flags']['duplicates']}", "SESSION")
+
+    def clear_child_calibration_files(self) -> int:
+        """Remove per-child calibration files after a collection-level calibration.
+
+        A collection writes its solved calibration at the collection root; a child opened
+        standalone would otherwise silently load its own (now stale) matrices instead. Only acts
+        for collections — standalone datasets are never touched. Returns the number of files removed.
+        """
+        if not self.collection:
+            return 0
+        config = get_config()
+        names = (
+            config.calibration_intrinsic_filename,
+            config.calibration_extrinsic_filename,
+            config.calibration_errors_filename,
+        )
+        removed = 0
+        for child_dir in self.collection._child_dirs.values():
+            for name in names:
+                path = child_dir / name
+                try:
+                    if path.exists():
+                        path.unlink()
+                        removed += 1
+                        log_info(f"Removed stale child calibration: {child_dir.name}/{name}", "SESSION")
+                except OSError as exc:
+                    log_warning(f"Failed to remove stale child calibration {path}: {exc}", "SESSION")
+        return removed
 
     def _load_calibration_files(self) -> None:
         """Load calibration matrices and errors from YAML files.
@@ -1190,10 +1195,12 @@ class DatasetSession:
             if base not in valid_bases:
                 continue
 
-            # Restore mark reason
+            # Restore mark (unified format: {"reason": str, "auto": bool}).
+            # get_image_entry stores the mark dict under "mark_reason"; restore it verbatim
+            # (caller restore_from_trash rebuilds reason_counts afterwards).
             mark_reason = entry.get("mark_reason")
-            if mark_reason and isinstance(mark_reason, str):
-                self.state.cache_data["marks"][base] = mark_reason
+            if isinstance(mark_reason, dict) and mark_reason.get("reason"):
+                self.state.cache_data["marks"][base] = dict(mark_reason)
 
             # Ensure calibration entry exists for this base if restoring calibration_marked
             # Presence in dict = marked, so we only create entry if calibration_marked is true

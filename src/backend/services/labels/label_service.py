@@ -666,12 +666,9 @@ class LabelService:
                 break
 
         if target_ann is None:
-            # Fallback: try annotation_id as direct index
-            if annotation_id is not None and 0 <= annotation_id < len(labels.annotations):
-                target_ann = labels.annotations[annotation_id]
-                target_idx = annotation_id
-            else:
-                return False
+            # No annotation with this id. Do NOT fall back to using the id as a list index:
+            # ids are not positions, so that could silently edit a different box.
+            return False
 
         # Update class if provided
         if new_class_id is not None:

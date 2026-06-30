@@ -119,6 +119,9 @@ class WorkspaceConfigService:
         try:
             data = load_yaml(config_path)
             self._config = WorkspaceConfig.from_dict(data)
+            calib = self._config.calibration
+            calib.intrinsic_path = self._resolve_calib_path(calib.intrinsic_path)
+            calib.extrinsic_path = self._resolve_calib_path(calib.extrinsic_path)
             log_info(f"Loaded workspace config from {config_path.name}", "WORKSPACE_CFG")
         except Exception as e:
             log_warning(f"Failed to load workspace config: {e}", "WORKSPACE_CFG")
@@ -131,7 +134,12 @@ class WorkspaceConfigService:
             return False
 
         try:
-            save_yaml(config_path, self._config.to_dict(), sort_keys=False)
+            data = self._config.to_dict()
+            calib = data.get("calibration")
+            if isinstance(calib, dict):
+                calib["intrinsic_path"] = self._relativize_calib_path(self._config.calibration.intrinsic_path)
+                calib["extrinsic_path"] = self._relativize_calib_path(self._config.calibration.extrinsic_path)
+            save_yaml(config_path, data, sort_keys=False)
             log_info(f"Saved workspace config to {config_path.name}", "WORKSPACE_CFG")
             return True
         except Exception as e:
@@ -144,6 +152,30 @@ class WorkspaceConfigService:
         if self._config is None:
             self._load()
         return self._config or WorkspaceConfig()
+
+    def _resolve_calib_path(self, p: Optional[Path]) -> Optional[Path]:
+        """Resolve a stored calibration path (kept relative to the workspace root) to absolute."""
+        if p is None:
+            return None
+        if p.is_absolute():
+            return p
+        if self._workspace_path:
+            return self._workspace_path / p
+        return p
+
+    def _relativize_calib_path(self, p: Optional[Path]) -> Optional[str]:
+        """Store calibration paths relative to the workspace root so the default survives the whole
+        workspace being moved/remounted (e.g. an external drive whose mount point changes). Paths
+        outside the workspace root are kept absolute."""
+        if p is None:
+            return None
+        p = Path(p)
+        if self._workspace_path:
+            try:
+                return str(p.relative_to(self._workspace_path))
+            except ValueError:
+                pass
+        return str(p)
 
     def set_default_calibration(
         self,
@@ -182,6 +214,15 @@ class WorkspaceConfigService:
         calib = self.config.calibration
         if calib.is_valid():
             return calib
+        # Configured but broken (source dataset moved/renamed/deleted): surface it instead of
+        # silently ignoring the default the user explicitly set.
+        if calib.intrinsic_path is not None or calib.extrinsic_path is not None:
+            log_warning(
+                f"Workspace default calibration from '{calib.source_dataset or 'unknown'}' is set but its "
+                f"files are missing (intrinsic={calib.intrinsic_path}, extrinsic={calib.extrinsic_path}); "
+                "re-set it from a dataset that has calibration.",
+                "WORKSPACE_CFG",
+            )
         return None
 
     def get_calibration_for_dataset(self, dataset_path: Path) -> Optional[CalibrationConfig]:

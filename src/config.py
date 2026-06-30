@@ -10,7 +10,7 @@ from typing import Tuple
 
 
 APP_NAME = "Multispectral Dataset Viewer"
-APP_VERSION = "0.10.4"
+APP_VERSION = "0.11.0"
 APP_DESCRIPTION = "GUI for multispectral dataset review, calibration, and labelling."
 SUPPORT_EMAIL = "e.heredia@umh.es"
 REPO_URL = "https://github.com/enheragu/multiespectral_check"
@@ -109,6 +109,16 @@ class AppConfig:
     intrinsic_reject_k_mad: float = 2.5
     intrinsic_reject_floor_px: float = 0.5
     intrinsic_reject_min_views: int = 6
+    # Hard ceiling: a view whose reprojection error exceeds this is ALWAYS rejected, even if the
+    # robust (median + k*MAD) band would keep it. Catches absurd views when the whole distribution
+    # is poor (the relative MAD test misses them). Set high enough never to fire on a good fit.
+    intrinsic_reject_ceiling_px: float = 1.7
+    # Intrinsic precision (RMS) saturates around 30-50 views, while cv2.calibrateCamera
+    # cost is superlinear in view count (~30 views=2.3s, 100=26s, ~500≈1h). Cap the number
+    # of views fed to the solver to keep the same precision in a couple of minutes. The
+    # compute-calibration popup uses this as the default cap; view_selection.py picks the
+    # best N per channel before the solve.
+    intrinsic_max_views_default: int = 150
 
     # Extrinsic outlier rejection: iterative drop of pairs whose stereo reprojection
     # error is a robust (median + k*1.4826*MAD) outlier, refitting after each round.
@@ -116,6 +126,33 @@ class AppConfig:
     extrinsic_reject_k_mad: float = 2.5
     extrinsic_reject_floor_px: float = 0.5
     extrinsic_reject_min_pairs: int = 10
+    # Hard ceiling: a pair whose stereo reprojection error exceeds this is ALWAYS rejected (see
+    # intrinsic_reject_ceiling_px). For LWIR+visible a pair above this is typically motion-blurred
+    # (long LWIR exposure with a moving board); for good stereo it never fires.
+    extrinsic_reject_ceiling_px: float = 7.0
+    # Stereo view cap: cv2.stereoCalibrate is superlinear (~quadratic) in pair count, while the
+    # rigid transform saturates with far fewer good pairs. The compute-extrinsic popup uses this as
+    # the default cap; view_selection.py picks the best N pairs (direct corners + board-pose
+    # coverage) before the solve. Both-channel pairs are scarce, so the default is generous.
+    extrinsic_max_pairs_default: int = 200
+
+    # Blur/motion sweep auto-marking (Dataset -> Detect Delete Candidates -> blur/motion sweep).
+    # Thresholds are robust (median +/- k*1.4826*MAD) computed per channel over the whole dataset,
+    # so they adapt to each set's sharpness. These are heuristics meant to SUGGEST candidates for
+    # review, not a ground-truth blur gate -- auto-marks stay reviewable/undoable in the GUI.
+    # Skip auto-marking unless at least this many valid images were scanned (robust median/MAD
+    # need enough data; on tiny sets the stats are meaningless).
+    quality_sweep_min_samples: int = 12
+    # Blurry: laplacian variance below median - k*sigma, AND below a fraction of the median. The
+    # relative cap means we only flag a clear drop in sharpness, not the bottom of a uniformly-OK
+    # distribution. Lower rel_cap = stricter (fewer, more confident marks).
+    quality_blur_k_mad: float = 1.5
+    quality_blur_rel_cap: float = 0.6
+    # Motion: gradient-energy anisotropy above median + k*sigma, with an absolute floor. A scene
+    # with strong directional structure (horizon, road) is anisotropic without any motion, so a
+    # motion candidate must ALSO have at-or-below-median sharpness (true motion blur smears detail).
+    quality_motion_k_mad: float = 1.5
+    quality_motion_floor: float = 2.0
 
     # Cache files
     summary_cache_filename: str = ".summary_cache.yaml"

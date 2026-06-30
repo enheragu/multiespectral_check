@@ -200,7 +200,6 @@ Display options:
 - Show grid (Off / Thirds / Detailed 9×9)
 - Show labels (toggle)
 - Show image info overlay (toggle)
-- Corner display mode (Original / Subpixel / Both)
 
 **Display**:
 - Toggle fullscreen (F11)
@@ -221,10 +220,8 @@ Operations for images marked as calibration candidates:
 
 - **Auto search calibration candidates**: Scan the dataset for chessboard patterns
 - **Detect chessboards**: Run corner detection on all calibration candidates
-- **Refine chessboard corners**: Apply subpixel refinement for better accuracy
-- **Use Subpixel Corners**: Toggle whether calibration uses subpixel-refined corners
-- **Compute calibration matrices**: Solve LWIR and visible camera intrinsics
-- **Compute extrinsic transform**: Estimate stereo transform between cameras
+- **Compute calibration matrices**: Solve LWIR and visible camera intrinsics. A popup first lets you cap how many views per channel the solve uses (numeric input, default `intrinsic_max_views_default`) or tick **Use all** to disable the cap; views are picked by priority (direct corners, board-pose coverage)
+- **Compute extrinsic transform**: Estimate the stereo transform between cameras. Same popup caps the number of pairs used (default `extrinsic_max_pairs_default`, or **Use all**)
 - **Check calibration report**: Inspect matrices, reprojection errors, and export options
 - **Check calibration outliers**: Dialog with per-image reprojection errors. Automated outlier candidates highlighted in red. Checkboxes control which images participate in each calibration
 - **Export calibration debug overlays**: Export debug images with drawn corners and reprojection overlays
@@ -516,6 +513,7 @@ All long-running operations are non-blocking and execute in background threads t
 - Progress bar appears at bottom-right of window showing current operation
 - Cancel button next to progress bar allows stopping operations in progress
 - Status messages appear at bottom-left (e.g., "Save pending", "Saving cache...", "Sweep complete")
+- Calibration/stereo solves report each outlier-rejection round live — a short RMS/iteration label on the progress bar and a full line per round in the terminal log; intrinsic LWIR and Visible channels solve in parallel
 
 **Multi-level TQDM bars** (for workspace/dataset operations):
 - **Workspace level**: Operation title + dataset count (e.g., "Duplicate sweep: 5/24 datasets")

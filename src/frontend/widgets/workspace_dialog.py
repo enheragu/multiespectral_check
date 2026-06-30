@@ -5,6 +5,7 @@ import sys
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
 from pathlib import Path
 from threading import Lock
 from typing import Callable, Dict, List, Optional, Tuple
@@ -228,6 +229,8 @@ class _WorkspaceSweepWorker(QRunnable):
                         position=pos,
                         leave=False,
                         ncols=120,
+                        dynamic_miniters=False,
+                        mininterval=0.5,
                         bar_format='{desc} {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]'
                     )
 
@@ -1191,15 +1194,9 @@ class WorkspacePanel(QWidget):
         info = self._infos[self._selected_index]
         note = self.note_edit.toPlainText()
         save_dataset_note(info.path, note)
-        self._infos[self._selected_index] = WorkspaceDatasetInfo(
-            name=info.name,
-            path=info.path,
-            note=note,
-            is_collection=info.is_collection,
-            children=info.children,
-            parent=info.parent,
-            stats=info.stats,
-        )
+        # replace() preserves every other field (labels_total, stats, …); rebuilding the dataclass
+        # by hand silently dropped fields like labels_total to their defaults.
+        self._infos[self._selected_index] = replace(info, note=note)
         self._note_status("Workspace saved")
 
     def _note_status(self, text: str) -> None:

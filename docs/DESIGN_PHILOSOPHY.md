@@ -26,13 +26,14 @@ This documents the key decisions that make the codebase:
 ## 1. Architecture: Backend / Frontend / Common
 
 **Clear separation between business logic and GUI**:
-- **backend/**: Pure Python logic. NO UI widgets (QMessageBox, QDialog, etc). ONLY Qt threading (QObject, QRunnable, pyqtSignal).
+- **backend/**: Business logic. NO UI widgets (`QMessageBox`, `QDialog`, `QFileDialog`, `QMenu`) and NO imports from `frontend.*`. The backend↔frontend decoupling mechanism is **Qt signals** (`pyqtSignal`) plus threading (`QObject`, `QRunnable`, `QThreadPool`): backend emits, frontend connects.
 - **frontend/**: Qt-dependent UI. Widgets, dialogs, user interactions. Delegates logic to backend.
 - **common/**: Shared utilities and constants used by backend AND frontend:
   - `log_utils.py` - Centralized logging with timestamps
   - `dict_helpers.py` - Safe navigation of nested dicts
+  - `yaml_utils.py` - `load_yaml`/`save_yaml` and metadata field helpers
   - `timing.py` - Performance monitoring and decorators
-  - `reasons.py` - DELETE_REASONS constants
+  - `reasons.py` - `REASON_*` constants, `AUTO_REASONS`, `REASON_CHOICES`/`REASON_STYLES`/`REASON_SHORTCUTS`
 
 **Rule**: If both frontend AND backend use it → goes in `common/`. If only backend → `backend/utils/`.
 
@@ -44,13 +45,13 @@ This documents the key decisions that make the codebase:
 
 **Problem**: Distributed state caused inconsistencies, O(n) conversions on every access.
 
-**Solution**: `cache_data` dict is the only mutable source of truth:
+**Solution**: `cache_data` dict is the only mutable source of truth. The full schema is defined once in `viewer_state.py::_empty_cache_data()` (marks, reason_counts, calibration, reproj_errors, extrinsic_errors, overrides, archived, sweep_flags, plus runtime-only `_`-prefixed fields) — read it there, do not duplicate it:
 ```python
 cache_data = {
     "marks": {},           # Dict[str, Dict] - base → {reason: str, auto: bool}
     "overrides": set(),    # Set[str] in memory, List in YAML
     "calibration": {},     # Nested dict with results, outliers, etc.
-    "_detection_bins": {}  # Runtime-only (not persisted)
+    # ... see viewer_state.py::_empty_cache_data() for the full set
 }
 ```
 
@@ -69,7 +70,7 @@ marks:
 **Rules**:
 - Properties are **read-only views** computed from cache_data
 - To modify: access `cache_data` directly, NEVER through properties
-- **Set↔List conversion ONLY in cache.py**: `_normalize_dataset_entry()` (List→Set on load) and `serialize_dataset_entry()` (Set→List on save)
+- **Set↔List conversion ONLY in `backend/utils/cache.py`**: `_normalize_dataset_entry()` (List→Set on load) and `serialize_dataset_entry()` (Set→List on save)
 - mypy detects violations (property mutations generate errors)
 
 ---
@@ -91,7 +92,7 @@ marks:
 - ✅ Unified view, coordinates sweeps
 - ❌ Does NOT modify child data directly
 
-**Implementation**: See `backend/services/collection.py` (~656 lines) which encapsulates all aggregation/distribution logic.
+**Implementation**: See `backend/services/collection.py` which encapsulates all aggregation/distribution logic.
 
 **Key rule**: Delegate to the lowest level where the information lives. Workspace coordinates but does NOT execute; Dataset executes and stores.
 
@@ -104,7 +105,7 @@ marks:
 **Atomicity**:
 ```python
 # ✅ Atomic operation: mark, update counters, save
-def mark_image(self, base: str, reason: str, auto: bool = False) -> None:
+def set_mark_reason(self, base: str, reason: Optional[str], manual_reason: str, *, auto: bool = False) -> bool:
     self.cache_data["marks"][base] = {"reason": reason, "auto": auto}
     self.rebuild_reason_counts()
     self.mark_cache_dirty()
@@ -145,6 +146,8 @@ dataset.mark_sweep_done('duplicates')
 **✅ Useful properties**: Derived calculations, complex aggregations.
 **❌ NO**: Getters/setters that only do `return self.x` or `self.x = value`.
 
+**Exception**: read-only properties that expose a `cache_data` slice (Principle 2) are sanctioned even when trivial — they are the typed, read-only access surface over the single source of truth.
+
 **Rule**: If the function doesn't validate, doesn't transform, and doesn't encapsulate logic → it's probably unnecessary.
 
 We aim to keep code from growing too large in any single file, encapsulating functionality into new objects/files when appropriate. We also avoid having too many files — find a middle ground.
@@ -173,13 +176,13 @@ CHESSBOARD_SIZE = config.chessboard_size  # Unnecessary
 **Examples in config.py**:
 ```python
 @dataclass
-class Config:
-    default_dataset_dir: Path = Path.home() / "datasets"
+class AppConfig:  # authoritative field list lives in src/config.py::AppConfig
+    default_dataset_dir: Path = Path("")
     chessboard_size: Tuple[int, int] = (7, 7)
     calibration_intrinsic_filename: str = "calibration_intrinsic.yaml"
     calibration_extrinsic_filename: str = "calibration_extrinsic.yaml"
     overlay_cache_limit: int = 24
-    signature_scan_timer_interval_ms: int = 100
+    signature_scan_timer_interval_ms: int = 20
 
     # Progress task IDs (for consistent tracking)
     progress_task_detection: str = "calibration-detect"
@@ -225,7 +228,7 @@ def process_data(obj: Optional[Foo]) -> Result:
 **Conversion at boundaries**:
 - Memory: Set[str] (efficiency in lookups)
 - YAML: List[str] (serializable)
-- Conversion ONLY in `cache.py`: `_normalize_dataset_entry()` (load) and `serialize_dataset_entry()` (save)
+- Conversion ONLY in `backend/utils/cache.py`: `_normalize_dataset_entry()` (load) and `serialize_dataset_entry()` (save)
 
 ---
 
@@ -245,17 +248,17 @@ def process_data(obj: Optional[Foo]) -> Result:
 ## 10. Thread Safety & Concurrency
 
 **Locks**:
-- `_CACHE_WRITE_LOCK`: Serializa escrituras a disco
-- `WorkspaceCacheCoordinator._lock`: Protege dirty_datasets
-- `progress_lock`: Contadores compartidos en sweeps
+- `_CACHE_WRITE_LOCK` (`cache_writer.py`): serializes disk writes
+- `WorkspaceCacheCoordinator._lock`: protects the dirty_datasets set
+- `progress_lock`: shared counters during sweeps
 
 **Patterns**:
-- ThreadPoolExecutor por tipo de tarea (calibration, scan, sweep)
-- `max_workers` basado en CPU cores y tipo de operación (I/O vs CPU-bound)
-- DatasetSession: instancia por thread, NO compartir
-- `as_completed()` para procesar resultados conforme llegan
+- ThreadPoolExecutor per task type (calibration, scan, sweep)
+- `max_workers` sized by CPU cores and operation type (I/O vs CPU-bound)
+- DatasetSession: one instance per thread, NEVER shared
+- `as_completed()` to process results as they arrive
 
-**Progress Tracking**: 3 niveles tqdm (workspace → collection → operation) con posiciones fijas para evitar overlap
+**Progress Tracking**: 3 tqdm levels (workspace → collection → operation) with fixed positions to avoid overlap
 
 ---
 
@@ -332,5 +335,8 @@ def reason_counts(self) -> Dict[str, int]:
 | Scan workspace | `workspace_inspector.py` | backend/services | `scan_workspace()` |
 | Parallel tasks | `thread_pool_manager.py` | backend/services | `get_thread_pool_manager()` |
 | Cache write | `cache_writer.py` | backend/services | `write_cache_payload()` |
+| Set↔List conversion | `cache.py` | **backend/utils/** | `_normalize_dataset_entry()`, `serialize_dataset_entry()` |
+| YAML load/save | `yaml_utils.py` | **common/** | `load_yaml()`, `save_yaml()`, `get_metadata_fields()` |
+| Handler registry | `handler_registry.py` | backend/services | `get_handler_registry()` |
 | Delete reasons | `reasons.py` | **common/** | `REASON_*` constants |
 ---
